@@ -51,10 +51,10 @@ class StochOccupancyGrid2D(object):
         else:
             return True
 
-    def dist_to_wall_left(self, x, travel_dir):
+    def dist_to_wall_left(self, x, travel_dir, dist_thresh=15.0):
         return self.dist_to_wall_right(x, [-travel_dir[0], -travel_dir[1]])
-    
-    def dist_to_wall_right(self, x, travel_dir):
+
+    def dist_to_wall_right(self, x, travel_dir, dist_thresh=15.0):
         """
         Return distance (meters) from world position x=(x,y) to the first occupied cell
         found to the right of the travel_dir. If no wall is found inside the map bounds,
@@ -88,8 +88,8 @@ class StochOccupancyGrid2D(object):
         if t_max <= 0:
             # ray immediately points out of bounds — no wall reachable to the right inside the map
             return 100
-        if t_max > 15:
-            t_max = 15
+        if t_max > dist_thresh:
+            t_max = dist_thresh
 
         # sample along ray
         n_steps = int(np.ceil(t_max / step))
@@ -121,6 +121,10 @@ class StochOccupancyGrid2D(object):
     def plot_path(self, path):
         xs, ys = zip(*path)
         plt.plot(xs, ys, color='red', linewidth=1, marker=',', zorder=5)
+
+    def plot_smoothed_path(self, path):
+        xs, ys = zip(*path)
+        plt.plot(xs, ys, color='green', linewidth=1, marker=',', zorder=6)
     
     def plot_grid_and_path(self, path):
         self.plot_grid()

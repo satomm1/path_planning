@@ -1,24 +1,28 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.interpolate import CubicSpline
 import time
 from queue import PriorityQueue
 
 class AStar(object):
     """Represents a motion planning problem to be solved using A*"""
 
-    def __init__(self, statespace_lo, statespace_hi, x_init, x_goal, occupancy, resolution=1):
+    def __init__(self, statespace_lo, statespace_hi, x_init, x_goal, occupancy, resolution=1, robot_d=0.4):
         self.statespace_lo = np.array(statespace_lo)  # state space lower bound (e.g., [-5, -5])
         self.statespace_hi = np.array(statespace_hi)  # state space upper bound (e.g., [5, 5])
         self.occupancy = occupancy  # occupancy grid (a DetOccupancyGrid2D object)
         self.resolution = resolution  # resolution of the discretization of state space (cell/m)
         self.x_init = self.snap_to_grid(x_init)  # initial state
         self.x_goal = self.snap_to_grid(x_goal)  # goal state
+        self.robot_d = robot_d  # robot diameter (m)
 
         self.closed_set = set()  # the set containing the states that have been visited
         self.open_set = set()  # the set containing the states that are condidate for future expension
         self.came_from = {}  # dictionary keeping track of each state's parent to reconstruct the path
         self.est_cost_through = {}
         self.cost_to_arrive = {}
+        self.dist_to_right = {}
+        self.dist_to_right[self.x_init] = 0
 
         self.priority_queue = PriorityQueue()
         self.priority_queue.put((self.manhattan_distance(self.x_init, self.x_goal), self.x_init))
@@ -28,6 +32,7 @@ class AStar(object):
         self.est_cost_through[self.x_init] = self.manhattan_distance(self.x_init, self.x_goal)
 
         self.path = None  # the final path as a list of states
+        self.smoothed_path = None
         self.pp_plan = None  # the post-processed plan
 
     def is_free(self, x):
@@ -69,10 +74,11 @@ class AStar(object):
     def h(self, x):
         return self.manhattan_distance(x, self.x_goal)
 
-    def cost(self, x1, x2):
-        return self.distance(x1, x2) + self.rightness_penalty(x1, x2)
+    def cost(self, x1, x2, dist2right_prev=0):
+        social_cost, dist2right = self.rightness_penalty(x1, x2, dist2right_prev)
+        return self.distance(x1, x2) + social_cost, dist2right
 
-    def rightness_penalty(self, x1, x2):
+    def rightness_penalty(self, x1, x2, dist2right_prev=0):
         """
         Computes the heuristic distance between two states.
         Inputs:
@@ -83,27 +89,44 @@ class AStar(object):
         """
         if self.distance(x2, self.x_goal) < 5:
             # Don't penalize when near goal, may need to take non-social behavior to be able to get to goal
-            return 0
+            return 0, 0
         elif self.distance(x2, self.x_init) < 5:
             # Don't penalize when near start, may need to take non-social behavior to be able to get to socially compliant path later
-            return 0
+            return 0, 0
+
+        penalty = 0
 
         travel_dir = (np.array(x2) - np.array(x1)) / np.linalg.norm(np.array(x2) - np.array(x1))
         dist_to_right = self.occupancy.dist_to_wall_right(x2, travel_dir)
 
-        if dist_to_right > 10:
+        if dist_to_right > 15:
+            penalty += self.resolution
             # Get distance to left
             dist_to_left = self.occupancy.dist_to_wall_left(x2, travel_dir)
 
-            # If far from right side, we should just penalize being close to left side (and we also want to penalize
-            # moving closer to the left side)
-            penalty =  max(0, (4 - dist_to_left))
+            if dist_to_left > 4:
+                dist_to_left_prev = self.occupancy.dist_to_wall_left(x1, travel_dir)
+                delta_dist_to_left = dist_to_left - dist_to_left_prev
+                #
+                # To account for when you just enter an intersection and the distance to left wall jumps up dramatically
+                if delta_dist_to_left < 0 or delta_dist_to_left > 10:
+                    delta_dist_to_left = 0
+                penalty += 5*delta_dist_to_left
+            else:
+                # If far from right side, we should just penalize being close to left side (and we also want to penalize
+                # moving closer to the left side)
+                penalty =  max(0, (4 - dist_to_left))
         else:
-            dist_to_right_prev = self.occupancy.dist_to_wall_right(x1, travel_dir)
+            dist_to_right_prev = dist2right_prev # self.occupancy.dist_to_wall_right(x1, travel_dir)
             delta_dist_to_right = dist_to_right - dist_to_right_prev
 
-            penalty = max(0, dist_to_right + 5 * delta_dist_to_right - 0.2)
-        return penalty
+            # To account for when you just enter an intersection and the distance to right wall jumps up dramatically
+            # Also, don't penalize getting closer to right wall
+            if delta_dist_to_right > 15 or delta_dist_to_right < 0:
+                delta_dist_to_right = 0
+
+            penalty = max(0, 1*(dist_to_right - self.robot_d/2) + 2*delta_dist_to_right)
+        return penalty, dist_to_right
 
     def leftness_penalty(self, x1, x2):
         travel_dir = (np.array(x2) - np.array(x1)) / np.linalg.norm(np.array(x2) - np.array(x1))
@@ -164,7 +187,7 @@ class AStar(object):
 
         return list(reversed(path))
 
-    def solve_dep(self, plot=False):
+    def solve_deprecated(self, plot=False):
         """
         Solves the planning problem using the A* search algorithm. It places
         the solution as a list of tuples (each representing a state) that go
@@ -229,12 +252,13 @@ class AStar(object):
             current_cost, x_current = self.priority_queue.get()
 
             if x_current == self.x_goal:
-                self.path = self.reconstruct_path()
                 t_end = time.time()
+                self.path = self.reconstruct_path()
+                self.smooth_path()
                 print(f"A* found a path in {t_end - t_start:.2f} seconds.")
                 return True
 
-            if time.time() - t_start > 30:
+            if time.time() - t_start > 150:
                 print("A* took too long.")
                 return False
 
@@ -246,8 +270,13 @@ class AStar(object):
 
                 # cost_x_x_neigh = self.cost(x_current, x_neigh)
                 tentative_cost_to_arrive = self.cost_to_arrive[x_current] + self.distance(x_current, x_neigh)
+                if x_current == self.x_init:
+                    dist2right_prev = 0
+                else:
+                    dist2right_prev = self.dist_to_right[self.came_from[x_current]]
                 if x_neigh not in self.cost_to_arrive or tentative_cost_to_arrive < self.cost_to_arrive[x_neigh]:
-                    cost_x_x_neigh = self.cost(x_current, x_neigh)
+                    cost_x_x_neigh, dist2right = self.cost(x_current, x_neigh, dist2right_prev)
+                    self.dist_to_right[x_neigh] = dist2right
                     self.came_from[x_neigh] = x_current
                     self.cost_to_arrive[x_neigh] = tentative_cost_to_arrive
                     self.priority_queue.put(
@@ -339,4 +368,17 @@ class AStar(object):
                 self.pp_path.append((new_point[0], new_point[1]))
             else:
                 self.pp_path.append(self.path[ii+1])
-        return 
+        return
+
+    def smooth_path(self):
+        """
+        Function for smoothing the planned path by interpolating between points using a spline
+        """
+        path = np.array(self.path)
+        t = np.linspace(0, 1, len(path))
+        cs_x = CubicSpline(t, path[:, 0])
+        cs_y = CubicSpline(t, path[:, 1])
+        t_new = np.linspace(0, 1, num=5*len(path))
+        smoothed_path = [(cs_x(ti), cs_y(ti)) for ti in t_new]
+        self.smoothed_path = smoothed_path
+        return
