@@ -22,13 +22,13 @@ class StochOccupancyGrid2D(object):
         
 
     def snap_to_grid(self, x):
-        return (self.resolution*round(x[0]/self.resolution), self.resolution*round(x[1]/self.resolution))
+        return self.resolution * round(x[0] / self.resolution), self.resolution * round(x[1] / self.resolution)
 
     def snap_to_grid1(self, x):
-        return (self.resolution * np.round(x[0] / self.resolution), self.resolution * np.round(x[1] / self.resolution))
+        return self.resolution * np.round(x[0] / self.resolution), self.resolution * np.round(x[1] / self.resolution)
 
     def get_index(self, x):
-        return (np.round((x[0]-self.origin_x)/self.resolution), np.round((x[1]-self.origin_y)/self.resolution))
+        return np.round((x[0] - self.origin_x) / self.resolution), np.round((x[1] - self.origin_y) / self.resolution)
 
     def is_free(self, state):
         # combine the probabilities of each cell by assuming independence
