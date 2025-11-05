@@ -198,10 +198,10 @@ if __name__ == "__main__":
     occ_grid = StochOccupancyGrid2D(map_resolution, round(map_size[0]/map_resolution), round(map_size[1]/map_resolution), 0, 0, 10, occ.T)
 
     heatmap = HeatMap2DVector(occ_grid)
-    heatmap.load_heatmap("vector")
+    heatmap.load_heatmap("vector_incomplete")
 
     # Simulate adding paths
-    for _ in range(1):
+    for _ in range(10):
         x_init = generate_random_free_point(occ_grid)
         x_goal = generate_random_free_point(occ_grid)
 
@@ -211,4 +211,4 @@ if __name__ == "__main__":
 
     heatmap.plot_heatmap()
     # heatmap.plot_heatmap_no_vectors()
-    heatmap.save_heatmap("vector")
+    heatmap.save_heatmap("vector_incomplete")

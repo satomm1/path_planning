@@ -3,14 +3,18 @@ import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
 import time
 from queue import PriorityQueue
+import networkx as nx
+
+from occupancy_grid import StochOccupancyGrid2D
+from utils import *
 
 class AStar(object):
     """Represents a motion planning problem to be solved using A*"""
 
-    def __init__(self, statespace_lo, statespace_hi, x_init, x_goal, occupancy, resolution=1, robot_d=0.4):
+    def __init__(self, statespace_lo, statespace_hi, x_init, x_goal, occupancy: StochOccupancyGrid2D, resolution=1, robot_d=0.4):
         self.statespace_lo = np.array(statespace_lo)  # state space lower bound (e.g., [-5, -5])
         self.statespace_hi = np.array(statespace_hi)  # state space upper bound (e.g., [5, 5])
-        self.occupancy = occupancy  # occupancy grid (a DetOccupancyGrid2D object)
+        self.occupancy = occupancy  # occupancy grid (a StochOccupancyGrid2D object)
         self.resolution = resolution  # resolution of the discretization of state space (cell/m)
         self.x_init = self.snap_to_grid(x_init)  # initial state
         self.x_goal = self.snap_to_grid(x_goal)  # goal state
@@ -141,6 +145,9 @@ class AStar(object):
             A tuple that represents the closest point to x on the discrete state grid
         """
         return (self.resolution * round(x[0] / self.resolution), self.resolution * round(x[1] / self.resolution))
+
+    def get_index(self, x):
+        return int(np.round((x[0] - self.occupancy.origin_x) / self.resolution)), int(np.round((x[1] - self.occupancy.origin_y) / self.resolution))
 
     def get_neighbors(self, x, step_resolution=1):
         """
@@ -382,3 +389,45 @@ class AStar(object):
         smoothed_path = [(cs_x(ti), cs_y(ti)) for ti in t_new]
         self.smoothed_path = smoothed_path
         return
+
+class AStar_With_Graph(AStar):
+    def __init__(self, statespace_lo, statespace_hi, x_init, x_goal, occupancy, graph: nx.DiGraph, resolution=1, robot_d=0.4):
+        super().__init__(statespace_lo, statespace_hi, x_init, x_goal, occupancy, resolution, robot_d)
+        self.graph = graph
+
+    def cost(self, x1, x2, dist2right_prev=0):
+        """
+        This modified cost function penalizes depending on whether x1->x2 is in
+        self.graph or not. If in the graph, the cost is the nominal distance.
+        If not in the graph, we follow the usual rightness_penalty function to
+        compute a social cost.
+        """
+        x1x, x1y = self.get_index(x1)
+        x2x, x2y = self.get_index(x2)
+        if self.graph.has_edge((x1x, x1y), (x2x, x2y)):
+            return self.graph[(x1x, x1y)][(x2x, x2y)]['weight'], 0
+        else:
+            social_cost, dist2right = self.rightness_penalty(x1, x2, dist2right_prev)
+            return self.distance(x1, x2) + social_cost + 0.01, dist2right
+
+        # social_cost, dist2right = self.rightness_penalty(x1, x2, dist2right_prev)
+        # return self.distance(x1, x2) + social_cost + 0.01, dist2right
+
+    def show_path_on_graph(self):
+        """
+        Displays the planned path. Path nodes that are in the graph are shown in purple,
+        while those not in the graph are shown in red.
+        """
+        self.occupancy.plot_grid()
+        for ii in range(len(self.path)-1):
+            x1 = self.path[ii]
+            x2 = self.path[ii+1]
+            x1x, x1y = self.get_index(x1)
+            x2x, x2y = self.get_index(x2)
+            if self.graph.has_edge((x1x, x1y), (x2x, x2y)):
+                plt.plot([x1[0], x2[0]], [x1[1], x2[1]], color='purple', linewidth=1)
+            else:
+                plt.plot([x1[0], x2[0]], [x1[1], x2[1]], color='red', linewidth=1)
+        plt.scatter(self.x_init[0], self.x_init[1], c='green', s=100, label='Start', zorder=5)
+        plt.scatter(self.x_goal[0], self.x_goal[1], c='gold', marker="*", s=100, label='Goal', zorder=5)
+        plt.show()
