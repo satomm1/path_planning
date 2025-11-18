@@ -37,7 +37,7 @@ class FrequentSubgraph:
         for x in range(self.occ_grid.width):
             for y in range(self.occ_grid.height):
                 for dir_idx, (dx, dy) in enumerate(directions):
-                    if total_heatmap[x,y] >= threshold and self.heat_map[x,y,dir_idx] >= 1:
+                    if self.heat_map[x, y, dir_idx] >= threshold:
                         from_node = (x, y)
                         to_node = (x + dx, y + dy)
 
@@ -86,8 +86,6 @@ if __name__ == "__main__":
 
     print("Number of nodes in the graph:", frequent_graph.graph.number_of_nodes())
     print("Number of edges in the graph:", frequent_graph.graph.number_of_edges())
-
-    # frequent_graph.visualize_graph()
 
     x_init = snap_to_grid([50, 3], map_resolution)
     x_goal = snap_to_grid([90, 97], map_resolution)
