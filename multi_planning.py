@@ -1,5 +1,6 @@
 import cvxpy as cp
-import numpy as np
+import pickle
+import matplotlib.animation as animation
 
 from occupancy_grid import StochOccupancyGrid2D
 from a_star import AStar
@@ -15,9 +16,23 @@ DELTA = 1  # Safety margin in seconds
 
 class MultiAgentPlanner:
 
-    def __init__(self, occupancy_grid: StochOccupancyGrid2D, other_agent_paths, other_agent_times, path=None):
+    def __init__(self, occupancy_grid: StochOccupancyGrid2D):
         """
         Initialize the multi-agent planner.
+
+        Args:
+            occupancy_grid (StochOccupancyGrid2D): The occupancy grid of the environment.
+        """
+        self.occupancy_grid = occupancy_grid
+        
+    def plan(self):
+        raise NotImplementedError("This method should be implemented by subclasses.")
+
+class MultiAgentSequentialPlanner(MultiAgentPlanner):
+
+    def __init__(self, occupancy_grid: StochOccupancyGrid2D, other_agent_paths, other_agent_times, path=None):
+        """
+        Initialize the Sequential multi-agent planner.
 
         Args:
             occupancy_grid (StochOccupancyGrid2D): The occupancy grid of the environment.
@@ -25,45 +40,23 @@ class MultiAgentPlanner:
             other_agent_times (list of list of floats): Time steps corresponding to other agent paths.
             path (list of tuples, optional): The path for the agent to follow. Defaults to None.
         """
-        
-        self.occupancy_grid = occupancy_grid
-        self.other_agent_paths = other_agent_paths
-        self.other_agent_times = other_agent_times
+        super().__init__(occupancy_grid)
 
-        self.path = path
-
-        self.time_steps = None
-        self.collision_set = []
+        self.path = path  # Ego path
+        self.other_agent_paths = other_agent_paths  # List of other agent paths
+        self.other_agent_times = other_agent_times  # List of other agent arrival times
 
     def assign_path(self, path):
+        """
+        Assign the ego path for the planner.
+        """
         self.path = path
-
-    def find_collision_points(self):
-        """
-        Identify potential collision points with other agents along the assigned path.
-        Adds the corresponding (i,j) indices for alpha variables to self.collision_set.
-        """
-        self.collision_set = []
-        all_collision_indices = dict()
-        index = 0
-        for other_path, other_times in zip(self.other_agent_paths, self.other_agent_times):
-            collision_indices = set()
-            for i, waypoint in enumerate(self.path):
-                for j, other_waypoint in enumerate(other_path):
-                    if np.linalg.norm(np.array(waypoint) - np.array(other_waypoint)) <= ROBOT_DIAMETER:
-                        collision_indices.add((j, i))
-                        time_at_collision = other_times[j]
-                        # Find the closest time step index
-                        time_index = np.argmin(np.abs(self.time_steps - time_at_collision))
-                        self.collision_set.append((i, time_index))
-            all_collision_indices[index] = collision_indices
-            index += 1
 
     def find_collision_intervals(self):
         """
         Identify potential collision intervals with other agents along the assigned path.
         returns a list of tuples indicating the (i, start_time, end_time) for collision intervals.
-        
+
         i = index along self.path
         """
         collision_intervals = []
@@ -78,19 +71,19 @@ class MultiAgentPlanner:
                     end_time = max(collision_times)
                     collision_intervals.append((i, start_time, end_time))
         return collision_intervals
-        
+
     def plan(self):
         if self.path is None:
             raise ValueError("Path not assigned. Please assign a path before planning.")
-        
-        t = cp.Variable(len(self.path))
+
+        t = cp.Variable(len(self.path))  # CP variable for time to reach each waypoint
         constraints = []
         constraints += [t[0] == 0]  # Start at time 0
 
         # Max velocity constraints (also enforces t_i+1 >= t_i)
         for i in range(len(self.path) - 1):
-            delta_pos = np.linalg.norm(np.array(self.path[i+1]) - np.array(self.path[i]))
-            constraints += [t[i+1] - t[i] >= delta_pos / MAX_VELOCITY]  
+            delta_pos = np.linalg.norm(np.array(self.path[i + 1]) - np.array(self.path[i]))
+            constraints += [t[i + 1] - t[i] >= delta_pos / MAX_VELOCITY]
 
         # Collision Avoiding Constraints using Big-M method
         collision_intervals = self.find_collision_intervals()
@@ -108,55 +101,214 @@ class MultiAgentPlanner:
         optimized_times = t.value.tolist()
         return optimized_times
 
+class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
 
-    def plan1(self):
-        if self.path is None:
-            raise ValueError("Path not assigned. Please assign a path before planning.")
-        
-        # Discretize time steps based on other agent times and nominal velocity
-        diag_distance = np.linalg.norm(np.array([self.occupancy_grid.resolution, self.occupancy_grid.resolution]))
-        max_time = max([max(times) for times in self.other_agent_times]) + np.ceil(len(self.path) * diag_distance * (1 / NOMINAL_VELOCITY))
-        self.time_steps = np.arange(0, max_time, TIME_STEP)
-        
-        # Generate the optimization variables
-        alpha = cp.Variable((len(self.path), len(self.time_steps)))
-        constraints = [alpha >= 0]  # Non-negativity constraints
-        constraints += [cp.sum(alpha, axis=1) == 1]  # Convex combination constraints
-        
-        # Add collision avoiding constraints
-        self.find_collision_points()
-        for (i, j) in self.collision_set:
-            constraints += [alpha[i, j] == 0]
+    def __init__(self, occupancy_grid: StochOccupancyGrid2D, paths=None, norm=1):
+        """
+        Initialize the Simultaneous multi-agent planner.
 
-        # Each t_i+1 >= t_i
-        for i in range(len(self.path) - 1):
-            constraints += [cp.sum(cp.multiply(alpha[i+1, :], self.time_steps)) >= 
-                            cp.sum(cp.multiply(alpha[i, :], self.time_steps))]
-        
-        # Max Velocity constraints
-        for i in range(len(self.path) - 1):
-            delta_pos = np.linalg.norm(np.array(self.path[i+1]) - np.array(self.path[i]))
-            time_i = cp.sum(cp.multiply(alpha[i, :], self.time_steps))
-            time_next = cp.sum(cp.multiply(alpha[i+1, :], self.time_steps))
-            constraints += [delta_pos <= MAX_VELOCITY * (time_next - time_i)]
+        Args:
+            occupancy_grid (StochOccupancyGrid2D): The occupancy grid of the environment.
+            paths (list of list of tuples, optional): Paths for all agents. Defaults to None.
+        """
+        super().__init__(occupancy_grid)
+        self.paths = paths  # List of paths for all agents
+        self.norm = norm  # Norm to minimize (1, 2, or inf)
 
-        # Make sure each time step is used at least once
-        for j in range(len(self.time_steps)):
-            constraints += [cp.sum(alpha[:, j]) >= 0.0001]
+    def assign_path(self, paths):
+        """
+        Assign the paths for all agents.
 
-        # Objective: Minimize time to reach final point
-        objective = cp.Minimize(cp.sum(cp.multiply(alpha[-1, :], self.time_steps)))
+        Args:
+            paths (list of list of tuples): Paths for all agents.
+        """
+        self.paths = paths
+
+    def find_collision_pairs(self):
+        """
+        Identify potential collision pairs between agents along their paths.
+        returns a list of tuples indicating the (agent1_idx, agent2_idx, agent1_path_idx, agent2_path_idx1, agent2_path_idx2) for collision pairs.
+
+        agent1_idx = index of first agent
+        agent2_idx = index of second agent
+        agent1_path_idx = index along agent1's path
+        agent2_path_idx1 = earliest index along agent2's path that collides
+        agent2_path_idx2 = latest index along agent2's path that collides
+        """
+
+        # TODO: if consecutive points are identical, we can use only a single z variable for that segment
+        collision_pairs = []
+        num_agents = len(self.paths)
+        for a1 in range(num_agents):
+            for a2 in range(a1 + 1, num_agents):
+                path1 = self.paths[a1]
+                path2 = self.paths[a2]
+                for i, waypoint1 in enumerate(path1):
+                    collision_indices = []
+                    for j, waypoint2 in enumerate(path2):
+                        if np.linalg.norm(np.array(waypoint1) - np.array(waypoint2)) <= ROBOT_DIAMETER:
+                            collision_indices.append(j)
+                    if collision_indices:
+                        collision_pairs.append((a1, a2, i, min(collision_indices), max(collision_indices)))
+        return collision_pairs
+
+    def plan(self):
+        if self.paths is None:
+            raise ValueError("Paths not assigned. Please assign paths before planning.")
+
+        # Create CP variables for each agent's time to reach each waypoint
+        agent_times = [cp.Variable(len(path)) for path in self.paths]
+        constraints = []
+        for agent_time in agent_times:
+            constraints += [agent_time[0] == 0]  # All agents start at same time (t=0)
+
+        # Max velocity constraints (also enforces t_i+1 >= t_i)
+        for agent_idx, path in enumerate(self.paths):
+            for i in range(len(path) - 1):
+                delta_pos = np.linalg.norm(np.array(path[i + 1]) - np.array(path[i]))
+                if agent_idx == 0:
+                    constraints += [agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / MAX_VELOCITY]
+                else:
+                    constraints += [
+                        agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / (MAX_VELOCITY/1.1)]
+        # Collision Avoiding Constraints using Big-M method
+        collision_pairs = self.find_collision_pairs()  # Get all the collision pairs
+        z = cp.Variable(len(collision_pairs), boolean=True)
+        z_index = 0
+        for (a1, a2, i, j1, j2) in collision_pairs:
+            constraints += [agent_times[a1][i] <= agent_times[a2][j1] - DELTA + M * z[z_index]]
+            constraints += [agent_times[a1][i] >= agent_times[a2][j2] + DELTA - M * (1 - z[z_index])]
+            z_index += 1
+
+        final_time_vars = cp.hstack([agent_time[-1] for agent_time in agent_times])
+        objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
         prob = cp.Problem(objective, constraints)
-
         print("Starting to solve multi-agent planning problem...")
-        # Solve the problem
-        prob.solve(verbose=True, solver=cp.CLARABEL)
-
-        # Extract the optimized time steps for the path
-        optimized_times = [cp.sum(cp.multiply(alpha[i, :], self.time_steps)).value for i in range(len(self.path))]
+        prob.solve(verbose=True)
+        optimized_times = [agent_time.value.tolist() for agent_time in agent_times]
         return optimized_times
 
-    
+def get_position_at_time(t, path, time_points):
+    """
+    Returns (x, y) at time t using linear interpolation.
+    If t is outside the range of time_points, it returns the start or end pos.
+    """
+    # Extract x and y lists
+    xs = [p[0] for p in path]
+    ys = [p[1] for p in path]
+
+    # Check if the path hasn't started or has finished
+    # (Optional: return None if you want points to disappear)
+    if t < time_points[0]:
+        return xs[0], ys[0]
+    if t > time_points[-1]:
+        return xs[-1], ys[-1]
+
+    # Interpolate
+    x = np.interp(t, time_points, xs)
+    y = np.interp(t, time_points, ys)
+    return x, y
+
+
+def create_video(paths, times, output_file="video.gif"):
+    """
+    Create a video visualizing the multi-agent paths over time.
+    """
+    # --- 1. Determine global time bounds ---
+    all_times = [t for sublist in times for t in sublist]
+    start_time = min(all_times)
+    end_time = max(all_times)
+
+    # --- 2. Setup Figure ---
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.set_title(f"Path Visualization")
+    ax.grid(True, linestyle='--', alpha=0.6)
+
+    # Determine axis limits automatically based on all coordinates
+    all_coords = [p for sublist in paths for p in sublist]
+    all_xs = [p[0] for p in all_coords]
+    all_ys = [p[1] for p in all_coords]
+    pad = 1
+    ax.set_xlim(min(all_xs) - pad, max(all_xs) + pad)
+    ax.set_ylim(min(all_ys) - pad, max(all_ys) + pad)
+
+    # --- 3. Initialize lines (trails) and points ---
+    colors = plt.cm.jet(np.linspace(0, 1, len(paths)))
+    lines = []
+    points = []
+
+    for i, color in enumerate(colors):
+        # The trail line
+        line, = ax.plot([], [], color=color, alpha=0.5, linewidth=1)
+        lines.append(line)
+
+        # The current head point
+        point, = ax.plot([], [], marker='o', color=color, markersize=8, label=f'Path {i + 1}')
+        points.append(point)
+
+    ax.legend(loc='upper right')
+    time_text = ax.text(0.02, 0.95, '', transform=ax.transAxes)
+
+    # --- 4. Define Animation Update Functions ---
+    def init():
+        for line, point in zip(lines, points):
+            line.set_data([], [])
+            point.set_data([], [])
+        time_text.set_text('')
+        return lines + points + [time_text]
+
+    def update(frame):
+        current_time = frame
+
+        for i, (path, time_seq) in enumerate(zip(paths, times)):
+            # Get current head position
+            curr_x, curr_y = get_position_at_time(current_time, path, time_seq)
+            points[i].set_data([curr_x], [curr_y])
+
+            # Draw trail (history up to current time)
+            history_x = []
+            history_y = []
+
+            # Add past fixed waypoints
+            for (px, py), pt in zip(path, time_seq):
+                if pt <= current_time:
+                    history_x.append(px)
+                    history_y.append(py)
+
+            # Add current interpolated position to connect the line smoothly
+            history_x.append(curr_x)
+            history_y.append(curr_y)
+
+            lines[i].set_data(history_x, history_y)
+
+        time_text.set_text(f'Time: {current_time:.2f}')
+        return lines + points + [time_text]
+
+    # --- 5. Run Animation ---
+    total_frames = 200
+    interval_ms = 50
+    frames = np.linspace(start_time, end_time, total_frames)
+
+    ani = animation.FuncAnimation(
+        fig,
+        update,
+        frames=frames,
+        init_func=init,
+        blit=True,
+        interval=interval_ms
+    )
+
+    if output_file:
+        print(f"Saving animation to {output_file}...")
+        # Note: Saving as .mp4 requires ffmpeg to be installed.
+        # Saving as .gif requires Pillow.
+        try:
+            ani.save(output_file, fps=1000 / interval_ms)
+            print("Save complete.")
+        except Exception as e:
+            print(f"Could not save file: {e}")
+            print("Ensure ffmpeg is installed for video, or try saving as .gif")
+
 if __name__ == "__main__":
 
     # Test the MultiAgentPlanner with dummy data
@@ -166,51 +318,92 @@ if __name__ == "__main__":
     occ = generate_sample_grid2(map_size, map_resolution, plot=False)
     occ_grid = StochOccupancyGrid2D(map_resolution, round(map_size[0]/map_resolution), round(map_size[1]/map_resolution), 0, 0, 10, occ.T)
 
-    # Generate a path for the main agent
-    x_init = snap_to_grid([2, 25], map_resolution)
-    x_goal = snap_to_grid([97, 50], map_resolution)
-    problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
-    problem_status = problem.solve(plot=False) 
-    path = problem.path if problem_status else None
-    # occ_grid.plot_grid_and_path(path)
-    # plt.show()
+    # Load path1.pkl if it exists
+    try:
+        with open("path1.pkl", "rb") as f:
+            path1 = pickle.load(f)
+    except FileNotFoundError:
+        # Generate a path for the agent 1
+        x_init = snap_to_grid([2, 25], map_resolution)
+        x_goal = snap_to_grid([97, 50], map_resolution)
+        problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
+        problem_status = problem.solve(plot=False)
+        path1 = problem.path if problem_status else None
+        with open("path1.pkl", "wb") as f:
+            pickle.dump(path1, f)
+        # occ_grid.plot_grid_and_path(path1)
+        # plt.show()
 
-    # Dummy other agent paths and times
-    # x_init = snap_to_grid([25, 2], map_resolution)
-    # x_goal = snap_to_grid([50, 97], map_resolution)
-    x_init = snap_to_grid([2, 40], map_resolution)
-    x_goal = snap_to_grid([97, 50], map_resolution)
-    other_problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
-    other_problem_status = other_problem.solve(plot=False)
-    other_path = other_problem.path if other_problem_status else None
-    # occ_grid.plot_grid_and_path(other_path)
-    # plt.show()
+    # Load path2.pkl if it exists
+    try:
+        with open("path2.pkl", "rb") as f:
+            path2 = pickle.load(f)
+    except FileNotFoundError:
+        # Agent 2 paths and times
+        # x_init = snap_to_grid([25, 2], map_resolution)
+        # x_goal = snap_to_grid([50, 97], map_resolution)
+        x_init = snap_to_grid([2, 40], map_resolution)
+        x_goal = snap_to_grid([97, 50], map_resolution)
+        problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
+        problem_status = problem.solve(plot=False)
+        path2 = problem.path if problem_status else None
+        with open("path2.pkl", "wb") as f:
+            pickle.dump(path2, f)
+        # occ_grid.plot_grid_and_path(path2)
+        # plt.show()
 
-    # Assign uniform time steps for the other agent
-    other_times = [i * map_resolution * (1 / NOMINAL_VELOCITY) for i in range(len(other_path))]
+    ############## Sequential Path Planning Example ##############
+    # Assign uniform time steps for the other agent (path2)
+    path2_times = [i * map_resolution * (1 / NOMINAL_VELOCITY) for i in range(len(path2))]
 
-    planner = MultiAgentPlanner(occ_grid, [other_path], [other_times], path=path)
+    # Create the planner and plan
+    planner = MultiAgentSequentialPlanner(occ_grid, [path2], [path2_times], path=path1)
     times = planner.plan()
-    # print(times)
-    plt.figure()
-    plt.plot(times, label="Planned Times for Main Agent")
-    plt.plot(other_times, label="Other Agent Times")
-    plt.legend()
-    plt.xlabel("Path Index")
-    plt.ylabel("Time (s)")
-    plt.title("Multi-Agent Path Planning")
-    plt.show()
-    
+    # Plot the planned times vs other agent times
+    # plt.figure()
+    # plt.plot(times, label="Planned Times for Main Agent")
+    # plt.plot(path2_times, label="Other Agent Times")
+    # plt.legend()
+    # plt.xlabel("Path Index")
+    # plt.ylabel("Time (s)")
+    # plt.title("Sequential Path Planning")
+    # plt.show()
+    #
+    # # Plot x/y positions over time
+    # main_agent_positions = np.array(path1)
+    # other_agent_positions = np.array(path2)
+    # plt.figure()
+    # plt.plot(times, main_agent_positions[:,0], label="Main Agent X Position")
+    # plt.plot(path2_times, other_agent_positions[:,0], label="Other Agent X Position")
+    # plt.plot(times, main_agent_positions[:,1], label="Main Agent Y Position")
+    # plt.plot(path2_times, other_agent_positions[:,1], label="Other Agent Y Position")
+    # plt.legend()
+    # plt.xlabel("Time (s)")
+    # plt.ylabel("Position")
+    # plt.title("Sequential Path Planning")
+    # plt.show()
+
+    ############## Simultaneous Path Planning Example ##############
+    # Reduce granularity of paths for faster solving
+    path1 = path1[::5]
+    path2 = path2[::5]
+
+    planner = MultiAgentSimultaneousPlanner(occ_grid, paths=[path1, path2])
+    times = planner.plan()
+
     # Plot x/y positions over time
-    main_agent_positions = np.array(planner.path)
-    other_agent_positions = np.array(other_path)    
+    agent1_positions = np.array(path1)
+    agent2_positions = np.array(path2)
     plt.figure()
-    plt.plot(times, main_agent_positions[:,0], label="Main Agent X Position")
-    plt.plot(other_times, other_agent_positions[:,0], label="Other Agent X Position")
-    plt.plot(times, main_agent_positions[:,1], label="Main Agent Y Position")
-    plt.plot(other_times, other_agent_positions[:,1], label="Other Agent Y Position")
+    plt.plot(times[0], agent1_positions[:, 0], label="Agent 1 X Position")
+    plt.plot(times[1], agent2_positions[:, 0], label="Agent 2 X Position")
+    plt.plot(times[0], agent1_positions[:, 1], label="Agent 1 Y Position")
+    plt.plot(times[1], agent2_positions[:, 1], label="Agent 2 Y Position")
     plt.legend()
     plt.xlabel("Time (s)")
     plt.ylabel("Position")
-    plt.title("Agent Positions Over Time")
+    plt.title("Simultaneous Path Planning")
     plt.show()
+
+    # Create video visualization
+    create_video([path1, path2], times)
