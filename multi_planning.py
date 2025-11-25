@@ -55,22 +55,45 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
     def find_collision_intervals(self):
         """
         Identify potential collision intervals with other agents along the assigned path.
-        returns a list of tuples indicating the (i, start_time, end_time) for collision intervals.
+        returns a list of tuples indicating the (t, start_time, end_time, z_index) for collision intervals.
+        The z variable can be reused for consecutive same-waypoint collisions. This function identifies
+        when z can be reused and provides the appropriate z_index for each collision interval.
 
-        i = index along self.path
+        Args:
+            None
+
+        Returns:
+            collision_intervals: a list of tuples (i, start_time, end_time, z_index)
+                i: index along ego path
+                start_time: earliest time of collision with other agents at waypoint i
+                end_time: latest time of collision with other agents at waypoint i
+                z_index: index of the z variable for this collision interval
+            num_z: total number of z variables needed
         """
         collision_intervals = []
+        z_index = 0  # Index for z variables
+        prev_same = False  # To track if previous waypoint was the same
+
         for other_path, other_times in zip(self.other_agent_paths, self.other_agent_times):
             for i, waypoint in enumerate(self.path):
                 collision_times = []
+                current_same = False  # To track if current waypoint is the same
                 for j, other_waypoint in enumerate(other_path):
                     if np.linalg.norm(np.array(waypoint) - np.array(other_waypoint)) <= ROBOT_DIAMETER:
-                        collision_times.append(other_times[j])
+                        collision_times.append(other_times[j])  # If waypoints are within collision distance, record the time
+                        if waypoint == other_waypoint:
+                            current_same = True  # Mark if the waypoints are exactly the same
+
                 if collision_times:
-                    start_time = min(collision_times)
-                    end_time = max(collision_times)
-                    collision_intervals.append((i, start_time, end_time))
-        return collision_intervals
+                    if current_same and prev_same:
+                        z_index -= 1  # Reuse z variable
+                    collision_intervals.append((i, min(collision_times), max(collision_times), z_index))
+                    z_index += 1
+                prev_same = current_same
+            prev_same = False
+
+        num_z = z_index
+        return collision_intervals, num_z
 
     def plan(self):
         if self.path is None:
@@ -86,13 +109,11 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
             constraints += [t[i + 1] - t[i] >= delta_pos / MAX_VELOCITY]
 
         # Collision Avoiding Constraints using Big-M method
-        collision_intervals = self.find_collision_intervals()
-        z = cp.Variable(len(collision_intervals), boolean=True)
-        z_index = 0
-        for (i, start_time, end_time) in collision_intervals:
+        collision_intervals, max_z = self.find_collision_intervals()
+        z = cp.Variable(max_z, boolean=True)
+        for (i, start_time, end_time, z_index) in collision_intervals:
             constraints += [t[i] <= start_time - DELTA + M * z[z_index]]
             constraints += [t[i] >= end_time + DELTA - M * (1 - z[z_index])]
-            z_index += 1
 
         objective = cp.Minimize(t[-1])  # Minimize time to reach final point
         prob = cp.Problem(objective, constraints)
