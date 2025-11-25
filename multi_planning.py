@@ -142,47 +142,69 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
 
         Args:
             paths (list of list of tuples): Paths for all agents.
+                Each path is a list of (x, y) tuples.
+                paths is a list of such paths.
+
+        Returns:
+            None
         """
         self.paths = paths
 
     def find_collision_pairs(self):
         """
         Identify potential collision pairs between agents along their paths.
-        returns a list of tuples indicating the (agent1_idx, agent2_idx, agent1_path_idx, agent2_path_idx1, agent2_path_idx2) for collision pairs.
+        Returns a list of tuples indicating the time intervals for collision avoidance constraints.
+        Since mobile robots may follow same waypoints consecutively, we can reuse the
+        same z variable for consecutive same-waypoint collisions. This function identifies
+        when z can be reused and also provides which collision pairs can use the same z variable.
 
-        agent1_idx = index of first agent
-        agent2_idx = index of second agent
-        agent1_path_idx = index along agent1's path
-        agent2_path_idx1 = earliest index along agent2's path that collides
-        agent2_path_idx2 = latest index along agent2's path that collides
+        Returns:
+            collision_pairs: a tuple of (a1, a2, i, j1, j2, z_index)
+                a1: index of first agent
+                a2: index of second agent
+                i: index along agent1's path
+                j1: earliest index along agent2's path that collides
+                j2: latest index along agent2's path that collides
+                z_index: index of the z variable for this collision pair
+            num_z: total number of z variables needed
         """
-        collision_pairs = []
-        z_indx = 0
-        prev_same = False
-        num_agents = len(self.paths)
+        collision_pairs = []  # List to store collision pairs
+        z_index = 0  # Index for z variables
+        prev_same = False  # To track if previous waypoint was the same
+        num_agents = len(self.paths)  # Number of agents
+
+        # Find collision pairs for all agent combinations
         for a1 in range(num_agents):
             for a2 in range(a1 + 1, num_agents):
+                # Get paths for both agents
                 path1 = self.paths[a1]
                 path2 = self.paths[a2]
-                for i, waypoint1 in enumerate(path1):
-                    collision_indices = []
-                    current_same = False
-                    for j, waypoint2 in enumerate(path2):
-                        if np.linalg.norm(np.array(waypoint1) - np.array(waypoint2)) <= ROBOT_DIAMETER:
-                            collision_indices.append(j)
 
+                for i, waypoint1 in enumerate(path1):  # Iterate through all waypoints in path1
+                    collision_indices = []
+                    current_same = False  # To track if current waypoint is the same
+                    for j, waypoint2 in enumerate(path2):  # Check for collisions with waypoints in path2
+                        if np.linalg.norm(np.array(waypoint1) - np.array(waypoint2)) <= ROBOT_DIAMETER:
+                            collision_indices.append(j)  # If waypoints are within collision distance, record the index
                             if waypoint1 == waypoint2:
-                                current_same = True
+                                current_same = True  # Mark if the waypoints are exactly the same
 
                     if collision_indices:
                         if current_same and prev_same:
-                            z_indx -= 1  # Reuse the previous z variable
-                        collision_pairs.append((a1, a2, i, min(collision_indices), max(collision_indices), z_indx))
-                        z_indx += 1
-                    prev_same = current_same
+                            # The two paths are the same in this segment, we can reuse the same z variable since
+                            # in both cases, a1 should either arrive before or after a2 at the same waypoint
+                            # This means we do not allow overtaking
+                            z_index -= 1
 
+                        # Store the collision pair with the appropriate z_index
+                        # Only use min and max of collision_indices for j1 and j2 to get the interval
+                        collision_pairs.append((a1, a2, i, min(collision_indices), max(collision_indices), z_index))
+                        z_index += 1
+                    prev_same = current_same
             prev_same = False
-        return collision_pairs, z_indx
+
+        num_z = z_index
+        return collision_pairs, num_z
 
     def plan(self):
         if self.paths is None:
