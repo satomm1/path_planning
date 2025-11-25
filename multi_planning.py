@@ -220,7 +220,7 @@ def get_position_at_time(t, path, time_points):
     return x, y
 
 
-def create_video(paths, times, output_file="video.gif"):
+def create_video(paths, times, output_file="video.gif", occ_grid=None):
     """
     Create a video visualizing the multi-agent paths over time.
     """
@@ -233,14 +233,13 @@ def create_video(paths, times, output_file="video.gif"):
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.set_title(f"Path Visualization")
     ax.grid(True, linestyle='--', alpha=0.6)
+    occ_grid.plot_grid(ax=ax)
 
     # Determine axis limits automatically based on all coordinates
     all_coords = [p for sublist in paths for p in sublist]
     all_xs = [p[0] for p in all_coords]
     all_ys = [p[1] for p in all_coords]
     pad = 1
-    ax.set_xlim(min(all_xs) - pad, max(all_xs) + pad)
-    ax.set_ylim(min(all_ys) - pad, max(all_ys) + pad)
 
     # --- 3. Initialize lines (trails) and points ---
     colors = plt.cm.jet(np.linspace(0, 1, len(paths)))
@@ -416,4 +415,4 @@ if __name__ == "__main__":
     plt.show()
 
     # Create video visualization
-    create_video([path1, path2], times)
+    create_video([path1, path2], times, occ_grid=occ_grid)
