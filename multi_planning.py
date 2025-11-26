@@ -24,13 +24,22 @@ class MultiAgentPlanner:
             occupancy_grid (StochOccupancyGrid2D): The occupancy grid of the environment.
         """
         self.occupancy_grid = occupancy_grid
-        
+
+    def assign_path(self, path):
+        raise NotImplementedError("This method should be implemented by subclasses.")
+
+    def assign_velocities(self, v):
+        raise NotImplementedError("This method should be implemented by subclasses.")
+
+    def find_collision_pairs(self):
+        raise NotImplementedError("This method should be implemented by subclasses.")
+
     def plan(self):
         raise NotImplementedError("This method should be implemented by subclasses.")
 
 class MultiAgentSequentialPlanner(MultiAgentPlanner):
 
-    def __init__(self, occupancy_grid: StochOccupancyGrid2D, other_agent_paths, other_agent_times, path=None):
+    def __init__(self, occupancy_grid: StochOccupancyGrid2D, other_agent_paths, other_agent_times, path=None, v=None):
         """
         Initialize the Sequential multi-agent planner.
 
@@ -45,6 +54,8 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         self.path = path  # Ego path
         self.other_agent_paths = other_agent_paths  # List of other agent paths
         self.other_agent_times = other_agent_times  # List of other agent arrival times
+        self.v = v if v is not None else MAX_VELOCITY   # Optional max velocity for the agent
+        a=5
 
     def assign_path(self, path):
         """
@@ -52,7 +63,18 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         """
         self.path = path
 
-    def find_collision_intervals(self):
+    def assign_velocities(self, v):
+        """
+        Assign the velocities for all agents.
+
+        Args:
+            v (list of floats): Max velocities for each agent.
+        Returns:
+            None
+        """
+        self.v = v
+
+    def find_collision_pairs(self):
         """
         Identify potential collision intervals with other agents along the assigned path.
         returns a list of tuples indicating the (t, start_time, end_time, z_index) for collision intervals.
@@ -106,10 +128,10 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         # Max velocity constraints (also enforces t_i+1 >= t_i)
         for i in range(len(self.path) - 1):
             delta_pos = np.linalg.norm(np.array(self.path[i + 1]) - np.array(self.path[i]))
-            constraints += [t[i + 1] - t[i] >= delta_pos / MAX_VELOCITY]
+            constraints += [t[i + 1] - t[i] >= delta_pos / self.v]
 
         # Collision Avoiding Constraints using Big-M method
-        collision_intervals, max_z = self.find_collision_intervals()
+        collision_intervals, max_z = self.find_collision_pairs()
         z = cp.Variable(max_z, boolean=True)
         for (i, start_time, end_time, z_index) in collision_intervals:
             constraints += [t[i] <= start_time - DELTA + M * z[z_index]]
@@ -136,7 +158,7 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         """
         super().__init__(occupancy_grid)
         self.paths = paths  # List of paths for all agents
-        self.v = v if not None else MAX_VELOCITY   # Optional velocities for each agent
+        self.v = v if v is not None else MAX_VELOCITY   # Optional velocities for each agent
         self.norm = norm  # Norm to minimize (1, 2, or inf)
 
     def assign_path(self, paths):
