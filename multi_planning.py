@@ -289,7 +289,8 @@ def create_video(paths, times, output_file="video.gif", occ_grid=None):
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.set_title(f"Path Visualization")
     ax.grid(True, linestyle='--', alpha=0.6)
-    occ_grid.plot_grid(ax=ax)
+    if occ_grid is not None:
+        occ_grid.plot_grid(ax=ax)
 
     # Determine axis limits automatically based on all coordinates
     all_coords = [p for sublist in paths for p in sublist]
