@@ -124,16 +124,19 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
 
 class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
 
-    def __init__(self, occupancy_grid: StochOccupancyGrid2D, paths=None, norm=1):
+    def __init__(self, occupancy_grid: StochOccupancyGrid2D, paths=None, norm=1, v=None):
         """
         Initialize the Simultaneous multi-agent planner.
 
         Args:
             occupancy_grid (StochOccupancyGrid2D): The occupancy grid of the environment.
             paths (list of list of tuples, optional): Paths for all agents. Defaults to None.
+            norm (int, optional): Norm to minimize (1, 2, or inf). Defaults to 1.
+            v (list of floats, optional): Max velocities for each agent. Defaults to None.
         """
         super().__init__(occupancy_grid)
         self.paths = paths  # List of paths for all agents
+        self.v = v if not None else MAX_VELOCITY   # Optional velocities for each agent
         self.norm = norm  # Norm to minimize (1, 2, or inf)
 
     def assign_path(self, paths):
@@ -149,6 +152,17 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
             None
         """
         self.paths = paths
+
+    def assign_velocities(self, v):
+        """
+        Assign the velocities for all agents.
+
+        Args:
+            v (list of floats): Max velocities for each agent.
+        Returns:
+            None
+        """
+        self.v = v
 
     def find_collision_pairs(self):
         """
@@ -210,6 +224,9 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         if self.paths is None:
             raise ValueError("Paths not assigned. Please assign paths before planning.")
 
+        if len(self.v) == 1:
+            self.v = [self.v[0] for _ in range(len(self.paths))]
+
         # Create CP variables for each agent's time to reach each waypoint
         agent_times = [cp.Variable(len(path)) for path in self.paths]
         constraints = []
@@ -220,11 +237,7 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         for agent_idx, path in enumerate(self.paths):
             for i in range(len(path) - 1):
                 delta_pos = np.linalg.norm(np.array(path[i + 1]) - np.array(path[i]))
-                if agent_idx == 0:
-                    constraints += [agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / MAX_VELOCITY]
-                else:
-                    constraints += [
-                        agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / (MAX_VELOCITY)]
+                constraints += [agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / self.v[agent_idx]]
 
         # Collision Avoiding Constraints using Big-M method
         collision_pairs, max_z = self.find_collision_pairs()  # Get all the collision pairs
@@ -404,58 +417,43 @@ if __name__ == "__main__":
         # occ_grid.plot_grid_and_path(path2)
         # plt.show()
 
+    # Load path3.pkl if it exists
+    try:
+        with open("path3.pkl", "rb") as f:
+            path3 = pickle.load(f)
+    except FileNotFoundError:
+        # Agent 3 paths and times
+        x_init = snap_to_grid([50, 80], map_resolution)
+        x_goal = snap_to_grid([97, 20], map_resolution)
+        problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
+        problem_status = problem.solve(plot=False)
+        path3 = problem.path if problem_status else None
+        with open("path3.pkl", "wb") as f:
+            pickle.dump(path3, f)
+        occ_grid.plot_grid_and_path(path3)
+        plt.show()
+
     ############## Sequential Path Planning Example ##############
     # Assign uniform time steps for the other agent (path2)
     path2_times = [i * map_resolution * (1 / NOMINAL_VELOCITY) for i in range(len(path2))]
+    path3_times = [i * map_resolution * (1 / (NOMINAL_VELOCITY/1.2)) for i in range(len(path3))]
 
-    # Create the planner and plan
-    planner = MultiAgentSequentialPlanner(occ_grid, [path2], [path2_times], path=path1)
+    # Create the planner
+    planner = MultiAgentSequentialPlanner(occ_grid, [path2, path3], [path2_times, path3_times], path=path1)
+
+    # Plan and visualize
     times = planner.plan()
-    # Plot the planned times vs other agent times
-    # plt.figure()
-    # plt.plot(times, label="Planned Times for Main Agent")
-    # plt.plot(path2_times, label="Other Agent Times")
-    # plt.legend()
-    # plt.xlabel("Path Index")
-    # plt.ylabel("Time (s)")
-    # plt.title("Sequential Path Planning")
-    # plt.show()
-    #
-    # # Plot x/y positions over time
-    # main_agent_positions = np.array(path1)
-    # other_agent_positions = np.array(path2)
-    # plt.figure()
-    # plt.plot(times, main_agent_positions[:,0], label="Main Agent X Position")
-    # plt.plot(path2_times, other_agent_positions[:,0], label="Other Agent X Position")
-    # plt.plot(times, main_agent_positions[:,1], label="Main Agent Y Position")
-    # plt.plot(path2_times, other_agent_positions[:,1], label="Other Agent Y Position")
-    # plt.legend()
-    # plt.xlabel("Time (s)")
-    # plt.ylabel("Position")
-    # plt.title("Sequential Path Planning")
-    # plt.show()
+    # create_video([path1, path2, path3], [times, path2_times, path3_times], occ_grid=occ_grid, output_file="video_sequential.gif")
 
     ############## Simultaneous Path Planning Example ##############
     # Reduce granularity of paths for faster solving
     # path1 = path1[::5]
     # path2 = path2[::5]
 
-    planner = MultiAgentSimultaneousPlanner(occ_grid, paths=[path1, path2])
+    # Make the planner
+    planner = MultiAgentSimultaneousPlanner(occ_grid, paths=[path1, path2, path3])
+    planner.assign_velocities([MAX_VELOCITY, MAX_VELOCITY/1.2, MAX_VELOCITY/1.5])
+
+    # Plan and visualize
     times = planner.plan()
-
-    # Plot x/y positions over time
-    agent1_positions = np.array(path1)
-    agent2_positions = np.array(path2)
-    plt.figure()
-    plt.plot(times[0], agent1_positions[:, 0], label="Agent 1 X Position")
-    plt.plot(times[1], agent2_positions[:, 0], label="Agent 2 X Position")
-    plt.plot(times[0], agent1_positions[:, 1], label="Agent 1 Y Position")
-    plt.plot(times[1], agent2_positions[:, 1], label="Agent 2 Y Position")
-    plt.legend()
-    plt.xlabel("Time (s)")
-    plt.ylabel("Position")
-    plt.title("Simultaneous Path Planning")
-    plt.show()
-
-    # Create video visualization
-    create_video([path1, path2], times, occ_grid=occ_grid)
+    create_video([path1, path2, path3], times, occ_grid=occ_grid, output_file="video_simultaneous.gif")
