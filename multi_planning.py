@@ -16,7 +16,7 @@ DELTA = 1  # Safety margin in seconds
 
 class MultiAgentPlanner:
 
-    def __init__(self, occupancy_grid: StochOccupancyGrid2D):
+    def __init__(self, occupancy_grid: StochOccupancyGrid2D, v):
         """
         Initialize the multi-agent planner.
 
@@ -24,12 +24,21 @@ class MultiAgentPlanner:
             occupancy_grid (StochOccupancyGrid2D): The occupancy grid of the environment.
         """
         self.occupancy_grid = occupancy_grid
+        self.v = v if v is not None else MAX_VELOCITY
 
     def assign_path(self, path):
         raise NotImplementedError("This method should be implemented by subclasses.")
 
     def assign_velocities(self, v):
-        raise NotImplementedError("This method should be implemented by subclasses.")
+        """
+        Assign the velocities for all agents.
+
+        Args:
+            v (list of floats): Max velocities for each agent.
+        Returns:
+            None
+        """
+        self.v = v
 
     def find_collision_pairs(self):
         raise NotImplementedError("This method should be implemented by subclasses.")
@@ -49,30 +58,17 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
             other_agent_times (list of list of floats): Time steps corresponding to other agent paths.
             path (list of tuples, optional): The path for the agent to follow. Defaults to None.
         """
-        super().__init__(occupancy_grid)
+        super().__init__(occupancy_grid, v)
 
         self.path = path  # Ego path
         self.other_agent_paths = other_agent_paths  # List of other agent paths
         self.other_agent_times = other_agent_times  # List of other agent arrival times
-        self.v = v if v is not None else MAX_VELOCITY   # Optional max velocity for the agent
-        a=5
 
     def assign_path(self, path):
         """
         Assign the ego path for the planner.
         """
         self.path = path
-
-    def assign_velocities(self, v):
-        """
-        Assign the velocities for all agents.
-
-        Args:
-            v (list of floats): Max velocities for each agent.
-        Returns:
-            None
-        """
-        self.v = v
 
     def find_collision_pairs(self):
         """
@@ -85,14 +81,14 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
             None
 
         Returns:
-            collision_intervals: a list of tuples (i, start_time, end_time, z_index)
+            collision_pairs: a list of tuples (i, start_time, end_time, z_index)
                 i: index along ego path
                 start_time: earliest time of collision with other agents at waypoint i
                 end_time: latest time of collision with other agents at waypoint i
                 z_index: index of the z variable for this collision interval
             num_z: total number of z variables needed
         """
-        collision_intervals = []
+        collision_pairs = []
         z_index = 0  # Index for z variables
         prev_same = False  # To track if previous waypoint was the same
 
@@ -109,13 +105,13 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
                 if collision_times:
                     if current_same and prev_same:
                         z_index -= 1  # Reuse z variable
-                    collision_intervals.append((i, min(collision_times), max(collision_times), z_index))
+                    collision_pairs.append((i, min(collision_times), max(collision_times), z_index))
                     z_index += 1
                 prev_same = current_same
             prev_same = False
 
         num_z = z_index
-        return collision_intervals, num_z
+        return collision_pairs, num_z
 
     def plan(self):
         if self.path is None:
@@ -131,9 +127,9 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
             constraints += [t[i + 1] - t[i] >= delta_pos / self.v]
 
         # Collision Avoiding Constraints using Big-M method
-        collision_intervals, max_z = self.find_collision_pairs()
+        collision_pairs, max_z = self.find_collision_pairs()
         z = cp.Variable(max_z, boolean=True)
-        for (i, start_time, end_time, z_index) in collision_intervals:
+        for (i, start_time, end_time, z_index) in collision_pairs:
             constraints += [t[i] <= start_time - DELTA + M * z[z_index]]
             constraints += [t[i] >= end_time + DELTA - M * (1 - z[z_index])]
 
@@ -156,9 +152,8 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
             norm (int, optional): Norm to minimize (1, 2, or inf). Defaults to 1.
             v (list of floats, optional): Max velocities for each agent. Defaults to None.
         """
-        super().__init__(occupancy_grid)
+        super().__init__(occupancy_grid, v)
         self.paths = paths  # List of paths for all agents
-        self.v = v if v is not None else MAX_VELOCITY   # Optional velocities for each agent
         self.norm = norm  # Norm to minimize (1, 2, or inf)
 
     def assign_path(self, paths):
@@ -174,17 +169,6 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
             None
         """
         self.paths = paths
-
-    def assign_velocities(self, v):
-        """
-        Assign the velocities for all agents.
-
-        Args:
-            v (list of floats): Max velocities for each agent.
-        Returns:
-            None
-        """
-        self.v = v
 
     def find_collision_pairs(self):
         """
@@ -265,6 +249,132 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         collision_pairs, max_z = self.find_collision_pairs()  # Get all the collision pairs
         z = cp.Variable(max_z, boolean=True)
         for (a1, a2, i, j1, j2, z_index) in collision_pairs:
+            constraints += [agent_times[a1][i] <= agent_times[a2][j1] - DELTA + M * z[z_index]]
+            constraints += [agent_times[a1][i] >= agent_times[a2][j2] + DELTA - M * (1 - z[z_index])]
+
+        final_time_vars = cp.hstack([agent_time[-1] for agent_time in agent_times])
+        objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
+        prob = cp.Problem(objective, constraints)
+        print("Starting to solve multi-agent planning problem...")
+        prob.solve(verbose=True)
+        optimized_times = [agent_time.value.tolist() for agent_time in agent_times]
+        return optimized_times
+
+class MultiAgentCombinedPlanner(MultiAgentPlanner):
+
+    def __init__(self, occupancy_grid: StochOccupancyGrid2D, other_agent_paths, other_agent_times, paths=None, v=None, norm=1):
+        super().__init__(occupancy_grid, v)
+
+        self.other_agent_paths = other_agent_paths  # List of other agent paths
+        self.other_agent_times = other_agent_times  # List of other agent arrival times
+        self.paths = paths  # List of paths to find control sequences for
+        self.norm = norm
+
+    def assign_path(self, paths):
+        """
+        Assign the paths for all agents.
+
+        Args:
+            paths (list of list of tuples): Paths for all agents.
+                Each path is a list of (x, y) tuples.
+                paths is a list of such paths.
+
+        Returns:
+            None
+        """
+        self.paths = paths
+
+    def find_collision_pairs(self):
+
+        z_index = 0  # Index for z variables
+        prev_same = False  # To track if previous waypoint was the same
+        num_agents = len(self.paths)  # Number of agents
+
+        # First we find collision pairs from sequential planning
+        sequential_pairs = []
+        for other_path, other_times in zip(self.other_agent_paths, self.other_agent_times):
+            for a, path in enumerate(self.paths):
+                for i, waypoint in enumerate(path):
+                    collision_times = []
+                    current_same = False  # To track if current waypoint is the same
+                    for j, other_waypoint in enumerate(other_path):
+                        if np.linalg.norm(np.array(waypoint) - np.array(other_waypoint)) <= ROBOT_DIAMETER:
+                            collision_times.append(other_times[j])  # If waypoints are within collision distance, record the time
+                            if waypoint == other_waypoint:
+                                current_same = True  # Mark if the waypoints are exactly the same
+
+                    if collision_times:
+                        if current_same and prev_same:
+                            z_index -= 1  # Reuse z variable
+                        sequential_pairs.append((a, i, min(collision_times), max(collision_times), z_index))
+                        z_index += 1
+                    prev_same = current_same
+                prev_same = False
+
+        # Next we find collision pairs from simultaneous planning
+        prev_same = False
+        simultaneous_pairs = []
+        for a1 in range(num_agents):
+            for a2 in range(a1 + 1, num_agents):
+                # Get paths for both agents
+                path1 = self.paths[a1]
+                path2 = self.paths[a2]
+
+                for i, waypoint1 in enumerate(path1):  # Iterate through all waypoints in path1
+                    collision_indices = []
+                    current_same = False  # To track if current waypoint is the same
+                    for j, waypoint2 in enumerate(path2):  # Check for collisions with waypoints in path2
+                        if np.linalg.norm(np.array(waypoint1) - np.array(waypoint2)) <= ROBOT_DIAMETER:
+                            collision_indices.append(j)  # If waypoints are within collision distance, record the index
+                            if waypoint1 == waypoint2:
+                                current_same = True  # Mark if the waypoints are exactly the same
+
+                    if collision_indices:
+                        if current_same and prev_same:
+                            # The two paths are the same in this segment, we can reuse the same z variable since
+                            # in both cases, a1 should either arrive before or after a2 at the same waypoint
+                            # This means we do not allow overtaking
+                            z_index -= 1
+
+                        # Store the collision pair with the appropriate z_index
+                        # Only use min and max of collision_indices for j1 and j2 to get the interval
+                        simultaneous_pairs.append((a1, a2, i, min(collision_indices), max(collision_indices), z_index))
+                        z_index += 1
+                    prev_same = current_same
+            prev_same = False
+
+        return (sequential_pairs, simultaneous_pairs), z_index
+
+    def plan(self):
+        if self.paths is None:
+            raise ValueError("Paths not assigned. Please assign paths before planning.")
+
+        if len(self.v) == 1:
+            self.v = [self.v[0] for _ in range(len(self.paths))]
+
+        # Create CP variables for each agent's time to reach each waypoint
+        agent_times = [cp.Variable(len(path)) for path in self.paths]
+        constraints = []
+        for agent_time in agent_times:
+            constraints += [agent_time[0] == 0]  # All agents start at same time (t=0)
+
+        # Max velocity constraints (also enforces t_i+1 >= t_i)
+        for agent_idx, path in enumerate(self.paths):
+            for i in range(len(path) - 1):
+                delta_pos = np.linalg.norm(np.array(path[i + 1]) - np.array(path[i]))
+                constraints += [
+                    agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / self.v[agent_idx]]
+
+        # Collision Avoiding Constraints using Big-M method
+        collision_pairs, max_z = self.find_collision_pairs()  # Get all the collision pairs
+        sequential_pairs, simultaneous_pairs = collision_pairs
+        z = cp.Variable(max_z, boolean=True)
+        # First Consider collisions with other agents with fixed paths
+        for (a, i, start_time, end_time, z_index) in sequential_pairs:
+            constraints += [agent_times[a][i] <= start_time - DELTA + M * z[z_index]]
+            constraints += [agent_times[a][i] >= end_time + DELTA - M * (1 - z[z_index])]
+        # Second consider collisions between agents with variable paths
+        for (a1, a2, i, j1, j2, z_index) in simultaneous_pairs:
             constraints += [agent_times[a1][i] <= agent_times[a2][j1] - DELTA + M * z[z_index]]
             constraints += [agent_times[a1][i] >= agent_times[a2][j2] + DELTA - M * (1 - z[z_index])]
 
@@ -456,6 +566,23 @@ if __name__ == "__main__":
         occ_grid.plot_grid_and_path(path3)
         plt.show()
 
+    # Load path4.pkl if it exists
+    try:
+        with open("path4.pkl", "rb") as f:
+            path4 = pickle.load(f)
+    except FileNotFoundError:
+        # Agent 4 paths and times
+        x_init = snap_to_grid([50, 20], map_resolution)
+        x_goal = snap_to_grid([97, 75], map_resolution)
+        problem = AStar([0, 0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid,
+                        resolution=map_resolution)
+        problem_status = problem.solve(plot=False)
+        path4 = problem.path if problem_status else None
+        with open("path4.pkl", "wb") as f:
+            pickle.dump(path4, f)
+        occ_grid.plot_grid_and_path(path4)
+        plt.show()
+
     ############## Sequential Path Planning Example ##############
     # Assign uniform time steps for the other agent (path2)
     path2_times = [i * map_resolution * (1 / NOMINAL_VELOCITY) for i in range(len(path2))]
@@ -465,7 +592,7 @@ if __name__ == "__main__":
     planner = MultiAgentSequentialPlanner(occ_grid, [path2, path3], [path2_times, path3_times], path=path1)
 
     # Plan and visualize
-    times = planner.plan()
+    # times = planner.plan()
     # create_video([path1, path2, path3], [times, path2_times, path3_times], occ_grid=occ_grid, output_file="video_sequential.gif")
 
     ############## Simultaneous Path Planning Example ##############
@@ -474,9 +601,22 @@ if __name__ == "__main__":
     # path2 = path2[::5]
 
     # Make the planner
-    planner = MultiAgentSimultaneousPlanner(occ_grid, paths=[path1, path2, path3])
-    planner.assign_velocities([MAX_VELOCITY, MAX_VELOCITY/1.2, MAX_VELOCITY/1.5])
+    planner = MultiAgentSimultaneousPlanner(occ_grid, paths=[path1, path2, path3, path4])
+    planner.assign_velocities([MAX_VELOCITY, MAX_VELOCITY/1.2, MAX_VELOCITY/1.5, MAX_VELOCITY/1.65])
+
+    # Plan and visualize
+    # times = planner.plan()
+    # create_video([path1, path2, path3, path4], times, occ_grid=occ_grid, output_file="video_simultaneous.gif")
+
+    ############## Combined Path Planning Example ##############
+    # Assign uniform time steps for the already planned paths (path2/path3)
+    path2_times = [i * map_resolution * (1 / NOMINAL_VELOCITY) for i in range(len(path2))]
+    path3_times = [i * map_resolution * (1 / (NOMINAL_VELOCITY / 1.2)) for i in range(len(path3))]
+
+    # Create the planner
+    planner = MultiAgentCombinedPlanner(occ_grid, [path2, path3], [path2_times, path3_times], paths=[path1, path4])
+    planner.assign_velocities([MAX_VELOCITY, MAX_VELOCITY / 2])
 
     # Plan and visualize
     times = planner.plan()
-    create_video([path1, path2, path3], times, occ_grid=occ_grid, output_file="video_simultaneous.gif")
+    create_video([path1, path2, path3, path4], [times[0], path2_times, path3_times, times[1]], occ_grid=occ_grid, output_file="video_combined.gif")
