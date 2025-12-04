@@ -241,19 +241,20 @@ if __name__ == "__main__":
 
         plt.figure(2)
         occ_grid.plot_grid_and_path(problem.path)
-        occ_grid.plot_smoothed_path(problem.smoothed_path)
         plt.scatter(x_init[0], x_init[1], c='green', s=100, label='Start')
         plt.scatter(x_goal[0], x_goal[1], c='gold', marker="*", s=100, label='Goal')
         plt.show()
     else:
         print("No path found.")
 
-    plt.figure(3)
-    occ_grid.plot_grid()
-    plt.scatter(x_init[0], x_init[1], c='green', s=100, label='Start', zorder=5)
-    plt.scatter(x_goal[0], x_goal[1], c='gold', marker="*", s=100, label='Goal')
+    fig, ax = plt.subplots(figsize=(6,6))
+    occ_grid.plot_grid_and_path(problem.path, ax)
+    ax.scatter(x_init[0], x_init[1], c='green', s=100, label='Start', zorder=5)
+    ax.scatter(x_goal[0], x_goal[1], c='gold', marker="*", s=100, label='Goal')
 
     closed_set = problem.closed_set
     xs, ys = zip(*closed_set)  # unzip into two sequences
-    plt.scatter(xs, ys, c='red', marker="o", s=0.25, label='Explored Nodes')
+    ax.scatter(xs, ys, c='red', marker="o", s=2, label='Explored Nodes', zorder=3)
+    ax.legend(bbox_to_anchor=(1.05, 1), loc=2, borderaxespad=0.)
+    fig.subplots_adjust(right=0.65)
     plt.show()
