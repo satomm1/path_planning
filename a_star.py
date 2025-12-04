@@ -78,6 +78,9 @@ class AStar(object):
     def h(self, x):
         return self.manhattan_distance(x, self.x_goal)
 
+    def vanilla_cost(self, x1, x2):
+        return self.distance(x1, x2), 0
+
     def cost(self, x1, x2, dist2right_prev=0):
         social_cost, dist2right = self.rightness_penalty(x1, x2, dist2right_prev)
         return self.distance(x1, x2) + social_cost, dist2right
@@ -284,6 +287,41 @@ class AStar(object):
                 if x_neigh not in self.cost_to_arrive or tentative_cost_to_arrive < self.cost_to_arrive[x_neigh]:
                     cost_x_x_neigh, dist2right = self.cost(x_current, x_neigh, dist2right_prev)
                     self.dist_to_right[x_neigh] = dist2right
+                    self.came_from[x_neigh] = x_current
+                    self.cost_to_arrive[x_neigh] = tentative_cost_to_arrive
+                    self.priority_queue.put(
+                        (current_cost + cost_x_x_neigh + self.h(x_neigh)
+                         - self.h(x_current),
+                         x_neigh)
+                    )
+        return False
+
+    def vanilla_solve(self, plot=False):
+        t_start = time.time()
+        while self.priority_queue.qsize() > 0:
+            current_cost, x_current = self.priority_queue.get()
+
+            if x_current == self.x_goal:
+                t_end = time.time()
+                self.path = self.reconstruct_path()
+                self.smooth_path()
+                print(f"A* found a path in {t_end - t_start:.2f} seconds.")
+                return True
+
+            if time.time() - t_start > 150:
+                print("A* took too long.")
+                return False
+
+            self.closed_set.add(x_current)
+
+            for x_neigh in self.get_neighbors(x_current):
+                if x_neigh in self.closed_set:
+                    continue
+
+                # cost_x_x_neigh = self.cost(x_current, x_neigh)
+                tentative_cost_to_arrive = self.cost_to_arrive[x_current] + self.distance(x_current, x_neigh)
+                if x_neigh not in self.cost_to_arrive or tentative_cost_to_arrive < self.cost_to_arrive[x_neigh]:
+                    cost_x_x_neigh = self.distance(x_current, x_neigh)
                     self.came_from[x_neigh] = x_current
                     self.cost_to_arrive[x_neigh] = tentative_cost_to_arrive
                     self.priority_queue.put(
