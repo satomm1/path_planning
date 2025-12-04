@@ -118,14 +118,17 @@ class StochOccupancyGrid2D(object):
         else:
             plt.imshow(self.probs, cmap=self.cmap, norm=self.norm, interpolation='nearest', origin='lower', extent=self.extent, aspect='equal')
 
-    def plot_path(self, path):
+    def plot_path(self, path, ax=None):
         xs, ys = zip(*path)
-        plt.plot(xs, ys, color='red', linewidth=1, marker=',', zorder=5)
+        if ax is not None:
+            ax.plot(xs, ys, color='navy', linewidth=2, marker=',', zorder=5, alpha=0.75, label='Planned Path')
+        else:
+            plt.plot(xs, ys, color='navy', linewidth=2, marker=',', zorder=5, alpha=0.75, label='Planned Path')
 
     def plot_smoothed_path(self, path):
         xs, ys = zip(*path)
         plt.plot(xs, ys, color='green', linewidth=1, marker=',', zorder=6)
     
-    def plot_grid_and_path(self, path):
-        self.plot_grid()
-        self.plot_path(path)
+    def plot_grid_and_path(self, path, ax=None):
+        self.plot_grid(ax=ax)
+        self.plot_path(path, ax=ax)
