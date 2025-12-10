@@ -222,6 +222,122 @@ def generate_sample_grid5(map_size=[100,100], map_resolution=0.2, plot=False):
 
     return occ
 
+def generate_circular_grid(map_size=[100,100], map_resolution=0.2, plot=False):
+    map_dim = [round(map_size[i] / map_resolution) for i in range(len(map_size))]
+
+    # Create empty map
+    occ = np.zeros(map_dim)
+
+    # Create outer boundary
+    occ[0:3, :] = 1
+    occ[:, 0:3] = 1
+    occ[-3:, :] = 1
+    occ[:, -3:] = 1
+
+    def point_to_grid(x):
+        return round(x/map_resolution)
+
+    # Create inner barriers
+    occ[point_to_grid(5):point_to_grid(45), point_to_grid(5):point_to_grid(45)] = 1
+    occ[point_to_grid(5.5):point_to_grid(44.5), point_to_grid(5.5):point_to_grid(44.5)] = 1
+
+    occ[point_to_grid(5):point_to_grid(45), point_to_grid(55):point_to_grid(95)] = 1
+    occ[point_to_grid(5.5):point_to_grid(44.5), point_to_grid(55.5):point_to_grid(94.5)] = 1
+
+    occ[point_to_grid(55):point_to_grid(95), point_to_grid(5):point_to_grid(45)] = 1
+    occ[point_to_grid(55.5):point_to_grid(94.5), point_to_grid(5.5):point_to_grid(44.5)] = 1
+
+    occ[point_to_grid(55):point_to_grid(95), point_to_grid(55):point_to_grid(95)] = 1
+    occ[point_to_grid(55.5):point_to_grid(94.5), point_to_grid(55.5):point_to_grid(94.5)] = 1
+
+    # Add a circle of free space in the middle
+    center = np.array([map_size[0] / 2.0, map_size[1] / 2.0])
+    radius = 20.0  # meters
+    xs = np.arange(map_dim[0]) * map_resolution
+    ys = np.arange(map_dim[1]) * map_resolution
+    X, Y = np.meshgrid(xs, ys, indexing='ij')  # shape (nx, ny)
+    dist_from_center = np.sqrt((X - center[0]) ** 2 + (Y - center[1]) ** 2)
+    occ[dist_from_center <= radius] = 0
+
+    # Add a circle of occupied space in the center of free area
+    center = np.array([map_size[0] / 2.0, map_size[1] / 2.0])
+    radius = 15.0  # meters
+    xs = np.arange(map_dim[0]) * map_resolution
+    ys = np.arange(map_dim[1]) * map_resolution
+    X, Y = np.meshgrid(xs, ys, indexing='ij')  # shape (nx, ny)
+    dist_from_center = np.sqrt((X - center[0]) ** 2 + (Y - center[1]) ** 2)
+    occ[dist_from_center <= radius] = 1
+
+    if plot:
+        cmap = ListedColormap(['gray', '#9DC6F2', 'black'])
+        bounds = [-1.5, -0.5, 0.5, 1.5]
+        norm = BoundaryNorm(bounds, cmap.N)
+
+        plt.imshow(occ.T, cmap=cmap, norm=norm, interpolation='nearest', origin='lower', extent=[0, map_size[0], 0, map_size[1]], aspect='equal')
+        plt.title("Sample Occupancy Grid")
+        plt.xlabel("X (m)")
+        plt.ylabel("Y (m)")
+        plt.show()
+
+    return occ
+
+def generate_hall_with_room_grid(map_size=[100,100], map_resolution=0.2, plot=False):
+    map_dim = [round(map_size[i] / map_resolution) for i in range(len(map_size))]
+
+    # Create empty map
+    occ = np.zeros(map_dim)
+
+    # Create outer boundary
+    occ[0:3, :] = 1
+    occ[:, 0:3] = 1
+    occ[-3:, :] = 1
+    occ[:, -3:] = 1
+
+    def point_to_grid(x):
+        return round(x / map_resolution)
+
+    # Create inner barrier
+    occ[point_to_grid(5):point_to_grid(30), point_to_grid(5):point_to_grid(95)] = 1
+
+    # Make a room
+    occ[point_to_grid(5.5):point_to_grid(29.4), point_to_grid(20):point_to_grid(45)] = 0  # room
+    occ[point_to_grid(5):point_to_grid(6), point_to_grid(22):point_to_grid(23)] = 0  # doorway
+
+    # Make another room
+    occ[point_to_grid(5.5):point_to_grid(29.4), point_to_grid(47):point_to_grid(68)] = 0  # room
+    occ[point_to_grid(5):point_to_grid(6), point_to_grid(50):point_to_grid(52)] = 0  # doorway
+    occ[point_to_grid(29.4):point_to_grid(30), point_to_grid(50):point_to_grid(52)] = 0  # doorway
+
+    # Make another room
+    occ[point_to_grid(5.5):point_to_grid(29.4), point_to_grid(5.5):point_to_grid(19)] = 0  # room
+    occ[point_to_grid(8):point_to_grid(10), point_to_grid(5):point_to_grid(6)] = 0  # doorway
+    occ[point_to_grid(20):point_to_grid(22), point_to_grid(5):point_to_grid(6)] = 0  # doorway
+
+    # Make another room
+    occ[point_to_grid(5.5):point_to_grid(29.4), point_to_grid(72):point_to_grid(94)] = 0  # room
+    occ[point_to_grid(5):point_to_grid(6), point_to_grid(80):point_to_grid(81)] = 0  # doorway
+    occ[point_to_grid(29):point_to_grid(30), point_to_grid(80):point_to_grid(81)] = 0  # doorway
+    occ[point_to_grid(15):point_to_grid(17), point_to_grid(94):point_to_grid(95)] = 0  # doorway
+
+    occ[point_to_grid(35):point_to_grid(95), point_to_grid(5):point_to_grid(45)] = 1
+    occ[point_to_grid(35.5):point_to_grid(94.5), point_to_grid(5.5):point_to_grid(44.5)] = -1
+
+    occ[point_to_grid(35):point_to_grid(95), point_to_grid(55):point_to_grid(95)] = 1
+    occ[point_to_grid(35.5):point_to_grid(94.5), point_to_grid(55.5):point_to_grid(94.5)] = -1
+
+    if plot:
+        cmap = ListedColormap(['gray', '#9DC6F2', 'black'])
+        bounds = [-1.5, -0.5, 0.5, 1.5]
+        norm = BoundaryNorm(bounds, cmap.N)
+
+        plt.imshow(occ.T, cmap=cmap, norm=norm, interpolation='nearest', origin='lower', extent=[0, map_size[0], 0, map_size[1]], aspect='equal')
+        plt.title("Sample Occupancy Grid")
+        plt.xlabel("X (m)")
+        plt.ylabel("Y (m)")
+        plt.show()
+
+    return occ
+
 if __name__ == "__main__":
     map_size=[100,100]
     map_resolution = 0.2
