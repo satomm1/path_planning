@@ -1,27 +1,42 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
+import os
+import argparse
+import json
+import glob
+import re
 
 from occupancy_grid import StochOccupancyGrid2D
-from heat_map import HeatMap2DVector
+from heat_map import HeatMap2DVector, generate_random_free_point
 from grid_loader import load_grid_scenario
-from a_star import AStar_With_Graph
+from a_star import AStar, AStar_With_Graph
 from utils import *
+
+CHECKPOINT_FILENAME = "heatmap_checkpoint.npy"
+METADATA_FILENAME = "run_metadata.json"
 
 class FrequentSubgraph:
 
-    def __init__(self, occ_grid: StochOccupancyGrid2D, heat_map_filename: str):
+    def __init__(self, occ_grid: StochOccupancyGrid2D, heat_map_filename: str = None):
         self.occ_grid = occ_grid
         self.heat_map_object = HeatMap2DVector(occ_grid)
-        self.heat_map_object.load_heatmap(heat_map_filename)
+        if heat_map_filename is not None:
+            self.heat_map_object.load_heatmap(heat_map_filename)
         self.heat_map = self.heat_map_object.heatmap
 
         self.graph = nx.DiGraph()
 
-    def build_graph(self, threshold: float):
+    def set_heat_map(self, heat_map: np.ndarray):
+        self.heat_map = heat_map
+
+    def build_graph(self, threshold: float, reset_graph: bool = True):
         """
         Build a directed graph from the heat map, only including nodes/edges that are frequently traversed
         """
+        if reset_graph:
+            self.graph = nx.DiGraph()
+
         directions = [
             (-1,  1),  # NW
             (0,   1),  # N
@@ -33,7 +48,6 @@ class FrequentSubgraph:
             (1,  -1)   # SE
         ]
 
-        total_heatmap = np.sum(self.heat_map, axis=2)
         for x in range(self.occ_grid.width):
             for y in range(self.occ_grid.height):
                 for dir_idx, (dx, dy) in enumerate(directions):
@@ -54,62 +68,221 @@ class FrequentSubgraph:
             if len(component) < min_component_size:
                 self.graph.remove_nodes_from(component)
 
-    def visualize_graph(self):
-        # Iterate through each edge and plot it
-        plt.figure(figsize=(10, 10))
-        # self.occ_grid.plot_grid()
+    def visualize_graph(self, ax=None, show=True):
+        if ax is None:
+            _, ax = plt.subplots(figsize=(10, 10))
+        self.occ_grid.plot_grid(ax=ax)
         for edge in self.graph.edges():
             from_node = edge[0]
             to_node = edge[1]
-            plt.plot([from_node[0] * self.occ_grid.resolution + self.occ_grid.origin_x,
-                      to_node[0] * self.occ_grid.resolution + self.occ_grid.origin_x],
-                     [from_node[1] * self.occ_grid.resolution + self.occ_grid.origin_y,
-                      to_node[1] * self.occ_grid.resolution + self.occ_grid.origin_y],
-                     color='red', linewidth=1)
-        plt.show()
+            ax.plot([from_node[0] * self.occ_grid.resolution + self.occ_grid.origin_x,
+                     to_node[0] * self.occ_grid.resolution + self.occ_grid.origin_x],
+                    [from_node[1] * self.occ_grid.resolution + self.occ_grid.origin_y,
+                     to_node[1] * self.occ_grid.resolution + self.occ_grid.origin_y],
+                    color='red', linewidth=1)
+        ax.set_title("Sparse Graph")
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        if show:
+            plt.show()
+        return ax
 
 def heuristic(a, b):
     return np.linalg.norm(np.array(a) - np.array(b), ord=1)
 
-if __name__ == "__main__":
-    scenario_name = "sample2_default"
+def _latest_frame_index(output_dir: str) -> int:
+    frame_paths = glob.glob(os.path.join(output_dir, "frame_*.png"))
+    latest_idx = 0
+    for frame_path in frame_paths:
+        match = re.search(r"frame_(\d+)\.png$", os.path.basename(frame_path))
+        if match:
+            latest_idx = max(latest_idx, int(match.group(1)))
+    return latest_idx
+
+def save_side_by_side_timeline(
+    scenario_name: str = "sample2_default",
+    num_paths: int = 100,
+    batch_k: int = 10,
+    graph_threshold: float = 1.0,
+    min_component_size: int = 15,
+    output_dir: str = "outputs_timeline",
+    seed: int = 0,
+    resume: bool = False,
+):
+    if batch_k <= 0:
+        raise ValueError("batch_k must be > 0")
+
+    np.random.seed(seed)
+    os.makedirs(output_dir, exist_ok=True)
+
     occ, map_size, map_resolution = load_grid_scenario(scenario_name, plot=False)
-    occ_grid = StochOccupancyGrid2D(map_resolution, round(map_size[0] / map_resolution),
-                                    round(map_size[1] / map_resolution), 0, 0, 10, occ.T)
+    occ_grid = StochOccupancyGrid2D(
+        map_resolution,
+        round(map_size[0] / map_resolution),
+        round(map_size[1] / map_resolution),
+        0,
+        0,
+        10,
+        occ.T
+    )
 
-    frequent_graph = FrequentSubgraph(occ_grid, "vector_incomplete")
-    frequent_graph.build_graph(threshold=4)
+    heatmap = HeatMap2DVector(occ_grid)
+    checkpoint_path = os.path.join(output_dir, CHECKPOINT_FILENAME)
+    metadata_path = os.path.join(output_dir, METADATA_FILENAME)
 
-    frequent_graph.prune_graph()
-
-    print("Number of nodes in the graph:", frequent_graph.graph.number_of_nodes())
-    print("Number of edges in the graph:", frequent_graph.graph.number_of_edges())
-
-    x_init = snap_to_grid([2, 2], map_resolution)
-    x_goal = snap_to_grid([75, 97], map_resolution)
-    problem = AStar_With_Graph([0, 0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, frequent_graph.graph, resolution=map_resolution)
-
-    problem_status = problem.solve()
-    if problem_status:
-        print("Path found!")
-
-        plt.figure(2)
-        occ_grid.plot_grid_and_path(problem.path)
-        # occ_grid.plot_smoothed_path(problem.smoothed_path)
-        plt.scatter(x_init[0], x_init[1], c='green', s=100, label='Start')
-        plt.scatter(x_goal[0], x_goal[1], c='gold', marker="*", s=100, label='Goal')
-        plt.show()
+    if resume:
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Cannot resume: checkpoint not found at {checkpoint_path}")
+        heatmap.heatmap = np.load(checkpoint_path)
+        if heatmap.heatmap.shape != (heatmap.height, heatmap.width, 8):
+            raise ValueError(
+                f"Checkpoint shape mismatch. Expected {(heatmap.height, heatmap.width, 8)}, "
+                f"got {heatmap.heatmap.shape}"
+            )
+        if os.path.exists(metadata_path):
+            with open(metadata_path, "r", encoding="utf-8") as f:
+                existing_metadata = json.load(f)
+        else:
+            existing_metadata = {}
     else:
-        print("No path found.")
+        heatmap.heatmap = np.zeros_like(heatmap.heatmap)
+        existing_metadata = {}
 
-    plt.figure(3)
-    occ_grid.plot_grid()
-    plt.scatter(x_init[0], x_init[1], c='green', s=100, label='Start', zorder=5)
-    plt.scatter(x_goal[0], x_goal[1], c='gold', marker="*", s=100, label='Goal')
+    frequent_graph = FrequentSubgraph(occ_grid)
+    frequent_graph.set_heat_map(heatmap.heatmap)
 
-    closed_set = problem.closed_set
-    xs, ys = zip(*closed_set)  # unzip into two sequences
-    plt.scatter(xs, ys, c='red', marker="o", s=0.25, label='Explored Nodes')
-    plt.show()
+    solved_paths_before = int(existing_metadata.get("cumulative_solved_paths", 0))
+    attempted_before = int(existing_metadata.get("cumulative_attempted_paths", 0))
+    snapshot_idx = int(existing_metadata.get("snapshots_saved", _latest_frame_index(output_dir)))
 
-    problem.show_path_on_graph()
+    solved_paths_this_run = 0
+    attempted_this_run = 0
+
+    while solved_paths_this_run < num_paths:
+        attempted_this_run += 1
+        x_init = generate_random_free_point(occ_grid)
+        x_goal = generate_random_free_point(occ_grid)
+        problem = AStar([0, 0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
+
+        if not problem.solve():
+            continue
+
+        heatmap.add_path(problem.path, increment=1.0)
+        solved_paths_this_run += 1
+        cumulative_solved_paths = solved_paths_before + solved_paths_this_run
+        cumulative_attempted_paths = attempted_before + attempted_this_run
+
+        if cumulative_solved_paths % batch_k != 0 and solved_paths_this_run != num_paths:
+            continue
+
+        snapshot_idx += 1
+        frequent_graph.build_graph(threshold=graph_threshold, reset_graph=True)
+        frequent_graph.prune_graph(min_component_size=min_component_size)
+
+        fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+        heatmap.plot_heatmap(ax=axes[0], show=False, add_legend=False)
+        axes[0].set_title(f"Directional Heatmap | solved_paths={cumulative_solved_paths}")
+
+        frequent_graph.visualize_graph(ax=axes[1], show=False)
+        axes[1].set_title(
+            f"Sparse Graph | nodes={frequent_graph.graph.number_of_nodes()} edges={frequent_graph.graph.number_of_edges()}"
+        )
+
+        fig.tight_layout()
+        filename = f"frame_{snapshot_idx:04d}.png"
+        output_path = os.path.join(output_dir, filename)
+        fig.savefig(output_path, dpi=160, bbox_inches='tight')
+        plt.close(fig)
+
+        np.save(checkpoint_path, heatmap.heatmap)
+        print(
+            f"[snapshot {snapshot_idx:04d}] solved_paths={cumulative_solved_paths} attempted={cumulative_attempted_paths} "
+            f"nodes={frequent_graph.graph.number_of_nodes()} edges={frequent_graph.graph.number_of_edges()} "
+            f"file={output_path}"
+        )
+
+    result = {
+        "scenario_name": scenario_name,
+        "num_paths": num_paths,
+        "batch_k": batch_k,
+        "graph_threshold": graph_threshold,
+        "min_component_size": min_component_size,
+        "output_dir": output_dir,
+        "seed": seed,
+        "resume": resume,
+        "paths_added_this_run": solved_paths_this_run,
+        "attempted_this_run": attempted_this_run,
+        "cumulative_solved_paths": solved_paths_before + solved_paths_this_run,
+        "cumulative_attempted_paths": attempted_before + attempted_this_run,
+        "snapshots_saved": snapshot_idx,
+        "checkpoint_file": checkpoint_path,
+    }
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2)
+    print(f"Saved run metadata: {metadata_path}")
+    return result
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Sparse graph utilities and side-by-side timeline exporter.")
+    parser.add_argument("--mode", choices=["demo", "timeline"], default="timeline")
+    parser.add_argument("--scenario-name", default="sample2_default")
+    parser.add_argument("--num-paths", type=int, default=100)
+    parser.add_argument("--batch-k", type=int, default=10)
+    parser.add_argument("--graph-threshold", type=float, default=1.0)
+    parser.add_argument("--min-component-size", type=int, default=15)
+    parser.add_argument("--output-dir", default="outputs_timeline")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--resume", action="store_true", help="Resume timeline from checkpoint in output-dir.")
+    args = parser.parse_args()
+
+    if args.mode == "timeline":
+        result = save_side_by_side_timeline(
+            scenario_name=args.scenario_name,
+            num_paths=args.num_paths,
+            batch_k=args.batch_k,
+            graph_threshold=args.graph_threshold,
+            min_component_size=args.min_component_size,
+            output_dir=args.output_dir,
+            seed=args.seed,
+            resume=args.resume,
+        )
+        print("Timeline export completed:", result)
+    else:
+        scenario_name = args.scenario_name
+        occ, map_size, map_resolution = load_grid_scenario(scenario_name, plot=False)
+        occ_grid = StochOccupancyGrid2D(map_resolution, round(map_size[0] / map_resolution),
+                                        round(map_size[1] / map_resolution), 0, 0, 10, occ.T)
+
+        frequent_graph = FrequentSubgraph(occ_grid, "vector_incomplete")
+        frequent_graph.build_graph(threshold=args.graph_threshold)
+        frequent_graph.prune_graph(min_component_size=args.min_component_size)
+
+        print("Number of nodes in the graph:", frequent_graph.graph.number_of_nodes())
+        print("Number of edges in the graph:", frequent_graph.graph.number_of_edges())
+
+        x_init = snap_to_grid([2, 2], map_resolution)
+        x_goal = snap_to_grid([75, 97], map_resolution)
+        problem = AStar_With_Graph([0, 0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, frequent_graph.graph, resolution=map_resolution)
+
+        problem_status = problem.solve()
+        if problem_status:
+            print("Path found!")
+            plt.figure(2)
+            occ_grid.plot_grid_and_path(problem.path)
+            plt.scatter(x_init[0], x_init[1], c='green', s=100, label='Start')
+            plt.scatter(x_goal[0], x_goal[1], c='gold', marker="*", s=100, label='Goal')
+            plt.show()
+        else:
+            print("No path found.")
+
+        plt.figure(3)
+        occ_grid.plot_grid()
+        plt.scatter(x_init[0], x_init[1], c='green', s=100, label='Start', zorder=5)
+        plt.scatter(x_goal[0], x_goal[1], c='gold', marker="*", s=100, label='Goal')
+
+        closed_set = problem.closed_set
+        xs, ys = zip(*closed_set)  # unzip into two sequences
+        plt.scatter(xs, ys, c='red', marker="o", s=0.25, label='Explored Nodes')
+        plt.show()
+
+        problem.show_path_on_graph()
