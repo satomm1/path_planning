@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
+from scipy.ndimage import distance_transform_edt
 
 class StochOccupancyGrid2D(object):
     def __init__(self, resolution, width, height, origin_x, origin_y, window_size, probs, thresh=0.5, robot_d=0.25):
@@ -19,7 +20,10 @@ class StochOccupancyGrid2D(object):
         self.cmap = ListedColormap(['gray', '#9DC6F2', 'black'])
         self.bounds = [-1.5, -0.5, 0.5, 1.5]
         self.norm = BoundaryNorm(self.bounds, self.cmap.N)
-        
+
+        # Precompute the distance map
+        self.distance_map = None
+        self.compute_distance_map()
 
     def snap_to_grid(self, x):
         return self.resolution * round(x[0] / self.resolution), self.resolution * round(x[1] / self.resolution)
@@ -29,6 +33,19 @@ class StochOccupancyGrid2D(object):
 
     def get_index(self, x):
         return np.round((x[0] - self.origin_x) / self.resolution), np.round((x[1] - self.origin_y) / self.resolution)
+
+    def compute_distance_map(self):
+        binary_map = (self.probs >= 0.5) | (self.probs < 0)
+        reverse_map = 1 - binary_map
+
+        self.distance_map = distance_transform_edt(reverse_map) * self.resolution
+
+    def get_distance_to_obstacle(self, pose):
+        x, y, _ = pose
+        x_idx, y_idx = self.get_index((x, y))
+        x_idx = int(np.clip(x_idx, 0, self.width - 1))
+        y_idx = int(np.clip(y_idx, 0, self.height - 1))
+        return self.distance_map[y_idx, x_idx]
 
     def is_free(self, state):
         # combine the probabilities of each cell by assuming independence
