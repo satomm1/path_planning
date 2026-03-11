@@ -4,7 +4,7 @@ import networkx as nx
 
 from occupancy_grid import StochOccupancyGrid2D
 from heat_map import HeatMap2DVector
-from path_planning import generate_sample_grid2
+from grid_loader import load_grid_scenario
 from a_star import AStar_With_Graph
 from utils import *
 
@@ -72,10 +72,8 @@ def heuristic(a, b):
     return np.linalg.norm(np.array(a) - np.array(b), ord=1)
 
 if __name__ == "__main__":
-    map_size = [100, 100]
-    map_resolution = 0.2
-
-    occ = generate_sample_grid2(map_size, map_resolution, plot=False)
+    scenario_name = "sample2_default"
+    occ, map_size, map_resolution = load_grid_scenario(scenario_name, plot=False)
     occ_grid = StochOccupancyGrid2D(map_resolution, round(map_size[0] / map_resolution),
                                     round(map_size[1] / map_resolution), 0, 0, 10, occ.T)
 
