@@ -33,14 +33,26 @@ class HeatMap2D(object):
             if 0 <= x_idx < self.width and 0 <= y_idx < self.height:
                 self.heatmap[x_idx, y_idx] += increment
 
-    def plot_heatmap(self):
-        self.occ_grid.plot_grid()
-        plt.imshow(self.heatmap.T, cmap='hot', origin='lower', extent=self.extent, aspect='equal', alpha=0.4, zorder=2)
-        plt.colorbar(label='Heat Intensity')
-        plt.title("Heat Map")
-        plt.xlabel("X (m)")
-        plt.ylabel("Y (m)")
-        plt.show()
+    def plot_heatmap(self, ax=None, show=True):
+        if ax is None:
+            _, ax = plt.subplots()
+        self.occ_grid.plot_grid(ax=ax)
+        im = ax.imshow(
+            self.heatmap.T,
+            cmap='hot',
+            origin='lower',
+            extent=self.extent,
+            aspect='equal',
+            alpha=0.4,
+            zorder=2
+        )
+        plt.colorbar(im, ax=ax, label='Heat Intensity')
+        ax.set_title("Heat Map")
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        if show:
+            plt.show()
+        return ax
 
     def load_heatmap(self, filename_prefix):
         filepath = f"{filename_prefix}_heatmap.npy"
@@ -83,11 +95,13 @@ class HeatMap2DVector(HeatMap2D):
                     dir_idx = direction_map[direction]
                     self.heatmap[x_idx, y_idx, dir_idx] += increment
 
-    def plot_heatmap(self):
-        # self.occ_grid.plot_grid()
+    def plot_heatmap(self, ax=None, show=True, min_visible_intensity=5.0, add_legend=True):
+        if ax is None:
+            _, ax = plt.subplots()
+        self.occ_grid.plot_grid(ax=ax)
         total_heatmap = np.sum(self.heatmap, axis=2).T
         # Zero out low values for better visibility
-        total_heatmap = np.where(total_heatmap < 5, 0.0, total_heatmap)
+        total_heatmap = np.where(total_heatmap < min_visible_intensity, 0.0, total_heatmap)
 
         dominant_direction = np.argmax(self.heatmap, axis=2).T
         # Map direction index to angle (degrees) for hue
@@ -111,26 +125,28 @@ class HeatMap2DVector(HeatMap2D):
         alpha = np.where(total_heatmap > 0, 1, 0.0)  # 0.8 can be adjusted
         rgba = np.dstack((rgb, alpha))
 
-        plt.imshow(rgba, origin='lower', extent=self.extent, aspect='equal', zorder=2)
-        # plt.colorbar(label='Heat Intensity')
+        ax.imshow(rgba, origin='lower', extent=self.extent, aspect='equal', zorder=2)
 
         # Add legend mapping direction -> hue
-        from matplotlib.lines import Line2D
-        dir_labels = ['↖', '↑', '↗', '→', '←', '↙', '↓', '↘']
-        # Build representative RGB colors for each direction (full saturation/value)
-        legend_hsv = np.zeros((len(dir_angles), 3))
-        legend_hsv[:, 0] = (dir_angles % 360) / 360.0
-        legend_hsv[:, 1] = 1.0
-        legend_hsv[:, 2] = 1.0
-        legend_rgbs = hsv_to_rgb(legend_hsv)
-        handles = [Line2D([0], [0], marker='s', color='none', markerfacecolor=tuple(c), markersize=10, linestyle='') for
-                   c in legend_rgbs]
-        plt.legend(handles, dir_labels, title='Direction (hue)', bbox_to_anchor=(1.35, 1.0))
+        if add_legend:
+            from matplotlib.lines import Line2D
+            dir_labels = ['↖', '↑', '↗', '→', '←', '↙', '↓', '↘']
+            # Build representative RGB colors for each direction (full saturation/value)
+            legend_hsv = np.zeros((len(dir_angles), 3))
+            legend_hsv[:, 0] = (dir_angles % 360) / 360.0
+            legend_hsv[:, 1] = 1.0
+            legend_hsv[:, 2] = 1.0
+            legend_rgbs = hsv_to_rgb(legend_hsv)
+            handles = [Line2D([0], [0], marker='s', color='none', markerfacecolor=tuple(c), markersize=10, linestyle='') for
+                       c in legend_rgbs]
+            ax.legend(handles, dir_labels, title='Direction (hue)', bbox_to_anchor=(1.35, 1.0))
 
-        plt.title("Heat Map (HSV: hue=direction, value=intensity)")
-        plt.xlabel("X (m)")
-        plt.ylabel("Y (m)")
-        plt.show()
+        ax.set_title("Heat Map (HSV: hue=direction, value=intensity)")
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        if show:
+            plt.show()
+        return ax
 
 
 class HeatMap2DVectorField(HeatMap2D):
@@ -153,8 +169,10 @@ class HeatMap2DVectorField(HeatMap2D):
                     self.heatmap[x_idx, y_idx, 0] += direction[0] * increment
                     self.heatmap[x_idx, y_idx, 1] += direction[1] * increment
 
-    def plot_heatmap(self):
-        self.occ_grid.plot_grid()
+    def plot_heatmap(self, ax=None, show=True):
+        if ax is None:
+            _, ax = plt.subplots()
+        self.occ_grid.plot_grid(ax=ax)
         X, Y = np.meshgrid(np.arange(self.origin_x, self.origin_x + self.width * self.resolution, self.resolution),
                            np.arange(self.origin_y, self.origin_y + self.height * self.resolution, self.resolution))
         U = self.heatmap[:, :, 0].T
@@ -163,22 +181,28 @@ class HeatMap2DVectorField(HeatMap2D):
         C = M.copy()
         zero_mask = M < 4
         C[zero_mask] = np.nan
-        plt.quiver(X, Y, U, V, C, cmap='viridis', zorder=2, scale=200)
-        plt.title("Heat Map Vector Field")
-        plt.xlabel("X (m)")
-        plt.ylabel("Y (m)")
-        plt.colorbar(label='Vector Magnitude')
-        plt.show()
+        quiver = ax.quiver(X, Y, U, V, C, cmap='viridis', zorder=2, scale=200)
+        ax.set_title("Heat Map Vector Field")
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        plt.colorbar(quiver, ax=ax, label='Vector Magnitude')
+        if show:
+            plt.show()
+        return ax
 
-    def plot_heatmap_no_vectors(self):
-        self.occ_grid.plot_grid()
+    def plot_heatmap_no_vectors(self, ax=None, show=True):
+        if ax is None:
+            _, ax = plt.subplots()
+        self.occ_grid.plot_grid(ax=ax)
         magnitude = np.sqrt(self.heatmap[:, :, 0]**2 + self.heatmap[:, :, 1]**2).T
-        plt.imshow(magnitude, cmap='hot', origin='lower', extent=self.extent, aspect='equal', alpha=0.6, zorder=2)
-        plt.colorbar(label='Heat Intensity')
-        plt.title("Heat Map Magnitude")
-        plt.xlabel("X (m)")
-        plt.ylabel("Y (m)")
-        plt.show()
+        im = ax.imshow(magnitude, cmap='hot', origin='lower', extent=self.extent, aspect='equal', alpha=0.6, zorder=2)
+        plt.colorbar(im, ax=ax, label='Heat Intensity')
+        ax.set_title("Heat Map Magnitude")
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        if show:
+            plt.show()
+        return ax
 
 
 
