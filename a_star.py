@@ -10,6 +10,7 @@ from utils import *
 
 class AStar(object):
     """Represents a motion planning problem to be solved using A*"""
+    SUPPORTED_SOLVER_MODES = {"modified", "vanilla"}
 
     def __init__(self, statespace_lo, statespace_hi, x_init, x_goal, occupancy: StochOccupancyGrid2D, resolution=1, robot_d=0.4):
         self.statespace_lo = np.array(statespace_lo)  # state space lower bound (e.g., [-5, -5])
@@ -255,7 +256,18 @@ class AStar(object):
                     self.est_cost_through[x_neigh] = tentative_cost_to_arrive + self.manhattan_distance(x_neigh, self.x_goal)
         return False
 
-    def solve(self, plot=False):
+    def solve(self, plot=False, mode="modified"):
+        if mode not in self.SUPPORTED_SOLVER_MODES:
+            raise ValueError(f"Unsupported solver mode '{mode}'. Supported modes: {sorted(self.SUPPORTED_SOLVER_MODES)}")
+
+        if mode == "vanilla":
+            return self.vanilla_solve(plot=plot)
+        elif mode == "modified":
+            return self.modified_solve(plot=plot)
+        else:
+            raise ValueError(f"Unsupported solver mode '{mode}'. Supported modes: {sorted(self.SUPPORTED_SOLVER_MODES)}")
+
+    def modified_solve(self, plot=False):
 
         t_start = time.time()
         while self.priority_queue.qsize() > 0:
