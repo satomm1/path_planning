@@ -87,8 +87,8 @@ if __name__ == "__main__":
     print("Number of nodes in the graph:", frequent_graph.graph.number_of_nodes())
     print("Number of edges in the graph:", frequent_graph.graph.number_of_edges())
 
-    x_init = snap_to_grid([50, 3], map_resolution)
-    x_goal = snap_to_grid([90, 97], map_resolution)
+    x_init = snap_to_grid([2, 2], map_resolution)
+    x_goal = snap_to_grid([75, 97], map_resolution)
     problem = AStar_With_Graph([0, 0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, frequent_graph.graph, resolution=map_resolution)
 
     problem_status = problem.solve(plot=False)
@@ -97,7 +97,7 @@ if __name__ == "__main__":
 
         plt.figure(2)
         occ_grid.plot_grid_and_path(problem.path)
-        occ_grid.plot_smoothed_path(problem.smoothed_path)
+        # occ_grid.plot_smoothed_path(problem.smoothed_path)
         plt.scatter(x_init[0], x_init[1], c='green', s=100, label='Start')
         plt.scatter(x_goal[0], x_goal[1], c='gold', marker="*", s=100, label='Goal')
         plt.show()
