@@ -523,7 +523,7 @@ if __name__ == "__main__":
         x_init = snap_to_grid([2, 25], map_resolution)
         x_goal = snap_to_grid([97, 50], map_resolution)
         problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
-        problem_status = problem.solve(plot=False)
+        problem_status = problem.solve()
         path1 = problem.path if problem_status else None
         with open("path1.pkl", "wb") as f:
             pickle.dump(path1, f)
@@ -541,7 +541,7 @@ if __name__ == "__main__":
         x_init = snap_to_grid([2, 40], map_resolution)
         x_goal = snap_to_grid([97, 50], map_resolution)
         problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
-        problem_status = problem.solve(plot=False)
+        problem_status = problem.solve()
         path2 = problem.path if problem_status else None
         with open("path2.pkl", "wb") as f:
             pickle.dump(path2, f)
@@ -557,7 +557,7 @@ if __name__ == "__main__":
         x_init = snap_to_grid([50, 80], map_resolution)
         x_goal = snap_to_grid([97, 20], map_resolution)
         problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
-        problem_status = problem.solve(plot=False)
+        problem_status = problem.solve()
         path3 = problem.path if problem_status else None
         with open("path3.pkl", "wb") as f:
             pickle.dump(path3, f)
@@ -574,7 +574,7 @@ if __name__ == "__main__":
         x_goal = snap_to_grid([97, 75], map_resolution)
         problem = AStar([0, 0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid,
                         resolution=map_resolution)
-        problem_status = problem.solve(plot=False)
+        problem_status = problem.solve()
         path4 = problem.path if problem_status else None
         with open("path4.pkl", "wb") as f:
             pickle.dump(path4, f)

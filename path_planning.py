@@ -16,7 +16,7 @@ if __name__ == "__main__":
     x_goal = snap_to_grid([15, 3], map_resolution)
     problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
 
-    problem_status = problem.solve(plot=False)
+    problem_status = problem.solve()
     if problem_status:
         print("Path found!")
 

@@ -25,7 +25,7 @@ class TestGrid1(TestAStar):
         x_init = snap_to_grid([3, 3], self.map_resolution)
         x_goal = snap_to_grid([97, 97], self.map_resolution)
         problem = AStar([0,0], snap_to_grid(self.map_size, self.map_resolution), x_init, x_goal, self.occ_grid, resolution=self.map_resolution)
-        problem_status = problem.solve(plot=False)
+        problem_status = problem.solve()
         self.assertTrue(problem_status)
 
     def test_path_planning_2(self):
@@ -33,7 +33,7 @@ class TestGrid1(TestAStar):
         x_goal = snap_to_grid([50, 50], self.map_resolution)
         problem = AStar([0, 0], snap_to_grid(self.map_size, self.map_resolution), x_init, x_goal, self.occ_grid,
                         resolution=self.map_resolution)
-        problem_status = problem.solve(plot=False)
+        problem_status = problem.solve()
         self.assertTrue(problem_status)
 
     def test_path_planning_vanilla_mode(self):
@@ -41,7 +41,7 @@ class TestGrid1(TestAStar):
         x_goal = snap_to_grid([50, 50], self.map_resolution)
         problem = AStar([0, 0], snap_to_grid(self.map_size, self.map_resolution), x_init, x_goal, self.occ_grid,
                         resolution=self.map_resolution)
-        problem_status = problem.solve(plot=False, mode="vanilla")
+        problem_status = problem.solve(mode="vanilla")
         self.assertTrue(problem_status)
 
     def test_invalid_solver_mode_raises(self):
@@ -50,4 +50,4 @@ class TestGrid1(TestAStar):
         problem = AStar([0, 0], snap_to_grid(self.map_size, self.map_resolution), x_init, x_goal, self.occ_grid,
                         resolution=self.map_resolution)
         with self.assertRaises(ValueError):
-            problem.solve(plot=False, mode="invalid-mode")
+            problem.solve(mode="invalid-mode")

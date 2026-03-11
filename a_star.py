@@ -256,18 +256,18 @@ class AStar(object):
                     self.est_cost_through[x_neigh] = tentative_cost_to_arrive + self.manhattan_distance(x_neigh, self.x_goal)
         return False
 
-    def solve(self, plot=False, mode="modified"):
+    def solve(self, mode="modified"):
         if mode not in self.SUPPORTED_SOLVER_MODES:
             raise ValueError(f"Unsupported solver mode '{mode}'. Supported modes: {sorted(self.SUPPORTED_SOLVER_MODES)}")
 
         if mode == "vanilla":
-            return self.vanilla_solve(plot=plot)
+            return self.vanilla_solve()
         elif mode == "modified":
-            return self.modified_solve(plot=plot)
+            return self.modified_solve()
         else:
             raise ValueError(f"Unsupported solver mode '{mode}'. Supported modes: {sorted(self.SUPPORTED_SOLVER_MODES)}")
 
-    def modified_solve(self, plot=False):
+    def modified_solve(self):
 
         t_start = time.time()
         while self.priority_queue.qsize() > 0:
@@ -308,7 +308,7 @@ class AStar(object):
                     )
         return False
 
-    def vanilla_solve(self, plot=False):
+    def vanilla_solve(self):
         t_start = time.time()
         while self.priority_queue.qsize() > 0:
             current_cost, x_current = self.priority_queue.get()

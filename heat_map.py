@@ -204,7 +204,7 @@ if __name__ == "__main__":
         x_goal = generate_random_free_point(occ_grid)
 
         problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
-        if problem.solve(plot=False):
+        if problem.solve():
             heatmap.add_path(problem.path, increment=1.0)
 
     heatmap.plot_heatmap()

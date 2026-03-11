@@ -125,7 +125,7 @@ if __name__ == "__main__":
     x_goal = snap_to_grid([50, 15], map_resolution)
     problem = AStar([0, 0], snap_to_grid(map_size, map_resolution), x_init, x_goal, grid, resolution=map_resolution)
 
-    problem_status = problem.solve(plot=False)
+    problem_status = problem.solve()
     path = problem.path
 
     probs = grid.probs
