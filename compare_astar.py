@@ -3,6 +3,7 @@ import csv
 import json
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
 
 from a_star import AStar
@@ -231,7 +232,56 @@ def print_summary(summary, attempts, requested_routes):
         print(f"  right_wall_std mean/std: {s['right_wall_std_mean']:.4f} / {s['right_wall_std_std']:.4f}")
 
 
-def run_experiment(scenario, num_routes, seed, output, max_attempts, wall_dist_thresh, resume_from=None):
+def plot_sample_paths(occ_grid, sample_pairs, plot_output=None):
+    if not sample_pairs:
+        print("No sample paths available to plot.")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    if not isinstance(axes, np.ndarray):
+        axes = np.array([axes])
+
+    cmap = plt.get_cmap("tab10", max(len(sample_pairs), 1))
+    for j, solver in enumerate(SOLVER_MODES):
+        ax = axes[j]
+        occ_grid.plot_grid(ax=ax)
+        for i, sample in enumerate(sample_pairs):
+            path = sample[f"{solver}_path"]
+            xs, ys = zip(*path)
+            color = cmap(i % cmap.N)
+            label = f"trial {sample['trial']}"
+            ax.plot(xs, ys, color=color, linewidth=1.4, alpha=0.85, label=label)
+            ax.scatter(sample["x_init"][0], sample["x_init"][1], c=[color], s=12, zorder=5)
+            ax.scatter(sample["x_goal"][0], sample["x_goal"][1], c=[color], marker="*", s=22, zorder=5)
+
+        ax.set_title(f"{solver} ({len(sample_pairs)} paths)")
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+        if len(sample_pairs) <= 10:
+            ax.legend(loc="upper right", fontsize=8)
+
+    fig.tight_layout()
+    if plot_output:
+        plot_path = Path(plot_output)
+        plot_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Saved sample path figure to: {plot_output}")
+    else:
+        plt.show()
+
+
+def run_experiment(
+    scenario,
+    num_routes,
+    seed,
+    output,
+    max_attempts,
+    wall_dist_thresh,
+    resume_from=None,
+    plot_samples=0,
+    plot_output=None,
+):
     rng = np.random.default_rng(seed)
     occ_grid, _, resolution, statespace_hi = build_occ_grid(scenario)
 
@@ -250,6 +300,7 @@ def run_experiment(scenario, num_routes, seed, output, max_attempts, wall_dist_t
 
     attempts = 0
     target_total_routes = len(records) + num_routes
+    sample_pairs = []
     while len(records) < target_total_routes:
         attempts += 1
         if attempts > max_attempts:
@@ -270,9 +321,10 @@ def run_experiment(scenario, num_routes, seed, output, max_attempts, wall_dist_t
         if vanilla_path is None or modified_path is None:
             continue
 
+        trial_num = len(records) + 1
         records.append(
             {
-                "trial": len(records) + 1,
+                "trial": trial_num,
                 "x_init": [float(x_init[0]), float(x_init[1])],
                 "x_goal": [float(x_goal[0]), float(x_goal[1])],
                 "vanilla": compute_metrics(vanilla_path, occ_grid, dist_thresh=wall_dist_thresh),
@@ -280,6 +332,16 @@ def run_experiment(scenario, num_routes, seed, output, max_attempts, wall_dist_t
             }
         )
         seen_pairs.add(pair_key)
+        if len(sample_pairs) < plot_samples:
+            sample_pairs.append(
+                {
+                    "trial": trial_num,
+                    "x_init": [float(x_init[0]), float(x_init[1])],
+                    "x_goal": [float(x_goal[0]), float(x_goal[1])],
+                    "vanilla_path": vanilla_path,
+                    "modified_path": modified_path,
+                }
+            )
 
     summary = summarize_by_solver(records)
     print_summary(summary, attempts=prior_attempts + attempts, requested_routes=len(records))
@@ -310,6 +372,9 @@ def run_experiment(scenario, num_routes, seed, output, max_attempts, wall_dist_t
     elif resume_from:
         save_results(resume_from, payload)
         print(f"\nSaved resumed results to: {resume_from}")
+
+    if plot_samples > 0:
+        plot_sample_paths(occ_grid, sample_pairs, plot_output=plot_output)
 
 
 def parse_args():
@@ -346,6 +411,18 @@ def parse_args():
         default=None,
         help="Path to a previous JSON output from compare_astar.py to continue from",
     )
+    parser.add_argument(
+        "--plot-samples",
+        type=int,
+        default=0,
+        help="Number of new sample route pairs to plot side-by-side (vanilla vs modified)",
+    )
+    parser.add_argument(
+        "--plot-output",
+        type=str,
+        default=None,
+        help="Optional output image path for sample plot (e.g. samples.png); if omitted, shows figure",
+    )
     args = parser.parse_args()
     if args.num_routes <= 0:
         raise ValueError("--num-routes must be > 0")
@@ -353,6 +430,8 @@ def parse_args():
         args.max_attempts = max(100, 100 * args.num_routes)
     if args.max_attempts <= 0:
         raise ValueError("--max-attempts must be > 0")
+    if args.plot_samples < 0:
+        raise ValueError("--plot-samples must be >= 0")
     return args
 
 
@@ -366,4 +445,6 @@ if __name__ == "__main__":
         max_attempts=cli.max_attempts,
         wall_dist_thresh=cli.wall_dist_thresh,
         resume_from=cli.resume_from,
+        plot_samples=cli.plot_samples,
+        plot_output=cli.plot_output,
     )
