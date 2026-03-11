@@ -586,14 +586,15 @@ if __name__ == "__main__":
     ############## Sequential Path Planning Example ##############
     # Assign uniform time steps for the other agent (path2)
     path2_times = [i * map_resolution * (1 / NOMINAL_VELOCITY) for i in range(len(path2))]
-    path3_times = [i * map_resolution * (1 / (NOMINAL_VELOCITY/1.2)) for i in range(len(path3))]
+    path3_times = [i * map_resolution * (1 / (NOMINAL_VELOCITY/1.5)) for i in range(len(path3))]
+    path4_times = [i * map_resolution * (1 / (NOMINAL_VELOCITY)) for i in range(len(path4))]
 
     # Create the planner
-    planner = MultiAgentSequentialPlanner(occ_grid, [path2, path3], [path2_times, path3_times], path=path1)
+    planner = MultiAgentSequentialPlanner(occ_grid, [path2, path3, path4], [path2_times, path3_times, path4_times], path=path1)
 
     # Plan and visualize
-    # times = planner.plan()
-    # create_video([path1, path2, path3], [times, path2_times, path3_times], occ_grid=occ_grid, output_file="video_sequential.gif")
+    times = planner.plan()
+    create_video([path1, path2, path3, path4], [times, path2_times, path3_times, path4_times], occ_grid=occ_grid, output_file="video_sequential.gif")
 
     ############## Simultaneous Path Planning Example ##############
     # Reduce granularity of paths for faster solving
@@ -610,7 +611,7 @@ if __name__ == "__main__":
 
     ############## Combined Path Planning Example ##############
     # Assign uniform time steps for the already planned paths (path2/path3)
-    path2_times = [i * map_resolution * (1 / NOMINAL_VELOCITY) for i in range(len(path2))]
+    path2_times = [i * map_resolution * (1 / (1.3*NOMINAL_VELOCITY)) for i in range(len(path2))]
     path3_times = [i * map_resolution * (1 / (NOMINAL_VELOCITY / 1.2)) for i in range(len(path3))]
 
     # Create the planner
