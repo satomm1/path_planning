@@ -1,6 +1,7 @@
 import json
 import argparse
 from pathlib import Path
+import ast
 
 import numpy as np
 
@@ -24,6 +25,173 @@ def _default_config_path():
         if candidate.exists():
             return candidate
     return candidates[0]
+
+
+def _resolve_config_path(config_path=None):
+    if config_path:
+        raw_path = Path(config_path).expanduser()
+        if raw_path.is_absolute():
+            return raw_path
+        module_dir = Path(__file__).resolve().parent
+        cwd_candidate = Path.cwd() / raw_path
+        module_candidate = module_dir / raw_path
+        return cwd_candidate if cwd_candidate.exists() else module_candidate
+    return _default_config_path()
+
+
+def _resolve_relative_path(path_value, base_dir):
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return path
+    return (base_dir / path).resolve()
+
+
+def _parse_yaml_scalar(raw_value):
+    raw = raw_value.strip()
+    if not raw:
+        return ""
+
+    if (raw.startswith("[") and raw.endswith("]")) or (
+        raw.startswith("{") and raw.endswith("}")
+    ):
+        return ast.literal_eval(raw)
+
+    lowered = raw.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+
+    try:
+        return int(raw)
+    except ValueError:
+        pass
+
+    try:
+        return float(raw)
+    except ValueError:
+        pass
+
+    if (raw.startswith('"') and raw.endswith('"')) or (
+        raw.startswith("'") and raw.endswith("'")
+    ):
+        return raw[1:-1]
+    return raw
+
+
+def _load_simple_yaml(yaml_path):
+    data = {}
+    with yaml_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            clean = line.split("#", 1)[0].strip()
+            if not clean or ":" not in clean:
+                continue
+            key, value = clean.split(":", 1)
+            data[key.strip()] = _parse_yaml_scalar(value)
+    return data
+
+
+def _read_pgm_token(file_obj):
+    token = bytearray()
+    while True:
+        ch = file_obj.read(1)
+        if not ch:
+            break
+        if ch.isspace():
+            if token:
+                break
+            continue
+        if ch == b"#":
+            file_obj.readline()
+            if token:
+                break
+            continue
+        token.extend(ch)
+    return bytes(token)
+
+
+def _load_pgm_normalized(pgm_path):
+    with pgm_path.open("rb") as f:
+        magic = _read_pgm_token(f)
+        if magic != b"P5":
+            raise ValueError(f"Unsupported PGM format in '{pgm_path}': expected P5.")
+
+        width_token = _read_pgm_token(f)
+        height_token = _read_pgm_token(f)
+        maxval_token = _read_pgm_token(f)
+        if not width_token or not height_token or not maxval_token:
+            raise ValueError(f"Invalid PGM header in '{pgm_path}'.")
+
+        width = int(width_token)
+        height = int(height_token)
+        maxval = int(maxval_token)
+        if width <= 0 or height <= 0 or maxval <= 0:
+            raise ValueError(f"Invalid PGM dimensions/maxval in '{pgm_path}'.")
+
+        if maxval < 256:
+            dtype = np.uint8
+        else:
+            dtype = ">u2"
+
+        count = width * height
+        data = np.fromfile(f, dtype=dtype, count=count)
+        if data.size != count:
+            raise ValueError(f"Incomplete pixel data in '{pgm_path}'.")
+
+        image = data.reshape((height, width)).astype(np.float32) / float(maxval)
+        return image, width, height
+
+
+def _crop_unknown_only_border(occ_xy):
+    known = occ_xy != -1
+    if not np.any(known):
+        return occ_xy
+
+    known_x = np.any(known, axis=1)
+    known_y = np.any(known, axis=0)
+    x_idx = np.where(known_x)[0]
+    y_idx = np.where(known_y)[0]
+    x0, x1 = x_idx[0], x_idx[-1] + 1
+    y0, y1 = y_idx[0], y_idx[-1] + 1
+    return occ_xy[x0:x1, y0:y1]
+
+
+def _load_occ_from_map_yaml(map_yaml_path, crop_unknown=False):
+    yaml_data = _load_simple_yaml(map_yaml_path)
+    required = {"image", "resolution", "negate", "occupied_thresh", "free_thresh"}
+    missing = required - set(yaml_data.keys())
+    if missing:
+        missing_str = ", ".join(sorted(missing))
+        raise ValueError(f"Map YAML '{map_yaml_path}' missing keys: {missing_str}")
+
+    image_path = _resolve_relative_path(yaml_data["image"], map_yaml_path.parent)
+    if not image_path.exists():
+        raise FileNotFoundError(f"Map image not found: {image_path}")
+
+    image_norm, width, height = _load_pgm_normalized(image_path)
+
+    resolution = float(yaml_data["resolution"])
+    negate = int(yaml_data["negate"])
+    occupied_thresh = float(yaml_data["occupied_thresh"])
+    free_thresh = float(yaml_data["free_thresh"])
+    if resolution <= 0:
+        raise ValueError(f"Map YAML '{map_yaml_path}' resolution must be positive.")
+    if negate not in (0, 1):
+        raise ValueError(f"Map YAML '{map_yaml_path}' negate must be 0 or 1.")
+
+    occ_prob = image_norm if negate == 1 else (1.0 - image_norm)
+    occ_yx = np.full((height, width), -1.0, dtype=np.float32)
+    occ_yx[occ_prob > occupied_thresh] = 1.0
+    occ_yx[occ_prob < free_thresh] = 0.0
+
+    # ROS image origin is top-left; flip so grid y increases upward.
+    occ_yx = np.flipud(occ_yx)
+    occ_xy = occ_yx.T
+    if crop_unknown:
+        occ_xy = _crop_unknown_only_border(occ_xy)
+
+    map_size = [occ_xy.shape[0] * resolution, occ_xy.shape[1] * resolution]
+    return occ_xy, map_size, resolution
 
 
 def _point_to_grid(x, map_resolution):
@@ -142,17 +310,7 @@ def _build_from_operations(scenario_name, map_size, map_resolution, operations):
 
 
 def load_grid_config(config_path=None):
-    if config_path:
-        raw_path = Path(config_path).expanduser()
-        if raw_path.is_absolute():
-            path = raw_path
-        else:
-            module_dir = Path(__file__).resolve().parent
-            cwd_candidate = Path.cwd() / raw_path
-            module_candidate = module_dir / raw_path
-            path = cwd_candidate if cwd_candidate.exists() else module_candidate
-    else:
-        path = _default_config_path()
+    path = _resolve_config_path(config_path=config_path)
     if not path.exists():
         raise FileNotFoundError(f"Grid scenario config not found: {path}")
 
@@ -172,6 +330,7 @@ def load_grid_scenario(
     save_path=None,
     show_plot=True,
 ):
+    config_file = _resolve_config_path(config_path=config_path)
     config = load_grid_config(config_path=config_path)
     if scenario_name not in config:
         available = ", ".join(sorted(config.keys()))
@@ -183,32 +342,51 @@ def load_grid_scenario(
     if not isinstance(scenario, dict):
         raise ValueError(f"Scenario '{scenario_name}' must be a JSON object.")
 
-    required_keys = {"map_size", "map_resolution", "operations"}
-    missing = required_keys - set(scenario.keys())
-    if missing:
-        missing_str = ", ".join(sorted(missing))
-        raise ValueError(f"Scenario '{scenario_name}' missing keys: {missing_str}")
-
-    map_size = scenario["map_size"]
-    map_resolution = scenario["map_resolution"]
-    operations = scenario["operations"]
-
-    _validate_numeric_pair("map_size", map_size, scenario_name)
-    if not isinstance(map_resolution, (int, float)) or map_resolution <= 0:
-        raise ValueError(
-            f"Scenario '{scenario_name}' map_resolution must be a positive number."
+    if "map_yaml" in scenario:
+        if not isinstance(scenario["map_yaml"], str):
+            raise ValueError(
+                f"Scenario '{scenario_name}' map_yaml must be a string path."
+            )
+        crop_unknown = scenario.get("crop_unknown", True)
+        if not isinstance(crop_unknown, bool):
+            raise ValueError(
+                f"Scenario '{scenario_name}' crop_unknown must be true or false."
+            )
+        map_yaml_path = _resolve_relative_path(scenario["map_yaml"], config_file.parent)
+        occ, map_size, map_resolution = _load_occ_from_map_yaml(
+            map_yaml_path, crop_unknown=crop_unknown
         )
-    if not isinstance(operations, list):
-        raise ValueError(
-            f"Scenario '{scenario_name}' operations must be a list of operation objects."
-        )
+    elif "operations" in scenario:
+        required_keys = {"map_size", "map_resolution", "operations"}
+        missing = required_keys - set(scenario.keys())
+        if missing:
+            missing_str = ", ".join(sorted(missing))
+            raise ValueError(f"Scenario '{scenario_name}' missing keys: {missing_str}")
 
-    occ = _build_from_operations(
-        scenario_name=scenario_name,
-        map_size=list(map_size),
-        map_resolution=float(map_resolution),
-        operations=operations,
-    )
+        map_size = scenario["map_size"]
+        map_resolution = scenario["map_resolution"]
+        operations = scenario["operations"]
+
+        _validate_numeric_pair("map_size", map_size, scenario_name)
+        if not isinstance(map_resolution, (int, float)) or map_resolution <= 0:
+            raise ValueError(
+                f"Scenario '{scenario_name}' map_resolution must be a positive number."
+            )
+        if not isinstance(operations, list):
+            raise ValueError(
+                f"Scenario '{scenario_name}' operations must be a list of operation objects."
+            )
+
+        occ = _build_from_operations(
+            scenario_name=scenario_name,
+            map_size=list(map_size),
+            map_resolution=float(map_resolution),
+            operations=operations,
+        )
+    else:
+        raise ValueError(
+            f"Scenario '{scenario_name}' must define either 'operations' or 'map_yaml'."
+        )
 
     if plot:
         import matplotlib.pyplot as plt
