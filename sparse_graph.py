@@ -99,6 +99,24 @@ def _latest_frame_index(output_dir: str) -> int:
             latest_idx = max(latest_idx, int(match.group(1)))
     return latest_idx
 
+def _serialize_rng_state(rng_state):
+    return {
+        "bit_generator": rng_state[0],
+        "state": rng_state[1].tolist(),
+        "pos": int(rng_state[2]),
+        "has_gauss": int(rng_state[3]),
+        "cached_gaussian": float(rng_state[4]),
+    }
+
+def _deserialize_rng_state(serialized):
+    return (
+        serialized["bit_generator"],
+        np.array(serialized["state"], dtype=np.uint32),
+        int(serialized["pos"]),
+        int(serialized["has_gauss"]),
+        float(serialized["cached_gaussian"]),
+    )
+
 def save_side_by_side_timeline(
     scenario_name: str = "sample2_default",
     num_paths: int = 100,
@@ -111,8 +129,6 @@ def save_side_by_side_timeline(
 ):
     if batch_k <= 0:
         raise ValueError("batch_k must be > 0")
-
-    np.random.seed(seed)
     os.makedirs(output_dir, exist_ok=True)
 
     occ, map_size, map_resolution = load_grid_scenario(scenario_name, plot=False)
@@ -144,9 +160,18 @@ def save_side_by_side_timeline(
                 existing_metadata = json.load(f)
         else:
             existing_metadata = {}
+        rng_state_data = existing_metadata.get("rng_state", None)
+        if rng_state_data is not None:
+            np.random.set_state(_deserialize_rng_state(rng_state_data))
+            rng_source = "restored"
+        else:
+            np.random.seed(seed)
+            rng_source = "seeded_fallback"
     else:
+        np.random.seed(seed)
         heatmap.heatmap = np.zeros_like(heatmap.heatmap)
         existing_metadata = {}
+        rng_source = "seeded"
 
     frequent_graph = FrequentSubgraph(occ_grid)
     frequent_graph.set_heat_map(heatmap.heatmap)
@@ -216,6 +241,8 @@ def save_side_by_side_timeline(
         "cumulative_attempted_paths": attempted_before + attempted_this_run,
         "snapshots_saved": snapshot_idx,
         "checkpoint_file": checkpoint_path,
+        "rng_source": rng_source,
+        "rng_state": _serialize_rng_state(np.random.get_state()),
     }
     with open(metadata_path, "w", encoding="utf-8") as f:
         json.dump(result, f, indent=2)
