@@ -11,6 +11,8 @@ _SUPPORTED_OPS = [
     "circle",
     "rotated_square_set",
 ]
+_PLOT_FIGSIZE = (8, 8)
+_PLOT_DPI = 300
 
 
 def _default_config_path():
@@ -329,6 +331,7 @@ def load_grid_scenario(
     plot=False,
     save_path=None,
     show_plot=True,
+    plot_title=None,
 ):
     config_file = _resolve_config_path(config_path=config_path)
     config = load_grid_config(config_path=config_path)
@@ -395,7 +398,7 @@ def load_grid_scenario(
         cmap = ListedColormap(["gray", "#9DC6F2", "black"])
         bounds = [-1.5, -0.5, 0.5, 1.5]
         norm = BoundaryNorm(bounds, cmap.N)
-        fig, ax = plt.subplots(figsize=(6, 6))
+        fig, ax = plt.subplots(figsize=_PLOT_FIGSIZE, dpi=_PLOT_DPI)
         ax.imshow(
             occ.T,
             cmap=cmap,
@@ -405,14 +408,20 @@ def load_grid_scenario(
             extent=[0, map_size[0], 0, map_size[1]],
             aspect="equal",
         )
-        ax.set_title(f"Scenario Occupancy Grid: {scenario_name}")
+        title = (
+            plot_title
+            if isinstance(plot_title, str) and plot_title.strip()
+            else f"Scenario Occupancy Grid: {scenario_name}"
+        )
+        ax.set_title(title)
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Y (m)")
 
         if save_path:
             save_target = Path(save_path)
             save_target.parent.mkdir(parents=True, exist_ok=True)
-            fig.savefig(str(save_target), dpi=300, bbox_inches="tight")
+            # Keep output dimensions consistent across scenarios.
+            fig.savefig(str(save_target), dpi=_PLOT_DPI)
             print(f"Saved scenario figure to {save_target}")
         if show_plot:
             plt.show()
@@ -442,6 +451,11 @@ if __name__ == "__main__":
         help="Optional output image path (e.g. scenario.png).",
     )
     parser.add_argument(
+        "--title",
+        default=None,
+        help="Optional plot title (used for display/save).",
+    )
+    parser.add_argument(
         "--no-show",
         action="store_true",
         help="Do not open a plot window (useful with --save).",
@@ -467,4 +481,5 @@ if __name__ == "__main__":
         plot=should_plot,
         save_path=args.save,
         show_plot=not args.no_show,
+        plot_title=args.title,
     )
