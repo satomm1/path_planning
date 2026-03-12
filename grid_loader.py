@@ -1,4 +1,5 @@
 import json
+import argparse
 from pathlib import Path
 
 import numpy as np
@@ -144,7 +145,13 @@ def load_grid_config(config_path=None):
     return config
 
 
-def load_grid_scenario(scenario_name, config_path=None, plot=False):
+def load_grid_scenario(
+    scenario_name,
+    config_path=None,
+    plot=False,
+    save_path=None,
+    show_plot=True,
+):
     config = load_grid_config(config_path=config_path)
     if scenario_name not in config:
         available = ", ".join(sorted(config.keys()))
@@ -190,7 +197,8 @@ def load_grid_scenario(scenario_name, config_path=None, plot=False):
         cmap = ListedColormap(["gray", "#9DC6F2", "black"])
         bounds = [-1.5, -0.5, 0.5, 1.5]
         norm = BoundaryNorm(bounds, cmap.N)
-        plt.imshow(
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.imshow(
             occ.T,
             cmap=cmap,
             norm=norm,
@@ -199,9 +207,66 @@ def load_grid_scenario(scenario_name, config_path=None, plot=False):
             extent=[0, map_size[0], 0, map_size[1]],
             aspect="equal",
         )
-        plt.title("Scenario Occupancy Grid")
-        plt.xlabel("X (m)")
-        plt.ylabel("Y (m)")
-        plt.show()
+        ax.set_title(f"Scenario Occupancy Grid: {scenario_name}")
+        ax.set_xlabel("X (m)")
+        ax.set_ylabel("Y (m)")
+
+        if save_path:
+            save_target = Path(save_path)
+            save_target.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(str(save_target), dpi=300, bbox_inches="tight")
+            print(f"Saved scenario figure to {save_target}")
+        if show_plot:
+            plt.show()
+        else:
+            plt.close(fig)
 
     return occ, list(map_size), float(map_resolution)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Load and visualize occupancy grid scenarios."
+    )
+    parser.add_argument(
+        "--scenario",
+        default="sample2_default",
+        help="Scenario name from grid_scenarios.json",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Optional path to a scenario config JSON file.",
+    )
+    parser.add_argument(
+        "--save",
+        default=None,
+        help="Optional output image path (e.g. scenario.png).",
+    )
+    parser.add_argument(
+        "--no-show",
+        action="store_true",
+        help="Do not open a plot window (useful with --save).",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List available scenarios and exit.",
+    )
+    args = parser.parse_args()
+
+    config = load_grid_config(args.config)
+    if args.list:
+        print("Available scenarios:")
+        for name in sorted(config.keys()):
+            print(f"- {name}")
+        raise SystemExit(0)
+
+    should_plot = (not args.no_show) or bool(args.save)
+    load_grid_scenario(
+        args.scenario,
+        config_path=args.config,
+        plot=should_plot,
+        save_path=args.save,
+        show_plot=not args.no_show,
+    )
