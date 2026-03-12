@@ -6,6 +6,7 @@ import argparse
 import json
 import glob
 import re
+import pickle
 
 from occupancy_grid import StochOccupancyGrid2D
 from heat_map import HeatMap2DVector, generate_random_free_point
@@ -179,6 +180,7 @@ def save_side_by_side_timeline(
     solved_paths_before = int(existing_metadata.get("cumulative_solved_paths", 0))
     attempted_before = int(existing_metadata.get("cumulative_attempted_paths", 0))
     snapshot_idx = int(existing_metadata.get("snapshots_saved", _latest_frame_index(output_dir)))
+    graph_snapshots = list(existing_metadata.get("graph_snapshots", []))
 
     solved_paths_this_run = 0
     attempted_this_run = 0
@@ -219,11 +221,17 @@ def save_side_by_side_timeline(
         fig.savefig(output_path, dpi=160, bbox_inches='tight')
         plt.close(fig)
 
+        graph_filename = f"graph_{snapshot_idx:04d}.pkl"
+        graph_output_path = os.path.join(output_dir, graph_filename)
+        with open(graph_output_path, "wb") as graph_file:
+            pickle.dump(frequent_graph.graph, graph_file)
+        graph_snapshots.append(graph_output_path)
+
         np.save(checkpoint_path, heatmap.heatmap)
         print(
             f"[snapshot {snapshot_idx:04d}] solved_paths={cumulative_solved_paths} attempted={cumulative_attempted_paths} "
             f"nodes={frequent_graph.graph.number_of_nodes()} edges={frequent_graph.graph.number_of_edges()} "
-            f"file={output_path}"
+            f"file={output_path} graph_file={graph_output_path}"
         )
 
     result = {
@@ -241,6 +249,7 @@ def save_side_by_side_timeline(
         "cumulative_attempted_paths": attempted_before + attempted_this_run,
         "snapshots_saved": snapshot_idx,
         "checkpoint_file": checkpoint_path,
+        "graph_snapshots": graph_snapshots,
         "rng_source": rng_source,
         "rng_state": _serialize_rng_state(np.random.get_state()),
     }
