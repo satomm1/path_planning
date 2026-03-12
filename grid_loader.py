@@ -13,7 +13,17 @@ _SUPPORTED_OPS = [
 
 
 def _default_config_path():
-    return Path(__file__).with_name("grid_scenarios.json")
+    module_dir = Path(__file__).resolve().parent
+    candidates = [
+        module_dir / "environments" / "grid_scenarios.json",
+        module_dir / "grid_scenarios.json",
+        Path.cwd() / "environments" / "grid_scenarios.json",
+        Path.cwd() / "grid_scenarios.json",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _point_to_grid(x, map_resolution):
@@ -132,7 +142,17 @@ def _build_from_operations(scenario_name, map_size, map_resolution, operations):
 
 
 def load_grid_config(config_path=None):
-    path = Path(config_path) if config_path else _default_config_path()
+    if config_path:
+        raw_path = Path(config_path).expanduser()
+        if raw_path.is_absolute():
+            path = raw_path
+        else:
+            module_dir = Path(__file__).resolve().parent
+            cwd_candidate = Path.cwd() / raw_path
+            module_candidate = module_dir / raw_path
+            path = cwd_candidate if cwd_candidate.exists() else module_candidate
+    else:
+        path = _default_config_path()
     if not path.exists():
         raise FileNotFoundError(f"Grid scenario config not found: {path}")
 
@@ -231,7 +251,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--scenario",
         default="sample2_default",
-        help="Scenario name from grid_scenarios.json",
+        help="Scenario name from environments/grid_scenarios.json",
     )
     parser.add_argument(
         "--config",

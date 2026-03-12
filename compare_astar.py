@@ -379,7 +379,8 @@ def run_experiment(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Compare vanilla and modified A* on paired random start/goal routes.")
-    parser.add_argument("--scenario", default="sample2_default", help="Grid scenario name from grid_scenarios.json")
+    parser.add_argument("--scenario", default="sample2_default", help="Grid scenario name from "
+                                                                      "environments/grid_scenarios.json")
     parser.add_argument(
         "--num-routes",
         type=int,
