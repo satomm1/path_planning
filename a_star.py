@@ -39,6 +39,7 @@ class AStar(object):
         self.path = None  # the final path as a list of states
         self.smoothed_path = None
         self.pp_plan = None  # the post-processed plan
+        self.last_solve_time = None
 
     def is_free(self, x):
         """
@@ -198,18 +199,18 @@ class AStar(object):
 
         return list(reversed(path))
 
-    def solve(self, mode="modified"):
+    def solve(self, mode="modified", return_timing=False):
         if mode not in self.SUPPORTED_SOLVER_MODES:
             raise ValueError(f"Unsupported solver mode '{mode}'. Supported modes: {sorted(self.SUPPORTED_SOLVER_MODES)}")
 
         if mode == "vanilla":
-            return self.vanilla_solve()
+            return self.vanilla_solve(return_timing=return_timing)
         elif mode == "modified":
-            return self.modified_solve()
+            return self.modified_solve(return_timing=return_timing)
         else:
             raise ValueError(f"Unsupported solver mode '{mode}'. Supported modes: {sorted(self.SUPPORTED_SOLVER_MODES)}")
 
-    def modified_solve(self):
+    def modified_solve(self, return_timing=False):
 
         t_start = time.time()
         while self.priority_queue.qsize() > 0:
@@ -217,13 +218,21 @@ class AStar(object):
 
             if x_current == self.x_goal:
                 t_end = time.time()
+                elapsed = t_end - t_start
+                self.last_solve_time = elapsed
                 self.path = self.reconstruct_path()
                 self.smooth_path()
-                print(f"Social A* found a path in {t_end - t_start:.2f} seconds.")
+                print(f"Social A* found a path in {elapsed:.2f} seconds.")
+                if return_timing:
+                    return True, elapsed
                 return True
 
             if time.time() - t_start > 150:
+                elapsed = time.time() - t_start
+                self.last_solve_time = elapsed
                 print("A* took too long.")
+                if return_timing:
+                    return False, elapsed
                 return False
 
             self.closed_set.add(x_current)
@@ -248,22 +257,34 @@ class AStar(object):
                          - self.h(x_current),
                          x_neigh)
                     )
+        elapsed = time.time() - t_start
+        self.last_solve_time = elapsed
+        if return_timing:
+            return False, elapsed
         return False
 
-    def vanilla_solve(self):
+    def vanilla_solve(self, return_timing=False):
         t_start = time.time()
         while self.priority_queue.qsize() > 0:
             current_cost, x_current = self.priority_queue.get()
 
             if x_current == self.x_goal:
                 t_end = time.time()
+                elapsed = t_end - t_start
+                self.last_solve_time = elapsed
                 self.path = self.reconstruct_path()
                 self.smooth_path()
-                print(f"Vanilla A* found a path in {t_end - t_start:.2f} seconds.")
+                print(f"Vanilla A* found a path in {elapsed:.2f} seconds.")
+                if return_timing:
+                    return True, elapsed
                 return True
 
             if time.time() - t_start > 150:
+                elapsed = time.time() - t_start
+                self.last_solve_time = elapsed
                 print("A* took too long.")
+                if return_timing:
+                    return False, elapsed
                 return False
 
             self.closed_set.add(x_current)
@@ -283,6 +304,10 @@ class AStar(object):
                          - self.h(x_current),
                          x_neigh)
                     )
+        elapsed = time.time() - t_start
+        self.last_solve_time = elapsed
+        if return_timing:
+            return False, elapsed
         return False
 
     def postprocess(self):

@@ -109,10 +109,10 @@ def run_solver(mode, occ_grid, statespace_hi, x_init, x_goal, resolution):
         occ_grid,
         resolution=resolution,
     )
-    solved = planner.solve(mode=mode)
+    solved, solve_time = planner.solve(mode=mode, return_timing=True)
     if not solved:
-        return None
-    return planner.path
+        return None, solve_time
+    return planner.path, solve_time
 
 
 def summarize_by_solver(route_records):
@@ -121,6 +121,7 @@ def summarize_by_solver(route_records):
         lengths = np.array([r[mode]["path_length"] for r in route_records], dtype=float)
         wall_avgs = np.array([r[mode]["right_wall_avg"] for r in route_records], dtype=float)
         wall_stds = np.array([r[mode]["right_wall_std"] for r in route_records], dtype=float)
+        solve_times = np.array([r[mode].get("solve_time_sec", np.nan) for r in route_records], dtype=float)
 
         summary[mode] = {
             "num_routes": int(len(route_records)),
@@ -130,6 +131,8 @@ def summarize_by_solver(route_records):
             "right_wall_avg_std": float(np.nanstd(wall_avgs)),
             "right_wall_std_mean": float(np.nanmean(wall_stds)),
             "right_wall_std_std": float(np.nanstd(wall_stds)),
+            "solve_time_mean_sec": float(np.nanmean(solve_times)),
+            "solve_time_std_sec": float(np.nanstd(solve_times)),
         }
     return summary
 
@@ -195,6 +198,7 @@ def save_results(output_path, payload):
                     "path_length",
                     "right_wall_avg",
                     "right_wall_std",
+                    "solve_time_sec",
                     "num_wall_samples",
                 ],
             )
@@ -211,6 +215,7 @@ def save_results(output_path, payload):
                             "path_length": metrics["path_length"],
                             "right_wall_avg": metrics["right_wall_avg"],
                             "right_wall_std": metrics["right_wall_std"],
+                            "solve_time_sec": metrics.get("solve_time_sec", np.nan),
                             "num_wall_samples": metrics["num_wall_samples"],
                         }
                     )
@@ -230,6 +235,7 @@ def print_summary(summary, attempts, requested_routes):
         print(f"  path_length mean/std: {s['path_length_mean']:.4f} / {s['path_length_std']:.4f}")
         print(f"  right_wall_avg mean/std: {s['right_wall_avg_mean']:.4f} / {s['right_wall_avg_std']:.4f}")
         print(f"  right_wall_std mean/std: {s['right_wall_std_mean']:.4f} / {s['right_wall_std_std']:.4f}")
+        print(f"  solve_time_sec mean/std: {s['solve_time_mean_sec']:.4f} / {s['solve_time_std_sec']:.4f}")
 
 
 def plot_sample_paths(occ_grid, sample_pairs, plot_output=None):
@@ -316,8 +322,8 @@ def run_experiment(
         if pair_key in seen_pairs:
             continue
 
-        vanilla_path = run_solver("vanilla", occ_grid, statespace_hi, x_init, x_goal, resolution)
-        modified_path = run_solver("modified", occ_grid, statespace_hi, x_init, x_goal, resolution)
+        vanilla_path, vanilla_time = run_solver("vanilla", occ_grid, statespace_hi, x_init, x_goal, resolution)
+        modified_path, modified_time = run_solver("modified", occ_grid, statespace_hi, x_init, x_goal, resolution)
         if vanilla_path is None or modified_path is None:
             continue
 
@@ -327,8 +333,14 @@ def run_experiment(
                 "trial": trial_num,
                 "x_init": [float(x_init[0]), float(x_init[1])],
                 "x_goal": [float(x_goal[0]), float(x_goal[1])],
-                "vanilla": compute_metrics(vanilla_path, occ_grid, dist_thresh=wall_dist_thresh),
-                "modified": compute_metrics(modified_path, occ_grid, dist_thresh=wall_dist_thresh),
+                "vanilla": {
+                    **compute_metrics(vanilla_path, occ_grid, dist_thresh=wall_dist_thresh),
+                    "solve_time_sec": float(vanilla_time),
+                },
+                "modified": {
+                    **compute_metrics(modified_path, occ_grid, dist_thresh=wall_dist_thresh),
+                    "solve_time_sec": float(modified_time),
+                },
             }
         )
         seen_pairs.add(pair_key)
