@@ -413,9 +413,12 @@ def load_grid_scenario(
             if isinstance(plot_title, str) and plot_title.strip()
             else f"Scenario Occupancy Grid: {scenario_name}"
         )
-        ax.set_title(title)
-        ax.set_xlabel("X (m)")
-        ax.set_ylabel("Y (m)")
+        ax.set_title(title, fontsize=24)
+        ax.set_xlabel("X (m)", fontsize=20)
+        ax.set_ylabel("Y (m)", fontsize=20)
+
+        # Set tick font size
+        ax.tick_params(axis="both", which="major", labelsize=20)
 
         if save_path:
             save_target = Path(save_path)
