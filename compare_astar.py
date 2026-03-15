@@ -415,7 +415,7 @@ def parse_args():
     parser.add_argument(
         "--wall-dist-thresh",
         type=float,
-        default=30.0,
+        default=10.0,
         help="Maximum right-wall search distance in meters",
     )
     parser.add_argument(
