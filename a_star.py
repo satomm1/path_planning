@@ -198,64 +198,6 @@ class AStar(object):
 
         return list(reversed(path))
 
-    def solve_deprecated(self, plot=False):
-        """
-        Solves the planning problem using the A* search algorithm. It places
-        the solution as a list of tuples (each representing a state) that go
-        from self.x_init to self.x_goal inside the variable self.path
-        Input:
-            None
-        Output:
-            Boolean, True if a solution from x_init to x_goal was found
-        """        
-        time_limit = 10
-
-        self.x_recorded = []
-        self.x_vector = []
-        self.x_right_cost = []
-
-        if plot:
-            fig, ax = plt.subplots()
-            self.occupancy.plot_grid(ax)
-            ax.scatter(self.x_init[0], self.x_init[1], color='green', s=50, label='Start')
-            ax.scatter(self.x_goal[0], self.x_goal[1], color='gold', s=50, marker="*", label='Goal')
-
-        num_iters = 0
-        start = time.time()        
-        while len(self.open_set) > 0:
-            num_iters += 1
-            # if time.time() - start > time_limit:
-            #     print("A* took too long")
-            #     return False
-        
-            x_current = self.find_best_est_cost_through()
-
-            if plot:
-                ax.scatter(x_current[0], x_current[1], color='blue', s=5)
-                if num_iters % 1000 == 0:
-                    fig.show()
-
-
-            if x_current == self.x_goal:
-                self.path = self.reconstruct_path()
-                if plot:
-                    fig.show()
-                end = time.time()
-                print(f"A* found a path in {end - start:.2f} seconds")
-                return True
-            self.open_set.remove(x_current)
-            self.closed_set.add(x_current)
-            for x_neigh in self.get_neighbors(x_current):
-                # right_cost = self.rightness_penalty(x_current, x_neigh)
-                # left_cost = self.leftness_penalty(x_current, x_neigh)
-                tentative_cost_to_arrive = self.cost_to_arrive[x_current] + self.distance(x_current, x_neigh)
-                if x_neigh not in self.cost_to_arrive or tentative_cost_to_arrive < self.cost_to_arrive[x_neigh]:
-                    self.open_set.add(x_neigh)
-                    self.came_from[x_neigh] = x_current
-                    self.cost_to_arrive[x_neigh] = tentative_cost_to_arrive
-                    self.est_cost_through[x_neigh] = tentative_cost_to_arrive + self.manhattan_distance(x_neigh, self.x_goal)
-        return False
-
     def solve(self, mode="modified"):
         if mode not in self.SUPPORTED_SOLVER_MODES:
             raise ValueError(f"Unsupported solver mode '{mode}'. Supported modes: {sorted(self.SUPPORTED_SOLVER_MODES)}")
