@@ -219,7 +219,7 @@ class AStar(object):
                 t_end = time.time()
                 self.path = self.reconstruct_path()
                 self.smooth_path()
-                print(f"A* found a path in {t_end - t_start:.2f} seconds.")
+                print(f"Social A* found a path in {t_end - t_start:.2f} seconds.")
                 return True
 
             if time.time() - t_start > 150:
@@ -259,7 +259,7 @@ class AStar(object):
                 t_end = time.time()
                 self.path = self.reconstruct_path()
                 self.smooth_path()
-                print(f"A* found a path in {t_end - t_start:.2f} seconds.")
+                print(f"Vanilla A* found a path in {t_end - t_start:.2f} seconds.")
                 return True
 
             if time.time() - t_start > 150:
