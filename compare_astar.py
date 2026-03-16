@@ -246,6 +246,48 @@ def print_summary(summary, attempts, requested_routes):
         print(f"  solve_time_sec mean/std: {s['solve_time_mean_sec']:.4f} / {s['solve_time_std_sec']:.4f}")
 
 
+def plot_debug_pair(
+    occ_grid,
+    trial_num,
+    x_init,
+    x_goal,
+    vanilla_path,
+    modified_path,
+    vanilla_metrics,
+    modified_metrics,
+):
+    fig, ax = plt.subplots(1, 1, figsize=(7, 7))
+    occ_grid.plot_grid(ax=ax)
+
+    v_xs, v_ys = zip(*vanilla_path)
+    m_xs, m_ys = zip(*modified_path)
+    ax.plot(
+        v_xs,
+        v_ys,
+        color="tab:blue",
+        linewidth=1.8,
+        alpha=0.9,
+        label=f"vanilla (avg right dist={vanilla_metrics['right_wall_avg']:.3f})",
+    )
+    ax.plot(
+        m_xs,
+        m_ys,
+        color="tab:orange",
+        linewidth=1.8,
+        alpha=0.9,
+        label=f"modified (avg right dist={modified_metrics['right_wall_avg']:.3f})",
+    )
+    ax.scatter(x_init[0], x_init[1], c="green", s=40, zorder=5, label="start")
+    ax.scatter(x_goal[0], x_goal[1], c="gold", marker="*", s=70, zorder=5, label="goal")
+    ax.set_title(f"Trial {trial_num}: Vanilla vs Modified")
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.legend(loc="upper right", fontsize=9)
+    fig.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
 def plot_sample_paths(occ_grid, sample_pairs, plot_output=None):
     if not sample_pairs:
         print("No sample paths available to plot.")
@@ -295,6 +337,7 @@ def run_experiment(
     resume_from=None,
     plot_samples=0,
     plot_output=None,
+    debug_plot_each_run=False,
 ):
     rng = np.random.default_rng(seed)
     occ_grid, _, resolution, statespace_hi = build_occ_grid(scenario)
@@ -336,22 +379,35 @@ def run_experiment(
             continue
 
         trial_num = len(records) + 1
+        vanilla_metrics = compute_metrics(vanilla_path, occ_grid, dist_thresh=wall_dist_thresh)
+        modified_metrics = compute_metrics(modified_path, occ_grid, dist_thresh=wall_dist_thresh)
         records.append(
             {
                 "trial": trial_num,
                 "x_init": [float(x_init[0]), float(x_init[1])],
                 "x_goal": [float(x_goal[0]), float(x_goal[1])],
                 "vanilla": {
-                    **compute_metrics(vanilla_path, occ_grid, dist_thresh=wall_dist_thresh),
+                    **vanilla_metrics,
                     "solve_time_sec": float(vanilla_time),
                 },
                 "modified": {
-                    **compute_metrics(modified_path, occ_grid, dist_thresh=wall_dist_thresh),
+                    **modified_metrics,
                     "solve_time_sec": float(modified_time),
                 },
             }
         )
         seen_pairs.add(pair_key)
+        if debug_plot_each_run:
+            plot_debug_pair(
+                occ_grid=occ_grid,
+                trial_num=trial_num,
+                x_init=x_init,
+                x_goal=x_goal,
+                vanilla_path=vanilla_path,
+                modified_path=modified_path,
+                vanilla_metrics=vanilla_metrics,
+                modified_metrics=modified_metrics,
+            )
         if len(sample_pairs) < plot_samples:
             sample_pairs.append(
                 {
@@ -445,6 +501,11 @@ def parse_args():
         default=None,
         help="Optional output image path for sample plot (e.g. samples.png); if omitted, shows figure",
     )
+    parser.add_argument(
+        "--debug-plot-each-run",
+        action="store_true",
+        help="Show an interactive per-trial overlay plot (vanilla + modified) for each successful pair",
+    )
     args = parser.parse_args()
     if args.num_routes <= 0:
         raise ValueError("--num-routes must be > 0")
@@ -469,4 +530,5 @@ if __name__ == "__main__":
         resume_from=cli.resume_from,
         plot_samples=cli.plot_samples,
         plot_output=cli.plot_output,
+        debug_plot_each_run=cli.debug_plot_each_run,
     )
