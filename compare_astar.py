@@ -13,6 +13,7 @@ from utils import snap_to_grid
 
 
 SOLVER_MODES = ("vanilla", "modified")
+RIGHT_WALL_EXCLUSION_RADIUS = 5.0
 
 
 def route_pair_key(x_init, x_goal):
@@ -71,9 +72,16 @@ def compute_right_wall_distances(path, occ_grid, dist_thresh=15.0):
     dists = []
     if path is None or len(path) < 2:
         return dists
+    start = np.array(path[0], dtype=float)
+    goal = np.array(path[-1], dtype=float)
     for i in range(len(path) - 1):
         p0 = np.array(path[i], dtype=float)
         p1 = np.array(path[i + 1], dtype=float)
+        if (
+            np.linalg.norm(p1 - start) <= RIGHT_WALL_EXCLUSION_RADIUS
+            or np.linalg.norm(p1 - goal) <= RIGHT_WALL_EXCLUSION_RADIUS
+        ):
+            continue
         step = p1 - p0
         norm = np.linalg.norm(step)
         if norm < 1e-9:
@@ -370,6 +378,7 @@ def run_experiment(
             "seed": seed,
             "max_attempts": max_attempts,
             "wall_dist_thresh": wall_dist_thresh,
+            "wall_metric_exclusion_radius": RIGHT_WALL_EXCLUSION_RADIUS,
             "failure_policy": "resample_until_both_succeed",
             "path_metric_source": "raw_path",
             "resumed_from": resume_from,
