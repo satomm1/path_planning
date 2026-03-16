@@ -5,6 +5,7 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
 
 from a_star import AStar
 from grid_loader import load_grid_scenario
@@ -14,6 +15,7 @@ from utils import snap_to_grid
 
 SOLVER_MODES = ("vanilla", "modified")
 RIGHT_WALL_EXCLUSION_RADIUS = 5.0
+RIGHT_WALL_LARGE_RATIO = 0.7
 
 
 def route_pair_key(x_init, x_goal):
@@ -68,12 +70,17 @@ def compute_path_length(path):
     return total
 
 
-def compute_right_wall_distances(path, occ_grid, dist_thresh=15.0):
+def compute_right_wall_distance_analysis(path, occ_grid, dist_thresh=15.0):
     dists = []
+    used_segment_mask = []
     if path is None or len(path) < 2:
-        return dists
+        return {
+            "distances": dists,
+            "used_segment_mask": used_segment_mask,
+        }
     start = np.array(path[0], dtype=float)
     goal = np.array(path[-1], dtype=float)
+    large_dist_thresh = RIGHT_WALL_LARGE_RATIO * dist_thresh
     for i in range(len(path) - 1):
         p0 = np.array(path[i], dtype=float)
         p1 = np.array(path[i + 1], dtype=float)
@@ -81,31 +88,51 @@ def compute_right_wall_distances(path, occ_grid, dist_thresh=15.0):
             np.linalg.norm(p1 - start) <= RIGHT_WALL_EXCLUSION_RADIUS
             or np.linalg.norm(p1 - goal) <= RIGHT_WALL_EXCLUSION_RADIUS
         ):
+            used_segment_mask.append(False)
             continue
         step = p1 - p0
         norm = np.linalg.norm(step)
         if norm < 1e-9:
+            used_segment_mask.append(False)
             continue
         travel_dir = step / norm
-        dists.append(float(occ_grid.dist_to_wall_right(path[i + 1], travel_dir, dist_thresh=dist_thresh)))
-    return dists
+        d_right = float(occ_grid.dist_to_wall_right(path[i + 1], travel_dir, dist_thresh=dist_thresh))
+
+        # Only compute left distance when right distance looks very large.
+        if d_right >= large_dist_thresh:
+            d_left = float(occ_grid.dist_to_wall_left(path[i + 1], travel_dir, dist_thresh=dist_thresh))
+            # Exclude intersection/open-space samples where both sides are very large.
+            if d_left >= large_dist_thresh and d_right >= large_dist_thresh:
+                used_segment_mask.append(False)
+                continue
+
+        dists.append(d_right)
+        used_segment_mask.append(True)
+    return {
+        "distances": dists,
+        "used_segment_mask": used_segment_mask,
+    }
 
 
-def compute_metrics(path, occ_grid, dist_thresh=15.0):
+def compute_metrics(path, occ_grid, dist_thresh=15.0, return_analysis=False):
     path_length = compute_path_length(path)
-    wall_dists = compute_right_wall_distances(path, occ_grid, dist_thresh=dist_thresh)
+    wall_analysis = compute_right_wall_distance_analysis(path, occ_grid, dist_thresh=dist_thresh)
+    wall_dists = wall_analysis["distances"]
     if wall_dists:
         right_wall_avg = float(np.mean(wall_dists))
         right_wall_std = float(np.std(wall_dists))
     else:
         right_wall_avg = float("nan")
         right_wall_std = float("nan")
-    return {
+    metrics = {
         "path_length": path_length,
         "right_wall_avg": right_wall_avg,
         "right_wall_std": right_wall_std,
         "num_wall_samples": len(wall_dists),
     }
+    if return_analysis:
+        return metrics, wall_analysis
+    return metrics
 
 
 def run_solver(mode, occ_grid, statespace_hi, x_init, x_goal, resolution):
@@ -255,34 +282,46 @@ def plot_debug_pair(
     modified_path,
     vanilla_metrics,
     modified_metrics,
+    vanilla_used_mask,
+    modified_used_mask,
 ):
     fig, ax = plt.subplots(1, 1, figsize=(7, 7))
     occ_grid.plot_grid(ax=ax)
 
-    v_xs, v_ys = zip(*vanilla_path)
-    m_xs, m_ys = zip(*modified_path)
-    ax.plot(
-        v_xs,
-        v_ys,
-        color="tab:blue",
-        linewidth=1.8,
-        alpha=0.9,
-        label=f"vanilla (avg right dist={vanilla_metrics['right_wall_avg']:.3f})",
-    )
-    ax.plot(
-        m_xs,
-        m_ys,
-        color="tab:orange",
-        linewidth=1.8,
-        alpha=0.9,
-        label=f"modified (avg right dist={modified_metrics['right_wall_avg']:.3f})",
-    )
+    def draw_segments(path, used_mask, base_color):
+        for k in range(len(path) - 1):
+            x0, y0 = path[k]
+            x1, y1 = path[k + 1]
+            used = used_mask[k] if k < len(used_mask) else False
+            if used:
+                ax.plot([x0, x1], [y0, y1], color=base_color, linewidth=2.2, alpha=0.95)
+            else:
+                ax.plot([x0, x1], [y0, y1], color=base_color, linewidth=1.2, alpha=0.25, linestyle="--")
+
+    draw_segments(vanilla_path, vanilla_used_mask, "tab:blue")
+    draw_segments(modified_path, modified_used_mask, "tab:orange")
     ax.scatter(x_init[0], x_init[1], c="green", s=40, zorder=5, label="start")
     ax.scatter(x_goal[0], x_goal[1], c="gold", marker="*", s=70, zorder=5, label="goal")
     ax.set_title(f"Trial {trial_num}: Vanilla vs Modified")
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
-    ax.legend(loc="upper right", fontsize=9)
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            color="tab:blue",
+            linewidth=2.2,
+            label=f"vanilla used (avg right dist={vanilla_metrics['right_wall_avg']:.3f})",
+        ),
+        Line2D(
+            [0],
+            [0],
+            color="tab:orange",
+            linewidth=2.2,
+            label=f"modified used (avg right dist={modified_metrics['right_wall_avg']:.3f})",
+        ),
+    ]
+    ax.legend(handles=handles, loc="upper right", fontsize=9)
     fig.tight_layout()
     plt.show()
     plt.close(fig)
@@ -379,8 +418,12 @@ def run_experiment(
             continue
 
         trial_num = len(records) + 1
-        vanilla_metrics = compute_metrics(vanilla_path, occ_grid, dist_thresh=wall_dist_thresh)
-        modified_metrics = compute_metrics(modified_path, occ_grid, dist_thresh=wall_dist_thresh)
+        vanilla_metrics, vanilla_analysis = compute_metrics(
+            vanilla_path, occ_grid, dist_thresh=wall_dist_thresh, return_analysis=True
+        )
+        modified_metrics, modified_analysis = compute_metrics(
+            modified_path, occ_grid, dist_thresh=wall_dist_thresh, return_analysis=True
+        )
         records.append(
             {
                 "trial": trial_num,
@@ -407,6 +450,8 @@ def run_experiment(
                 modified_path=modified_path,
                 vanilla_metrics=vanilla_metrics,
                 modified_metrics=modified_metrics,
+                vanilla_used_mask=vanilla_analysis["used_segment_mask"],
+                modified_used_mask=modified_analysis["used_segment_mask"],
             )
         if len(sample_pairs) < plot_samples:
             sample_pairs.append(
