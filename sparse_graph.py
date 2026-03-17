@@ -84,6 +84,8 @@ class FrequentSubgraph:
         ax.set_title("Sparse Graph")
         ax.set_xlabel("X (m)", fontsize=16)
         ax.set_ylabel("Y (m)", fontsize=16)
+        # Set x and y tick size
+        ax.tick_params(axis='both', which='major', labelsize=16)
         if show:
             plt.show()
         return ax
