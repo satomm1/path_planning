@@ -1,6 +1,7 @@
 import cvxpy as cp
 import pickle
 import matplotlib.animation as animation
+import matplotlib.pyplot as plt
 
 from occupancy_grid import StochOccupancyGrid2D
 from a_star import AStar
