@@ -212,13 +212,13 @@ def save_side_by_side_timeline(
 
         frequent_graph.visualize_graph(ax=axes[1], show=False)
         axes[1].set_title(
-            "Social Graph"
+            "Social Graph", fontsize=16
         )
 
         fig.tight_layout()
         filename = f"frame_{snapshot_idx:04d}.png"
         output_path = os.path.join(output_dir, filename)
-        fig.savefig(output_path, dpi=160, bbox_inches='tight')
+        fig.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close(fig)
 
         graph_filename = f"graph_{snapshot_idx:04d}.pkl"
