@@ -80,10 +80,10 @@ class FrequentSubgraph:
                      to_node[0] * self.occ_grid.resolution + self.occ_grid.origin_x],
                     [from_node[1] * self.occ_grid.resolution + self.occ_grid.origin_y,
                      to_node[1] * self.occ_grid.resolution + self.occ_grid.origin_y],
-                    color='red', linewidth=1)
+                    color='red', linewidth=2)
         ax.set_title("Sparse Graph")
-        ax.set_xlabel("X (m)")
-        ax.set_ylabel("Y (m)")
+        ax.set_xlabel("X (m)", fontsize=16)
+        ax.set_ylabel("Y (m)", fontsize=16)
         if show:
             plt.show()
         return ax
@@ -212,7 +212,7 @@ def save_side_by_side_timeline(
 
         frequent_graph.visualize_graph(ax=axes[1], show=False)
         axes[1].set_title(
-            f"Sparse Graph | nodes={frequent_graph.graph.number_of_nodes()} edges={frequent_graph.graph.number_of_edges()}"
+            "Social Graph"
         )
 
         fig.tight_layout()
