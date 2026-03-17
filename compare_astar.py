@@ -344,22 +344,31 @@ def plot_sample_paths(occ_grid, sample_pairs, plot_output=None):
             path = sample[f"{solver}_path"]
             xs, ys = zip(*path)
             color = cmap(i % cmap.N)
-            label = f"trial {sample['trial']}"
-            ax.plot(xs, ys, color=color, linewidth=1.4, alpha=0.85, label=label)
-            ax.scatter(sample["x_init"][0], sample["x_init"][1], c=[color], s=12, zorder=5)
-            ax.scatter(sample["x_goal"][0], sample["x_goal"][1], c=[color], marker="*", s=22, zorder=5)
+            ax.plot(xs, ys, color=color, linewidth=2.5, alpha=1)
+            ax.scatter(sample["x_init"][0], sample["x_init"][1], c=[color], s=40, zorder=5, marker="o")
+            ax.scatter(sample["x_goal"][0], sample["x_goal"][1], c=[color], marker="*", s=80, zorder=5)
 
-        ax.set_title(f"{solver} ({len(sample_pairs)} paths)")
+        if solver == "vanilla":
+            ax.set_title("A*", fontsize=16)
+        else:
+            ax.set_title("Social Planner", fontsize=16)
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Y (m)")
-        if len(sample_pairs) <= 10:
-            ax.legend(loc="upper right", fontsize=8)
+
+        # Legend: show that circle = start and star = goal
+        handles = [
+            Line2D([0], [0], marker="o", color="k", markerfacecolor="green", markersize=6,
+                   label="start"),
+            Line2D([0], [0], marker="*", color="k", markerfacecolor="gold", markersize=10,
+                   label="goal"),
+        ]
+        ax.legend(handles=handles, loc="best", fontsize=12)
 
     fig.tight_layout()
     if plot_output:
         plot_path = Path(plot_output)
         plot_path.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(plot_path, dpi=150, bbox_inches="tight")
+        fig.savefig(plot_path, dpi=600, bbox_inches="tight")
         plt.close(fig)
         print(f"Saved sample path figure to: {plot_output}")
     else:
