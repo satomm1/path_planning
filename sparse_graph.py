@@ -259,16 +259,61 @@ def save_side_by_side_timeline(
     return result
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Sparse graph utilities and side-by-side timeline exporter.")
-    parser.add_argument("--mode", choices=["demo", "timeline"], default="timeline")
-    parser.add_argument("--scenario-name", default="sample2_default")
-    parser.add_argument("--num-paths", type=int, default=100)
-    parser.add_argument("--batch-k", type=int, default=10)
-    parser.add_argument("--graph-threshold", type=float, default=1.0)
-    parser.add_argument("--min-component-size", type=int, default=15)
-    parser.add_argument("--output-dir", default="outputs_timeline")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--resume", action="store_true", help="Resume timeline from checkpoint in output-dir.")
+    parser = argparse.ArgumentParser(
+        description="Sparse graph utilities and side-by-side timeline exporter.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["demo", "timeline"],
+        default="timeline",
+        help="Run mode: 'timeline' saves progressive heatmap+graph snapshots, 'demo' runs a one-off graph planning demo.",
+    )
+    parser.add_argument(
+        "--scenario-name",
+        default="sample2_default",
+        help="Scenario key from grid_scenarios.json used to build the occupancy map.",
+    )
+    parser.add_argument(
+        "--num-paths",
+        type=int,
+        default=100,
+        help="Number of successful new paths to add in this run (when --resume is set, this is additional paths).",
+    )
+    parser.add_argument(
+        "--batch-k",
+        type=int,
+        default=10,
+        help="Save one frame+graph every K cumulative solved paths.",
+    )
+    parser.add_argument(
+        "--graph-threshold",
+        type=float,
+        default=1.0,
+        help="Minimum directional heat count required to include an edge in the sparse graph.",
+    )
+    parser.add_argument(
+        "--min-component-size",
+        type=int,
+        default=15,
+        help="Prune weakly-connected graph components smaller than this node count.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="outputs_timeline",
+        help="Directory for timeline artifacts (frames, graph_*.pkl snapshots, checkpoint, and metadata).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Seed used to initialize RNG for a fresh run; on resume, saved RNG state is restored when available.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume timeline from heatmap checkpoint and metadata in --output-dir instead of starting from scratch.",
+    )
     args = parser.parse_args()
 
     if args.mode == "timeline":
