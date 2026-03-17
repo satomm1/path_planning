@@ -2,6 +2,7 @@ import cvxpy as cp
 import pickle
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
 from occupancy_grid import StochOccupancyGrid2D
 from a_star import AStar
@@ -409,6 +410,129 @@ def get_position_at_time(t, path, time_points):
     return x, y
 
 
+def path_to_arc_length(path):
+    """
+    Convert a path [(x0, y0), (x1, y1), ...] to cumulative distance values.
+    """
+    if path is None or len(path) == 0:
+        return []
+
+    arc_lengths = [0.0]
+    for i in range(1, len(path)):
+        segment = np.linalg.norm(np.array(path[i]) - np.array(path[i - 1]))
+        arc_lengths.append(arc_lengths[-1] + segment)
+    return arc_lengths
+
+
+def create_space_time_plot(paths, times, output_file="space_time_sequential.png", title="Space-Time Plot", dpi=300):
+    """
+    Create and save a static space-time plot for multiple agents.
+    x-axis: time [s], y-axis: distance along path [m].
+    """
+    fig, ax = plt.subplots(figsize=(8, 6))
+    colors = plt.cm.jet(np.linspace(0, 1, len(paths)))
+    title_fs = 18
+    label_fs = 15
+    tick_fs = 13
+    legend_fs = 13
+
+    for i, (path, time_seq, color) in enumerate(zip(paths, times, colors)):
+        s_values = path_to_arc_length(path)
+        if len(s_values) != len(time_seq):
+            raise ValueError(
+                f"Length mismatch for path {i + 1}: "
+                f"{len(s_values)} arc-length points vs {len(time_seq)} time points."
+            )
+        ax.plot(time_seq, s_values, color=color, linewidth=2, label=f"Robot {i + 1}")
+
+    ax.set_xlabel("Time [s]", fontsize=label_fs)
+    ax.set_ylabel("Distance Along Path [m]", fontsize=label_fs)
+    ax.set_title(title, fontsize=title_fs)
+    ax.tick_params(axis="both", labelsize=tick_fs)
+    ax.grid(True, linestyle="--", alpha=0.5)
+    ax.legend(loc="best", fontsize=legend_fs)
+    fig.tight_layout()
+    fig.savefig(output_file, dpi=dpi)
+    plt.close(fig)
+    print(f"Saved space-time plot to {output_file}")
+
+
+def create_map_context_plot(
+        paths,
+        occ_grid=None,
+        times=None,
+        snapshot_time=None,
+        output_file="map_context.png",
+        title="Path Context Map",
+        dpi=300):
+    """
+    Create and save a static map plot with robot paths.
+    Optionally overlays robot positions at snapshot_time.
+    """
+    fig, ax = plt.subplots(figsize=(8, 6))
+    title_fs = 18
+    label_fs = 15
+    tick_fs = 13
+    legend_fs = 13
+
+    if occ_grid is not None:
+        occ_grid.plot_grid(ax=ax)
+
+    colors = plt.cm.jet(np.linspace(0, 1, len(paths)))
+    path_handles = []
+    path_labels = []
+    for i, (path, color) in enumerate(zip(paths, colors)):
+        xs = [p[0] for p in path]
+        ys = [p[1] for p in path]
+        path_line, = ax.plot(xs, ys, color=color, linewidth=2, alpha=0.9, label=f"Robot {i + 1}")
+        path_handles.append(path_line)
+        path_labels.append(f"Robot {i + 1}")
+
+        # Start/goal markers for context in the paper figure.
+        ax.scatter(xs[0], ys[0], marker="o", s=70, color=color, edgecolors=color, linewidths=0.8)
+        ax.scatter(xs[-1], ys[-1], marker="*", s=180, color=color, edgecolors=color, linewidths=0.8)
+
+        if times is not None and snapshot_time is not None:
+            rx, ry = get_position_at_time(snapshot_time, path, times[i])
+            ax.scatter(rx, ry, marker="s", s=75, color=color, edgecolors=color, linewidths=1.0)
+
+    if snapshot_time is not None:
+        ax.text(
+            0.02,
+            0.98,
+            f"Robot positions at t = {snapshot_time:.2f}s",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            bbox=dict(facecolor="white", alpha=0.8, edgecolor="none")
+        )
+
+    ax.set_title(title, fontsize=title_fs)
+    ax.set_xlabel("x [m]", fontsize=label_fs)
+    ax.set_ylabel("y [m]", fontsize=label_fs)
+    ax.tick_params(axis="both", labelsize=tick_fs)
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, linestyle="--", alpha=0.35)
+    path_legend = ax.legend(path_handles, path_labels, loc="upper right", fontsize=legend_fs)
+    marker_handles = [
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="green",
+               markeredgecolor="gray", markersize=8, label="Start"),
+        Line2D([0], [0], marker="s", color="none", markerfacecolor="blue",
+               markeredgecolor="gray", markersize=8, label="Current"),
+        Line2D([0], [0], marker="*", color="none", markerfacecolor="gold",
+               markeredgecolor="gray", markersize=12, label="Goal"),
+    ]
+    marker_legend = ax.legend(handles=marker_handles, loc="lower right", fontsize=legend_fs)
+    path_legend.get_title().set_fontsize(legend_fs)
+    marker_legend.get_title().set_fontsize(legend_fs)
+    ax.add_artist(path_legend)
+    ax.add_artist(marker_legend)
+    fig.tight_layout()
+    fig.savefig(output_file, dpi=dpi)
+    plt.close(fig)
+    print(f"Saved map context plot to {output_file}")
+
+
 def create_video(paths, times, output_file="video.gif", occ_grid=None):
     """
     Create a video visualizing the multi-agent paths over time.
@@ -592,8 +716,8 @@ if __name__ == "__main__":
     planner = MultiAgentSequentialPlanner(occ_grid, [path2, path3, path4], [path2_times, path3_times, path4_times], path=path1)
 
     # Plan and visualize
-    times = planner.plan()
-    create_video([path1, path2, path3, path4], [times, path2_times, path3_times, path4_times], occ_grid=occ_grid, output_file="video_sequential.gif")
+    # times = planner.plan()
+    # create_video([path1, path2, path3, path4], [times, path2_times, path3_times, path4_times], occ_grid=occ_grid, output_file="video_sequential.gif")
 
     ############## Simultaneous Path Planning Example ##############
     # Reduce granularity of paths for faster solving
@@ -605,7 +729,22 @@ if __name__ == "__main__":
     planner.assign_velocities([MAX_VELOCITY, MAX_VELOCITY/1.2, MAX_VELOCITY/1.5, MAX_VELOCITY/1.65])
 
     # Plan and visualize
-    # times = planner.plan()
+    times = planner.plan()
+    create_space_time_plot(
+        [path1, path2, path3, path4],
+        times,
+        output_file="space_time_simultaneous.png",
+        title="Simultaneous Planning Space-Time Plot"
+    )
+    snapshot_time = 0.345 * max(t_seq[-1] for t_seq in times)
+    create_map_context_plot(
+        [path1, path2, path3, path4],
+        occ_grid=occ_grid,
+        times=times,
+        snapshot_time=snapshot_time,
+        output_file="map_context_simultaneous.png",
+        title="Simultaneous Planning Paths on Map"
+    )
     # create_video([path1, path2, path3, path4], times, occ_grid=occ_grid, output_file="video_simultaneous.gif")
 
     ############## Combined Path Planning Example ##############
@@ -618,5 +757,5 @@ if __name__ == "__main__":
     planner.assign_velocities([MAX_VELOCITY, MAX_VELOCITY / 2])
 
     # Plan and visualize
-    times = planner.plan()
-    create_video([path1, path2, path3, path4], [times[0], path2_times, path3_times, times[1]], occ_grid=occ_grid, output_file="video_combined.gif")
+    # times = planner.plan()
+    # create_video([path1, path2, path3, path4], [times[0], path2_times, path3_times, times[1]], occ_grid=occ_grid, output_file="video_combined.gif")
