@@ -1,18 +1,39 @@
 <?xml version="1.0"?>
 <package format="2">
   <name>path_planning</name>
-  <version>0.0.1</version>
-  <description>Python path planning library (A*, occupancy grid, benchmarks).</description>
-  <maintainer email="todo@example.com">Maintainer</maintainer>
-  <license>See LICENSE in repository</license>
+  <version>1.0.0</version>
+  <description>Multi-Robot Social Path Planner</description>
+  <maintainer email="satomm@stanford.edu">Matthew Sato</maintainer>
+  <license>MIT</license>
+
+  <url type="repository">https://github.com/satomm1/path_planning</url>
+  <author email="satomm@stanford.edu">Matthew Sato</author>
 
   <buildtool_depend>catkin</buildtool_depend>
-
+  <build_depend>rospy</build_depend>
+  <build_depend>python3-numpy</build_depend>
+  <build_depend>python3-scipy</build_depend>
+  <build_depend>python3-matplotlib</build_depend>
+  <build_depend>python3-networkx</build_depend>
+  <build_depend>nav_msgs</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>tf</build_depend>
+  <build_export_depend>rospy</build_export_depend>
+  <build_export_depend>python3-numpy</build_export_depend>
+  <build_export_depend>python3-scipy</build_export_depend>
+  <build_export_depend>python3-matplotlib</build_export_depend>
+  <build_export_depend>python3-networkx</build_export_depend>
+  <build_export_depend>nav_msgs</build_export_depend>
+  <build_export_depend>std_msgs</build_export_depend>
+  <build_export_depend>tf</build_export_depend>
   <exec_depend>rospy</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
   <exec_depend>python3-matplotlib</exec_depend>
   <exec_depend>python3-networkx</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>tf</exec_depend>
 
   <export>
     <architecture_independent/>
