@@ -9,10 +9,10 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-from a_star import AStar, AStar_With_Graph
-from grid_loader import load_grid_scenario
-from occupancy_grid import StochOccupancyGrid2D
-from utils import snap_to_grid
+from path_planning.a_star import AStar, AStar_With_Graph
+from path_planning.grid_loader import load_grid_scenario
+from path_planning.occupancy_grid import StochOccupancyGrid2D
+from path_planning.utils import snap_to_grid
 
 
 def build_occ_grid(scenario_name):
@@ -765,7 +765,9 @@ def parse_args():
         if args.scenario_name is None:
             raise ValueError("--scenario-name is required in distributed_constraints mode")
         if args.output_prefix is None:
-            args.output_prefix = "distributed_constraint_timing"
+            args.output_prefix = (
+                "results/distributed_constraint_timing/distributed_constraint_timing"
+            )
     return args
 
 

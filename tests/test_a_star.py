@@ -1,8 +1,8 @@
 from unittest import TestCase
-from a_star import AStar
-from occupancy_grid import StochOccupancyGrid2D
-from grid_loader import load_grid_scenario
-from utils import *
+from path_planning.a_star import AStar
+from path_planning.occupancy_grid import StochOccupancyGrid2D
+from path_planning.grid_loader import load_grid_scenario
+from path_planning.utils import *
 
 
 class TestAStar(TestCase):

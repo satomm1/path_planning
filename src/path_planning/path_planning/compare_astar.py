@@ -7,10 +7,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 
-from a_star import AStar
-from grid_loader import load_grid_scenario
-from occupancy_grid import StochOccupancyGrid2D
-from utils import snap_to_grid
+from path_planning.a_star import AStar
+from path_planning.grid_loader import load_grid_scenario
+from path_planning.occupancy_grid import StochOccupancyGrid2D
+from path_planning.utils import snap_to_grid
 
 
 SOLVER_MODES = ("vanilla", "modified")

@@ -215,3 +215,9 @@ benchmarks/
 
 distributed*.json
 distributed*csv
+
+# ROS catkin workspace (typical paths when this repo is cloned to catkin_ws/src/path_planning)
+devel/
+logs/
+.catkin_workspace
+install/

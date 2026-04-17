@@ -20,13 +20,13 @@ def parse_args():
     parser.add_argument(
         "--summary-csv",
         type=str,
-        default="distributed_eval_summary.csv",
+        default="results/distributed_eval/distributed_eval_summary.csv",
         help="Output summary CSV path.",
     )
     parser.add_argument(
         "--per-robot-csv",
         type=str,
-        default="distributed_eval_per_robot.csv",
+        default="results/distributed_eval/distributed_eval_per_robot.csv",
         help="Output per-robot workload CSV path.",
     )
     parser.add_argument(
@@ -38,7 +38,7 @@ def parse_args():
     parser.add_argument(
         "--plot-path",
         type=str,
-        default="distributed_eval_times.png",
+        default="results/distributed_eval/distributed_eval_times.png",
         help="Output plot path for centralized vs distributed times.",
     )
     return parser.parse_args()
