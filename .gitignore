@@ -212,3 +212,6 @@ __marimo__/
 results/
 environments/*.png
 benchmarks/
+
+distributed*.json
+distributed*csv
