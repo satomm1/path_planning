@@ -1,8 +1,10 @@
 import cvxpy as cp
+import time
 import pickle
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from collections import defaultdict
 
 from occupancy_grid import StochOccupancyGrid2D
 from a_star import AStar
@@ -157,6 +159,7 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         super().__init__(occupancy_grid, v)
         self.paths = paths  # List of paths for all agents
         self.norm = norm  # Norm to minimize (1, 2, or inf)
+        self.constraint_timing_records = []
 
     def assign_path(self, paths):
         """
@@ -194,10 +197,13 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         z_index = 0  # Index for z variables
         prev_same = False  # To track if previous waypoint was the same
         num_agents = len(self.paths)  # Number of agents
+        pair_detection_stats = {}
 
         # Find collision pairs for all agent combinations
         for a1 in range(num_agents):
             for a2 in range(a1 + 1, num_agents):
+                pair_t0 = time.perf_counter()
+                pair_collision_count = 0
                 # Get paths for both agents
                 path1 = self.paths[a1]
                 path2 = self.paths[a2]
@@ -221,11 +227,19 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
                         # Store the collision pair with the appropriate z_index
                         # Only use min and max of collision_indices for j1 and j2 to get the interval
                         collision_pairs.append((a1, a2, i, min(collision_indices), max(collision_indices), z_index))
+                        pair_collision_count += 1
                         z_index += 1
                     prev_same = current_same
+                pair_detection_stats[(a1, a2)] = {
+                    "robot_i": a1,
+                    "robot_j": a2,
+                    "pair_detect_time_s": float(time.perf_counter() - pair_t0),
+                    "collision_tuple_count": int(pair_collision_count),
+                }
             prev_same = False
 
         num_z = z_index
+        self._pair_detection_stats = pair_detection_stats
         return collision_pairs, num_z
 
     def plan(self):
@@ -249,10 +263,37 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
 
         # Collision Avoiding Constraints using Big-M method
         collision_pairs, max_z = self.find_collision_pairs()  # Get all the collision pairs
-        z = cp.Variable(max_z, boolean=True)
+        z = cp.Variable(max_z, boolean=True) if max_z > 0 else None
+        pair_constraint_build_time = defaultdict(float)
+        pair_constraint_count = defaultdict(int)
         for (a1, a2, i, j1, j2, z_index) in collision_pairs:
+            if z is None:
+                continue
+            build_t0 = time.perf_counter()
             constraints += [agent_times[a1][i] <= agent_times[a2][j1] - DELTA + M * z[z_index]]
             constraints += [agent_times[a1][i] >= agent_times[a2][j2] + DELTA - M * (1 - z[z_index])]
+            pair_key = (a1, a2)
+            pair_constraint_build_time[pair_key] += float(time.perf_counter() - build_t0)
+            pair_constraint_count[pair_key] += 2
+
+        detection_stats = getattr(self, "_pair_detection_stats", {})
+        all_pair_keys = sorted(
+            set(detection_stats.keys()) | set(pair_constraint_build_time.keys()),
+            key=lambda pair: (pair[0], pair[1])
+        )
+        self.constraint_timing_records = []
+        for pair_key in all_pair_keys:
+            detect_row = detection_stats.get(pair_key, {})
+            self.constraint_timing_records.append(
+                {
+                    "robot_i": int(pair_key[0]),
+                    "robot_j": int(pair_key[1]),
+                    "pair_detect_time_s": float(detect_row.get("pair_detect_time_s", 0.0)),
+                    "pair_constraint_build_time_s": float(pair_constraint_build_time.get(pair_key, 0.0)),
+                    "collision_tuple_count": int(detect_row.get("collision_tuple_count", 0)),
+                    "constraint_count": int(pair_constraint_count.get(pair_key, 0)),
+                }
+            )
 
         final_time_vars = cp.hstack([agent_time[-1] for agent_time in agent_times])
         objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
@@ -430,11 +471,11 @@ def create_space_time_plot(paths, times, output_file="space_time_sequential.png"
     x-axis: time [s], y-axis: distance along path [m].
     """
     fig, ax = plt.subplots(figsize=(8, 6))
-    colors = plt.cm.jet(np.linspace(0, 1, len(paths)))
-    title_fs = 18
-    label_fs = 15
-    tick_fs = 13
-    legend_fs = 13
+    colors = plt.cm.brg(np.linspace(0, 0.9, len(paths)))
+    title_fs = 22
+    label_fs = 20
+    tick_fs = 20
+    legend_fs = 20
 
     for i, (path, time_seq, color) in enumerate(zip(paths, times, colors)):
         s_values = path_to_arc_length(path)
@@ -443,7 +484,7 @@ def create_space_time_plot(paths, times, output_file="space_time_sequential.png"
                 f"Length mismatch for path {i + 1}: "
                 f"{len(s_values)} arc-length points vs {len(time_seq)} time points."
             )
-        ax.plot(time_seq, s_values, color=color, linewidth=2, label=f"Robot {i + 1}")
+        ax.plot(time_seq, s_values, color=color, linewidth=4, label=f"Robot {i + 1}")
 
     ax.set_xlabel("Time [s]", fontsize=label_fs)
     ax.set_ylabel("Distance Along Path [m]", fontsize=label_fs)
@@ -472,13 +513,13 @@ def create_map_context_plot(
     fig, ax = plt.subplots(figsize=(8, 6))
     title_fs = 18
     label_fs = 15
-    tick_fs = 13
-    legend_fs = 13
+    tick_fs = 15
+    legend_fs = 15
 
     if occ_grid is not None:
         occ_grid.plot_grid(ax=ax)
 
-    colors = plt.cm.jet(np.linspace(0, 1, len(paths)))
+    colors = plt.cm.brg(np.linspace(0, 0.9, len(paths)))
     path_handles = []
     path_labels = []
     for i, (path, color) in enumerate(zip(paths, colors)):
@@ -504,7 +545,8 @@ def create_map_context_plot(
             transform=ax.transAxes,
             ha="left",
             va="top",
-            bbox=dict(facecolor="white", alpha=0.8, edgecolor="none")
+            bbox=dict(facecolor="white", alpha=0.9, edgecolor="none"),
+            fontsize=legend_fs,
         )
 
     ax.set_title(title, fontsize=title_fs)

@@ -427,9 +427,6 @@ class AStar_With_Graph(AStar):
             social_cost, dist2right = self.rightness_penalty(x1, x2, dist2right_prev)
             return self.distance(x1, x2) + social_cost + 0.01, dist2right
 
-        # social_cost, dist2right = self.rightness_penalty(x1, x2, dist2right_prev)
-        # return self.distance(x1, x2) + social_cost + 0.01, dist2right
-
     def show_path_on_graph(self):
         """
         Displays the planned path. Path nodes that are in the graph are shown in purple,
