@@ -8,11 +8,11 @@ import glob
 import re
 import pickle
 
-from path_planning.occupancy_grid import StochOccupancyGrid2D
-from path_planning.heat_map import HeatMap2DVector, generate_random_free_point
-from path_planning.grid_loader import load_grid_scenario
-from path_planning.a_star import AStar, AStar_With_Graph
-from path_planning.utils import *
+from social_path_planning.occupancy_grid import StochOccupancyGrid2D
+from social_path_planning.heat_map import HeatMap2DVector, generate_random_free_point
+from social_path_planning.grid_loader import load_grid_scenario
+from social_path_planning.a_star import AStar, AStar_With_Graph
+from social_path_planning.utils import *
 
 CHECKPOINT_FILENAME = "heatmap_checkpoint.npy"
 METADATA_FILENAME = "run_metadata.json"

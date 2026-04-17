@@ -5,8 +5,8 @@ import time
 from queue import PriorityQueue
 import networkx as nx
 
-from path_planning.occupancy_grid import StochOccupancyGrid2D
-from path_planning.utils import *
+from social_path_planning.occupancy_grid import StochOccupancyGrid2D
+from social_path_planning.utils import *
 
 class AStar(object):
     """Represents a motion planning problem to be solved using A*"""

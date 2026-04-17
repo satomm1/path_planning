@@ -5,11 +5,11 @@ import time
 import networkx as nx
 import cvxpy as cp
 
-from path_planning.simulate import Simulator, Visualizer
-from path_planning.grid_loader import load_grid_scenario
-from path_planning.occupancy_grid import StochOccupancyGrid2D
-from path_planning.a_star import AStar
-from path_planning.utils import *
+from social_path_planning.simulate import Simulator, Visualizer
+from social_path_planning.grid_loader import load_grid_scenario
+from social_path_planning.occupancy_grid import StochOccupancyGrid2D
+from social_path_planning.a_star import AStar
+from social_path_planning.utils import *
 
 V_PREV_THRES = 0.0001
 EPS = 0.1

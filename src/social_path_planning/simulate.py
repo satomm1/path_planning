@@ -5,8 +5,8 @@ from matplotlib.colors import ListedColormap
 import time
 from itertools import cycle
 
-from path_planning.grid_loader import load_grid_scenario
-from path_planning.occupancy_grid import StochOccupancyGrid2D
+from social_path_planning.grid_loader import load_grid_scenario
+from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 
 
 class Simulator:

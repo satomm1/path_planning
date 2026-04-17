@@ -1,11 +1,11 @@
-from setuptools import setup
+from distutils.core import setup
 from catkin_pkg.python_setup import generate_distutils_setup
 
 setup_args = generate_distutils_setup(
-    packages=["path_planning"],
+    packages=["social_path_planning"],
     package_dir={"": "src"},
     package_data={
-        "path_planning": [
+        "social_path_planning": [
             "environments/grid_scenarios.json",
             "environments/*.yaml",
             "environments/*.pgm",

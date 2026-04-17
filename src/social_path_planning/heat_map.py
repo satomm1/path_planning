@@ -4,10 +4,10 @@ from matplotlib.colors import hsv_to_rgb
 
 import os
 
-from path_planning.occupancy_grid import StochOccupancyGrid2D
-from path_planning.a_star import AStar
-from path_planning.grid_loader import load_grid_scenario
-from path_planning.utils import *
+from social_path_planning.occupancy_grid import StochOccupancyGrid2D
+from social_path_planning.a_star import AStar
+from social_path_planning.grid_loader import load_grid_scenario
+from social_path_planning.utils import *
 
 class HeatMap2D(object):
     def __init__(self, occ_grid: StochOccupancyGrid2D):

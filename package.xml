@@ -3,6 +3,7 @@
   <name>path_planning</name>
   <version>1.0.0</version>
   <description>Multi-Robot Social Path Planner</description>
+  
   <maintainer email="satomm@stanford.edu">Matthew Sato</maintainer>
   <license>MIT</license>
 
