@@ -1,1 +1,1 @@
-from social_path_planning.a_star import AStar
+from social_path_planning.a_star import AStar, AStar_With_Graph
