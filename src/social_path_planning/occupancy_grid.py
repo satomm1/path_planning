@@ -73,9 +73,9 @@ class StochOccupancyGrid2D(object):
 
     def dist_to_wall_right(self, x, travel_dir, dist_thresh=15.0):
         """
-        Return distance (meters) from world position x=(x,y) to the first occupied cell
-        found to the right of the travel_dir. If no wall is found inside the map bounds,
-        returns 0.
+        Return distance (meters) from world position x=(x,y) to the first occupied or
+        unknown cell found to the right of the travel_dir. If no wall is found inside
+        the map bounds, returns 0.
         """
         right = np.array([travel_dir[1], -travel_dir[0]])
         right = right / np.linalg.norm(right)
@@ -125,7 +125,8 @@ class StochOccupancyGrid2D(object):
             # clamp safety
             if row < 0 or row >= self.height or col < 0 or col >= self.width:
                 return 100
-            if self.probs[row, col] >= self.thresh:
+            p = self.probs[row, col]
+            if p >= self.thresh or p < 0:
                 return t
         return 100
 

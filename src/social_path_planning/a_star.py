@@ -12,7 +12,17 @@ class AStar(object):
     """Represents a motion planning problem to be solved using A*"""
     SUPPORTED_SOLVER_MODES = {"modified", "vanilla"}
 
-    def __init__(self, statespace_lo, statespace_hi, x_init, x_goal, occupancy: StochOccupancyGrid2D, resolution=1, robot_d=0.4):
+    def __init__(
+        self,
+        statespace_lo,
+        statespace_hi,
+        x_init,
+        x_goal,
+        occupancy: StochOccupancyGrid2D,
+        resolution=1,
+        robot_d=0.4,
+        desired_dist_right_extra=0.25,
+    ):
         self.statespace_lo = np.array(statespace_lo)  # state space lower bound (e.g., [-5, -5])
         self.statespace_hi = np.array(statespace_hi)  # state space upper bound (e.g., [5, 5])
         self.occupancy = occupancy  # occupancy grid (a StochOccupancyGrid2D object)
@@ -20,6 +30,7 @@ class AStar(object):
         self.x_init = self.snap_to_grid(x_init)  # initial state
         self.x_goal = self.snap_to_grid(x_goal)  # goal state
         self.robot_d = robot_d  # robot diameter (m)
+        self.desired_dist_right_extra = desired_dist_right_extra  # added to robot_d/2 for desired standoff from right wall (m)
 
         self.closed_set = set()  # the set containing the states that have been visited
         self.open_set = set()  # the set containing the states that are condidate for future expension
@@ -50,7 +61,7 @@ class AStar(object):
         Output:
             Boolean True/False
         """
-        if self.occupancy.is_free(x) and self.statespace_lo[0] <= x[0] < self.statespace_hi[1] and self.statespace_lo[1] <= x[1] < self.statespace_hi[1]:
+        if self.occupancy.is_free(x) and self.statespace_lo[0] <= x[0] < self.statespace_hi[0] and self.statespace_lo[1] <= x[1] < self.statespace_hi[1]:
             return True
         else:
             return False
@@ -127,14 +138,21 @@ class AStar(object):
                 penalty =  max(0, (4 - dist_to_left))
         else:
             dist_to_right_prev = dist2right_prev # self.occupancy.dist_to_wall_right(x1, travel_dir)
-            delta_dist_to_right = dist_to_right - dist_to_right_prev
+            delta_raw = dist_to_right - dist_to_right_prev
 
-            # To account for when you just enter an intersection and the distance to right wall jumps up dramatically
-            # Also, don't penalize getting closer to right wall
-            if delta_dist_to_right > 15 or delta_dist_to_right < 0:
-                delta_dist_to_right = 0
+            desired_dist_right = self.robot_d / 2 + self.desired_dist_right_extra
+            # Penalize being both too far and too close to the desired standoff from the right wall
+            penalty = abs(dist_to_right - desired_dist_right)
 
-            penalty = max(0, 1*(dist_to_right - self.robot_d/2) + 2*delta_dist_to_right)
+            # When too far from the right wall: penalize drifting even farther (same as before, with spike suppression)
+            delta_far = delta_raw
+            if delta_far > 15 or delta_far < 0:
+                delta_far = 0
+            if dist_to_right > desired_dist_right:
+                penalty += 2 * delta_far
+            # When too close: penalize moving still closer to the wall (negative delta along the ray)
+            elif dist_to_right < desired_dist_right and -15 < delta_raw < 0:
+                penalty += 2 * (-delta_raw)
         return penalty, dist_to_right
 
     def leftness_penalty(self, x1, x2):
@@ -227,7 +245,7 @@ class AStar(object):
                     return True, elapsed
                 return True
 
-            if time.time() - t_start > 150:
+            if time.time() - t_start > 60:
                 elapsed = time.time() - t_start
                 self.last_solve_time = elapsed
                 print("A* took too long.")
@@ -408,8 +426,28 @@ class AStar(object):
         return
 
 class AStar_With_Graph(AStar):
-    def __init__(self, statespace_lo, statespace_hi, x_init, x_goal, occupancy, graph: nx.DiGraph, resolution=1, robot_d=0.4):
-        super().__init__(statespace_lo, statespace_hi, x_init, x_goal, occupancy, resolution, robot_d)
+    def __init__(
+        self,
+        statespace_lo,
+        statespace_hi,
+        x_init,
+        x_goal,
+        occupancy,
+        graph: nx.DiGraph,
+        resolution=1,
+        robot_d=0.4,
+        desired_dist_right_extra=0.25,
+    ):
+        super().__init__(
+            statespace_lo,
+            statespace_hi,
+            x_init,
+            x_goal,
+            occupancy,
+            resolution,
+            robot_d,
+            desired_dist_right_extra,
+        )
         self.graph = graph
 
     def cost(self, x1, x2, dist2right_prev=0):

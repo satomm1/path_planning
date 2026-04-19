@@ -49,3 +49,22 @@ Example entry point (was previously `path_planning.py` at repo root):
 export PYTHONPATH=/path/to/path_planning/src/path_planning:$PYTHONPATH
 python3 -m path_planning.demo_path_planning
 ```
+
+### Y2E2 social A* (random routes)
+
+The importable package in this repository is `social_path_planning` under `src/`. After building and sourcing your catkin workspace (or by setting `PYTHONPATH` to the `src` directory), run random start/goal tests on the Y2E2 map:
+
+```bash
+export PYTHONPATH=/path/to/path_planning/src:$PYTHONPATH
+python3 -m social_path_planning.test_y2e2_social_astar -n 5
+```
+
+- **`-n` / `--num-paths`**: how many successful **social** (modified) A* paths to collect.
+- **Plotting is on by default** (one figure with the map and all paths). Use **`--no-plot`** for headless or CI runs.
+- Optional: `--seed`, `--max-attempts`, `--min-separation` (minimum start–goal distance in meters).
+
+For a **vanilla vs modified** comparison on the same map (only pairs where **both** solvers succeed), with optional JSON/CSV output, use:
+
+```bash
+python3 -m social_path_planning.compare_astar --scenario y2e2 --num-routes 10
+```
