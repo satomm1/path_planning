@@ -68,3 +68,9 @@ For a **vanilla vs modified** comparison on the same map (only pairs where **bot
 ```bash
 python3 -m social_path_planning.compare_astar --scenario y2e2 --num-routes 10
 ```
+
+**Wall-distance cache (faster social A\*):** one-time offline precompute writes `src/social_path_planning/environments/<scenario>_wall_dist.npz`. If that file is present and matches the loaded occupancy grid, planning uses table lookups instead of ray marching. Install **`tqdm`** (`pip install tqdm`) for a row-wise progress bar during precompute; use **`--no-progress`** to disable it.
+
+```bash
+python3 -m social_path_planning.precompute_wall_distances --scenario y2e2
+```

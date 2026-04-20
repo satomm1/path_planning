@@ -211,6 +211,8 @@ __marimo__/
 
 results/
 environments/*.png
+# Large precomputed wall-distance caches (generate with precompute_wall_distances)
+**/environments/*_wall_dist.npz
 benchmarks/
 
 distributed*.json

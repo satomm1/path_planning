@@ -3,6 +3,8 @@ import csv
 import json
 from pathlib import Path
 
+_MODULE_DIR = Path(__file__).resolve().parent
+
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
@@ -30,6 +32,7 @@ def route_pair_key(x_init, x_goal):
 def build_occ_grid(scenario_name):
     occ, map_size, map_resolution = load_grid_scenario(scenario_name, plot=False)
     map_dim = [round(map_size[i] / map_resolution) for i in range(2)]
+    cache_path = _MODULE_DIR / "environments" / f"{scenario_name}_wall_dist.npz"
     occ_grid = StochOccupancyGrid2D(
         map_resolution,
         map_dim[0],
@@ -38,6 +41,8 @@ def build_occ_grid(scenario_name):
         0,
         10,
         occ.T,
+        wall_distance_cache_path=cache_path if cache_path.is_file() else None,
+        auto_build_wall_distance_cache=True,
     )
     statespace_hi = snap_to_grid(map_size, map_resolution)
     return occ_grid, map_size, map_resolution, statespace_hi

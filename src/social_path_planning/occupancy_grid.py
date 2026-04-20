@@ -4,7 +4,20 @@ from matplotlib.colors import ListedColormap, BoundaryNorm
 from scipy.ndimage import distance_transform_edt
 
 class StochOccupancyGrid2D(object):
-    def __init__(self, resolution, width, height, origin_x, origin_y, window_size, probs, thresh=0.5, robot_d=0.25):
+    def __init__(
+        self,
+        resolution,
+        width,
+        height,
+        origin_x,
+        origin_y,
+        window_size,
+        probs,
+        thresh=0.5,
+        robot_d=0.25,
+        wall_distance_cache_path=None,
+        auto_build_wall_distance_cache=False,
+    ):
         self.resolution = resolution
         self.width = width
         self.height = height
@@ -14,6 +27,7 @@ class StochOccupancyGrid2D(object):
         self.window_size = 10 # window_size
         self.thresh = thresh
         self.robot_d = robot_d
+        self._d_right = None
 
         self.extent = [self.origin_x, self.origin_x + self.width * self.resolution,
                        self.origin_y, self.origin_y + self.height * self.resolution]
@@ -24,6 +38,14 @@ class StochOccupancyGrid2D(object):
         # Precompute the distance map
         self.distance_map = None
         self.compute_distance_map()
+
+        from social_path_planning.wall_distance_cache import attach_wall_distance_cache
+
+        attach_wall_distance_cache(
+            self,
+            wall_distance_cache_path,
+            auto_build=auto_build_wall_distance_cache,
+        )
 
     def snap_to_grid(self, x):
         return self.resolution * round(x[0] / self.resolution), self.resolution * round(x[1] / self.resolution)
@@ -69,7 +91,7 @@ class StochOccupancyGrid2D(object):
             return True
 
     def dist_to_wall_left(self, x, travel_dir, dist_thresh=15.0):
-        return self.dist_to_wall_right(x, [-travel_dir[0], -travel_dir[1]])
+        return self.dist_to_wall_right(x, [-travel_dir[0], -travel_dir[1]], dist_thresh=dist_thresh)
 
     def dist_to_wall_right(self, x, travel_dir, dist_thresh=15.0):
         """
@@ -77,8 +99,31 @@ class StochOccupancyGrid2D(object):
         unknown cell found to the right of the travel_dir. If no wall is found inside
         the map bounds, returns 0.
         """
-        right = np.array([travel_dir[1], -travel_dir[0]])
-        right = right / np.linalg.norm(right)
+        from social_path_planning.wall_distance_cache import (
+            DEFAULT_DIST_THRESH,
+            travel_dir_to_dir_idx,
+        )
+
+        if (
+            self._d_right is not None
+            and abs(float(dist_thresh) - DEFAULT_DIST_THRESH) < 1e-9
+        ):
+            col = int(np.round((x[0] - self.origin_x) / self.resolution))
+            row = int(np.round((x[1] - self.origin_y) / self.resolution))
+            col = int(np.clip(col, 0, self.width - 1))
+            row = int(np.clip(row, 0, self.height - 1))
+            k = travel_dir_to_dir_idx(travel_dir)
+            return float(self._d_right[row, col, k])
+
+        return self._dist_to_wall_right_raycast(x, travel_dir, dist_thresh=dist_thresh)
+
+    def _dist_to_wall_right_raycast(self, x, travel_dir, dist_thresh=15.0):
+        """Ray-march implementation used for planning when no cache and for precompute."""
+        right = np.array([travel_dir[1], -travel_dir[0]], dtype=float)
+        rn = np.linalg.norm(right)
+        if rn < 1e-12:
+            return 100.0
+        right = right / rn
 
         # map bounds in meters
         x_min = self.origin_x

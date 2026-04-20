@@ -31,7 +31,12 @@ def parse_args():
         metavar="N",
         help="Number of successful social paths to collect (default: 5).",
     )
-    parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducibility.")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="RNG seed for reproducible start/goal sampling (default: 42).",
+    )
     parser.add_argument(
         "--max-attempts",
         type=int,
@@ -113,6 +118,7 @@ def main():
         )
 
     print(f"Scenario: {SCENARIO}")
+    print(f"RNG seed: {args.seed}")
     print(f"Collected {len(successes)} / {args.num_paths} successful social paths.")
     print(f"Planner attempts: {attempts} (max {max_attempts}), failures (no path / timeout): {failures}")
     if solve_times:
@@ -147,7 +153,7 @@ def main():
                 zorder=6,
             )
         ax.set_title("Y2E2 — social A* (random start/goal)")
-        ax.legend(loc="upper right", fontsize=8, framealpha=0.9)
+        ax.legend(loc="lower left", fontsize=8, framealpha=0.9)
         plt.tight_layout()
         plt.show()
     elif not args.no_plot and not successes:
