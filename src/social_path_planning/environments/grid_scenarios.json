@@ -138,6 +138,8 @@
     ]
   },
   "y2e2": {
-    "map_yaml": "y2e2.yaml"
+    "map_yaml": "y2e2.yaml",
+    "map_align_deg": -4.3,
+    "map_align_crop": true
   }
 }

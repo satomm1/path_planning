@@ -4,6 +4,7 @@ from pathlib import Path
 import ast
 
 import numpy as np
+from scipy.ndimage import rotate as ndimage_rotate
 
 _SUPPORTED_OPS = [
     "outer_boundary",
@@ -156,6 +157,71 @@ def _crop_unknown_only_border(occ_xy):
     x0, x1 = x_idx[0], x_idx[-1] + 1
     y0, y1 = y_idx[0], y_idx[-1] + 1
     return occ_xy[x0:x1, y0:y1]
+
+
+def align_occ_map_raster(occ_xy, align_deg, resolution, crop_known=True):
+    """
+    Rotate the occupancy raster so corridor axes can align with the planner grid (+x / +y).
+
+    The planner uses axis-aligned moves on ``StochOccupancyGrid2D``; if walls appear
+    diagonal in the PGM, set ``map_align_deg`` in the scenario JSON so the loaded
+    raster is rotated once. All start/goal poses must then be expressed in this
+    **aligned** frame (meters from the same origin as after load: corner (0,0) of
+    the rotated, possibly cropped grid).
+
+    **Rotation pivot:** ``scipy.ndimage.rotate`` rotates about the **center of the
+    input array** (see SciPy docs). Start and goal coordinates used with the
+    loaded grid must be expressed in the **aligned** frame: origin at the corner
+    of the rotated (and possibly cropped) raster, with ``map_size`` returned here.
+    To map a pose from an **unrotated** map or external tool into this frame,
+    apply the same 2D rotation (about that original map's center, in meters) as
+    was applied to the raster, then shift into the cropped coordinate system if
+    ``crop_known`` removed a border.
+
+    Parameters
+    ----------
+    occ_xy : ndarray
+        Shape ``(nx, ny)``. Values ``-1`` unknown, ``0`` free, ``1`` occupied.
+    align_deg : float
+        Counter-clockwise rotation in degrees (SciPy convention: positive angles
+        rotate the image counter-clockwise in the plane of axis 0 and axis 1).
+    resolution : float
+        Meters per cell (unchanged by rotation).
+    crop_known : bool
+        If True, crop to the tight bounding box of cells that are not unknown (-1).
+
+    Returns
+    -------
+    occ_aligned : ndarray
+        Rotated (and optionally cropped) occupancy, ``float32``.
+    map_size : list of float
+        ``[nx * resolution, ny * resolution]`` for the returned array shape.
+    """
+    occ_xy = np.asarray(occ_xy, dtype=np.float32)
+    if occ_xy.ndim != 2:
+        raise ValueError("occ_xy must be a 2D array.")
+
+    angle = float(align_deg)
+    if abs(angle) < 1e-12:
+        out = occ_xy.copy()
+        map_size = [out.shape[0] * resolution, out.shape[1] * resolution]
+        return out, map_size
+
+    rotated = ndimage_rotate(
+        occ_xy,
+        angle,
+        axes=(0, 1),
+        reshape=True,
+        order=0,
+        mode="constant",
+        cval=-1.0,
+    ).astype(np.float32, copy=False)
+
+    if crop_known:
+        rotated = _crop_unknown_only_border(rotated)
+
+    map_size = [rotated.shape[0] * resolution, rotated.shape[1] * resolution]
+    return rotated, map_size
 
 
 def _load_occ_from_map_yaml(map_yaml_path, crop_unknown=False):
@@ -359,6 +425,24 @@ def load_grid_scenario(
         occ, map_size, map_resolution = _load_occ_from_map_yaml(
             map_yaml_path, crop_unknown=crop_unknown
         )
+
+        map_align_deg = scenario.get("map_align_deg", 0)
+        if not isinstance(map_align_deg, (int, float)):
+            raise ValueError(
+                f"Scenario '{scenario_name}' map_align_deg must be a number (degrees)."
+            )
+        map_align_crop = scenario.get("map_align_crop", True)
+        if not isinstance(map_align_crop, bool):
+            raise ValueError(
+                f"Scenario '{scenario_name}' map_align_crop must be true or false."
+            )
+        if float(map_align_deg) != 0.0:
+            occ, map_size = align_occ_map_raster(
+                occ,
+                float(map_align_deg),
+                float(map_resolution),
+                crop_known=map_align_crop,
+            )
     elif "operations" in scenario:
         required_keys = {"map_size", "map_resolution", "operations"}
         missing = required_keys - set(scenario.keys())
