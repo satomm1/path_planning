@@ -9,6 +9,9 @@ CLI example (Y2E2, social / modified A*):
 For faster planning on large YAML maps, precompute wall distances once:
 
     python -m social_path_planning.precompute_wall_distances --scenario y2e2
+
+While running, the heatmap is saved to ``<prefix>_heatmap.npy`` every 10 successful
+paths (crash recovery), then again at the end.
 """
 
 from __future__ import annotations
@@ -25,6 +28,8 @@ from matplotlib.colors import hsv_to_rgb
 from social_path_planning.a_star import AStar
 from social_path_planning.compare_astar import build_occ_grid, generate_random_free_point
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
+
+_CHECKPOINT_EVERY_N = 10  # save heatmap after this many successful paths (same file as final save)
 
 class HeatMap2D(object):
     def __init__(self, occ_grid: StochOccupancyGrid2D):
@@ -344,6 +349,9 @@ def main() -> int:
 
         heatmap.add_path(problem.path, increment=args.increment)
         successes += 1
+        if successes % _CHECKPOINT_EVERY_N == 0:
+            heatmap.save_heatmap(args.heatmap_prefix)
+            print(f"Checkpoint: {successes} successful path(s) merged — heatmap saved.", flush=True)
 
     print(
         f"Scenario: {args.scenario} | collected {successes}/{args.num_paths} paths "
