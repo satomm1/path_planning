@@ -107,27 +107,28 @@ class AStar(object):
         Output:
             Float: heuristic distance
         """
-        if self.distance(x2, self.x_goal) < 5:
+        if self.distance(x2, self.x_goal) < 2:
             # Don't penalize when near goal, may need to take non-social behavior to be able to get to goal
             return 0, 0
-        elif self.distance(x2, self.x_init) < 5:
+        elif self.distance(x2, self.x_init) < 2:
             # Don't penalize when near start, may need to take non-social behavior to be able to get to socially compliant path later
             return 0, 0
 
         penalty = 0
 
-        travel_dir = (np.array(x2) - np.array(x1)) / np.linalg.norm(np.array(x2) - np.array(x1))
+        travel_dir = np.array(x2) - np.array(x1)
+        travel_dir /= np.linalg.norm(travel_dir)
         dist_to_right = self.occupancy.dist_to_wall_right(x2, travel_dir)
 
-        if dist_to_right > 15:
+        if dist_to_right > 10:
             penalty += self.resolution
             # Get distance to left
             dist_to_left = self.occupancy.dist_to_wall_left(x2, travel_dir)
 
-            if dist_to_left > 4:
+            if dist_to_left > 3:
                 dist_to_left_prev = self.occupancy.dist_to_wall_left(x1, travel_dir)
                 delta_dist_to_left = dist_to_left - dist_to_left_prev
-                #
+
                 # To account for when you just enter an intersection and the distance to left wall jumps up dramatically
                 if delta_dist_to_left < 0 or delta_dist_to_left > 10:
                     delta_dist_to_left = 0
