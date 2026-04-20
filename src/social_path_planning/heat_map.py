@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import sys
 
 import matplotlib.pyplot as plt
@@ -241,7 +242,13 @@ def parse_args():
         metavar="N",
         help="Number of successful planner runs whose paths are merged into the heatmap (default: 10).",
     )
-    parser.add_argument("--seed", type=int, default=42, help="RNG seed for start/goal sampling (default: 42).")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        metavar="S",
+        help="RNG seed for start/goal sampling. If omitted, a random seed is used (printed so you can reproduce with --seed S).",
+    )
     parser.add_argument(
         "--max-attempts",
         type=int,
@@ -296,7 +303,9 @@ def main() -> int:
         print("error: --max-attempts must be >= 1", file=sys.stderr)
         return 2
 
-    rng = np.random.default_rng(args.seed)
+    seed = args.seed if args.seed is not None else secrets.randbelow(2**32)
+    rng = np.random.default_rng(seed)
+    print(f"RNG seed: {seed}")
     occ_grid, _, map_resolution, statespace_hi = build_occ_grid(args.scenario)
 
     heatmap = HeatMap2DVector(occ_grid)
