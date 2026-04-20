@@ -8,14 +8,24 @@ import glob
 import re
 import pickle
 
+from social_path_planning.compare_astar import generate_random_free_point
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
-from social_path_planning.heat_map import HeatMap2DVector, generate_random_free_point
+from social_path_planning.heat_map import HeatMap2DVector
 from social_path_planning.grid_loader import load_grid_scenario
 from social_path_planning.a_star import AStar, AStar_With_Graph
 from social_path_planning.utils import *
 
 CHECKPOINT_FILENAME = "heatmap_checkpoint.npy"
 METADATA_FILENAME = "run_metadata.json"
+
+
+class _GlobalNumpyUniformRng:
+    """Adapter: `generate_random_free_point` expects a Generator-like object; timeline uses `np.random` (seed/resume)."""
+
+    __slots__ = ()
+
+    def uniform(self, low, high):
+        return np.random.uniform(low=low, high=high)
 
 class FrequentSubgraph:
 
@@ -52,7 +62,8 @@ class FrequentSubgraph:
         for x in range(self.occ_grid.width):
             for y in range(self.occ_grid.height):
                 for dir_idx, (dx, dy) in enumerate(directions):
-                    if self.heat_map[x, y, dir_idx] >= threshold:
+                    # heat_map is (height, width, 8); x=col, y=row in grid indices
+                    if self.heat_map[y, x, dir_idx] >= threshold:
                         from_node = (x, y)
                         to_node = (x + dx, y + dy)
 
@@ -187,10 +198,12 @@ def save_side_by_side_timeline(
     solved_paths_this_run = 0
     attempted_this_run = 0
 
+    _sample_rng = _GlobalNumpyUniformRng()
+
     while solved_paths_this_run < num_paths:
         attempted_this_run += 1
-        x_init = generate_random_free_point(occ_grid)
-        x_goal = generate_random_free_point(occ_grid)
+        x_init = generate_random_free_point(occ_grid, _sample_rng)
+        x_goal = generate_random_free_point(occ_grid, _sample_rng)
         problem = AStar([0, 0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
 
         if not problem.solve():

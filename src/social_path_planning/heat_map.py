@@ -1,13 +1,29 @@
-import numpy as np
+"""
+Directional heatmaps from accumulated A* paths (`HeatMap2DVector`).
+
+CLI example (Y2E2, social / modified A*):
+
+    python -m social_path_planning.heat_map --scenario y2e2 --num-paths 20 \\
+        --heatmap-prefix y2e2_routes --max-start-goal-distance 30
+
+For faster planning on large YAML maps, precompute wall distances once:
+
+    python -m social_path_planning.precompute_wall_distances --scenario y2e2
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.colors import hsv_to_rgb
 
-import os
-
-from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 from social_path_planning.a_star import AStar
-from social_path_planning.grid_loader import load_grid_scenario
-from social_path_planning.utils import *
+from social_path_planning.compare_astar import build_occ_grid, generate_random_free_point
+from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 
 class HeatMap2D(object):
     def __init__(self, occ_grid: StochOccupancyGrid2D):
@@ -31,14 +47,15 @@ class HeatMap2D(object):
         for state in path:
             x_idx, y_idx = self.get_index(state)
             if 0 <= x_idx < self.width and 0 <= y_idx < self.height:
-                self.heatmap[x_idx, y_idx] += increment
+                # heatmap is (height, width) = (row, col) = (y_idx, x_idx)
+                self.heatmap[y_idx, x_idx] += increment
 
     def plot_heatmap(self, ax=None, show=True):
         if ax is None:
             _, ax = plt.subplots()
         self.occ_grid.plot_grid(ax=ax)
         im = ax.imshow(
-            self.heatmap.T,
+            self.heatmap,
             cmap='hot',
             origin='lower',
             extent=self.extent,
@@ -93,17 +110,18 @@ class HeatMap2DVector(HeatMap2D):
                 direction = (np.sign(next_state[0] - state[0]), np.sign(next_state[1] - state[1]))
                 if direction in direction_map:
                     dir_idx = direction_map[direction]
-                    self.heatmap[x_idx, y_idx, dir_idx] += increment
+                    # heatmap is (height, width, 8) = (row, col, dir) = (y_idx, x_idx, dir_idx)
+                    self.heatmap[y_idx, x_idx, dir_idx] += increment
 
     def plot_heatmap(self, ax=None, show=True, min_visible_intensity=5.0, add_legend=True):
         if ax is None:
             _, ax = plt.subplots()
         self.occ_grid.plot_grid(ax=ax)
-        total_heatmap = np.sum(self.heatmap, axis=2).T
+        total_heatmap = np.sum(self.heatmap, axis=2)
         # Zero out low values for better visibility
         total_heatmap = np.where(total_heatmap < min_visible_intensity, 0.0, total_heatmap)
 
-        dominant_direction = np.argmax(self.heatmap, axis=2).T
+        dominant_direction = np.argmax(self.heatmap, axis=2)
         # Map direction index to angle (degrees) for hue
         dir_angles = np.array([135, 90, 45, 0, 180, 225, 270, 315])
         H = (dir_angles[dominant_direction] % 360) / 360.0
@@ -166,8 +184,8 @@ class HeatMap2DVectorField(HeatMap2D):
                 norm = np.linalg.norm(direction)
                 if norm > 0:
                     direction = direction / norm  # Normalize
-                    self.heatmap[x_idx, y_idx, 0] += direction[0] * increment
-                    self.heatmap[x_idx, y_idx, 1] += direction[1] * increment
+                    self.heatmap[y_idx, x_idx, 0] += direction[0] * increment
+                    self.heatmap[y_idx, x_idx, 1] += direction[1] * increment
 
     def plot_heatmap(self, ax=None, show=True):
         if ax is None:
@@ -175,8 +193,8 @@ class HeatMap2DVectorField(HeatMap2D):
         self.occ_grid.plot_grid(ax=ax)
         X, Y = np.meshgrid(np.arange(self.origin_x, self.origin_x + self.width * self.resolution, self.resolution),
                            np.arange(self.origin_y, self.origin_y + self.height * self.resolution, self.resolution))
-        U = self.heatmap[:, :, 0].T
-        V = self.heatmap[:, :, 1].T
+        U = self.heatmap[:, :, 0]
+        V = self.heatmap[:, :, 1]
         M = np.sqrt(U**2 + V**2)
         C = M.copy()
         zero_mask = M < 4
@@ -194,7 +212,7 @@ class HeatMap2DVectorField(HeatMap2D):
         if ax is None:
             _, ax = plt.subplots()
         self.occ_grid.plot_grid(ax=ax)
-        magnitude = np.sqrt(self.heatmap[:, :, 0]**2 + self.heatmap[:, :, 1]**2).T
+        magnitude = np.sqrt(self.heatmap[:, :, 0] ** 2 + self.heatmap[:, :, 1] ** 2)
         im = ax.imshow(magnitude, cmap='hot', origin='lower', extent=self.extent, aspect='equal', alpha=0.6, zorder=2)
         plt.colorbar(im, ax=ax, label='Heat Intensity')
         ax.set_title("Heat Map Magnitude")
@@ -205,32 +223,137 @@ class HeatMap2DVectorField(HeatMap2D):
         return ax
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Accumulate social (modified) A* paths into a HeatMap2DVector and save or plot."
+    )
+    parser.add_argument(
+        "--scenario",
+        type=str,
+        default="sample2_default",
+        help="Scenario name in environments/grid_scenarios.json (default: sample2_default).",
+    )
+    parser.add_argument(
+        "-n",
+        "--num-paths",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Number of successful planner runs whose paths are merged into the heatmap (default: 10).",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="RNG seed for start/goal sampling (default: 42).")
+    parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=None,
+        help="Max planner trials (default: max(100, 50 * num_paths)).",
+    )
+    parser.add_argument(
+        "--min-separation",
+        type=float,
+        default=0.0,
+        metavar="M",
+        help="Minimum start–goal distance (m); 0 disables (default: 0).",
+    )
+    parser.add_argument(
+        "--max-start-goal-distance",
+        type=float,
+        default=None,
+        metavar="D",
+        help="If set, resample goal until start–goal distance is at most D m (e.g. 30 for Y2E2).",
+    )
+    parser.add_argument(
+        "--heatmap-prefix",
+        type=str,
+        default="heatmap_vector",
+        help="Prefix for <prefix>_heatmap.npy save/load (default: heatmap_vector).",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Load existing <prefix>_heatmap.npy before adding new paths.",
+    )
+    parser.add_argument(
+        "--increment",
+        type=float,
+        default=1.0,
+        help="Per-edge increment passed to HeatMap2DVector.add_path (default: 1.0).",
+    )
+    parser.add_argument("--no-plot", action="store_true", help="Do not display the matplotlib figure.")
+    return parser.parse_args()
 
-def generate_random_free_point(occ_grid: StochOccupancyGrid2D):
-    while True:
-        xy = np.random.uniform(low=[occ_grid.origin_x, occ_grid.origin_y], high=[(occ_grid.origin_x + occ_grid.width)*occ_grid.resolution, (occ_grid.origin_y + occ_grid.height)*occ_grid.resolution])
-        x, y = occ_grid.snap_to_grid(xy)
-        if occ_grid.is_free((x, y)):
-            return [x, y]
 
-if __name__ == "__main__":
-    # Example usage
-    scenario_name = "sample2_default"
-    occ, map_size, map_resolution = load_grid_scenario(scenario_name, plot=False)
-    occ_grid = StochOccupancyGrid2D(map_resolution, round(map_size[0]/map_resolution), round(map_size[1]/map_resolution), 0, 0, 10, occ.T)
+def main() -> int:
+    args = parse_args()
+    if args.num_paths < 1:
+        print("error: --num-paths must be >= 1", file=sys.stderr)
+        return 2
+
+    max_attempts = args.max_attempts
+    if max_attempts is None:
+        max_attempts = max(100, 50 * args.num_paths)
+    if max_attempts < 1:
+        print("error: --max-attempts must be >= 1", file=sys.stderr)
+        return 2
+
+    rng = np.random.default_rng(args.seed)
+    occ_grid, _, map_resolution, statespace_hi = build_occ_grid(args.scenario)
 
     heatmap = HeatMap2DVector(occ_grid)
-    heatmap.load_heatmap("vector_incomplete")
+    if args.resume:
+        heatmap.load_heatmap(args.heatmap_prefix)
 
-    # Simulate adding paths
-    for _ in range(10):
-        x_init = generate_random_free_point(occ_grid)
-        x_goal = generate_random_free_point(occ_grid)
+    successes = 0
+    attempts = 0
+    while successes < args.num_paths and attempts < max_attempts:
+        attempts += 1
+        x_init = generate_random_free_point(occ_grid, rng)
+        x_goal = generate_random_free_point(occ_grid, rng)
+        if args.max_start_goal_distance is not None:
+            max_d = float(args.max_start_goal_distance)
+            while (
+                np.linalg.norm(np.array(x_goal) - np.array(x_init)) > max_d
+            ):
+                x_goal = generate_random_free_point(occ_grid, rng)
+        if x_init == x_goal:
+            continue
+        if args.min_separation > 0.0:
+            if np.linalg.norm(np.array(x_goal) - np.array(x_init)) < args.min_separation:
+                continue
 
-        problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
-        if problem.solve():
-            heatmap.add_path(problem.path, increment=1.0)
+        problem = AStar(
+            [0, 0],
+            statespace_hi,
+            x_init,
+            x_goal,
+            occ_grid,
+            resolution=map_resolution,
+            desired_dist_right_extra=0.25,
+        )
+        if not problem.solve(mode="modified"):
+            continue
 
-    heatmap.plot_heatmap()
-    # heatmap.plot_heatmap_no_vectors()
-    heatmap.save_heatmap("vector_incomplete")
+        heatmap.add_path(problem.path, increment=args.increment)
+        successes += 1
+
+    print(
+        f"Scenario: {args.scenario} | collected {successes}/{args.num_paths} paths "
+        f"in {attempts} attempts (max {max_attempts})."
+    )
+
+    heatmap.save_heatmap(args.heatmap_prefix)
+
+    if not args.no_plot:
+        heatmap.plot_heatmap()
+
+    if successes < args.num_paths:
+        print(
+            f"error: only {successes} successes before hitting --max-attempts ({max_attempts}).",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

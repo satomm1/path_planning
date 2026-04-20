@@ -74,3 +74,11 @@ python3 -m social_path_planning.compare_astar --scenario y2e2 --num-routes 10
 ```bash
 python3 -m social_path_planning.precompute_wall_distances --scenario y2e2
 ```
+
+**Directional heatmap (accumulated paths):** merge many social A* routes into an HSV direction heatmap; for Y2E2, cap start–goal distance so pairs stay local (same idea as `test_y2e2_social_astar`):
+
+```bash
+python3 -m social_path_planning.heat_map --scenario y2e2 --num-paths 20 --heatmap-prefix y2e2_routes --max-start-goal-distance 30
+```
+
+Use `--no-plot` for headless runs; `--resume` loads `<prefix>_heatmap.npy` before adding paths. Precompute wall distances (command above) first on large maps.
