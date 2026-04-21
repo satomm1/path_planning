@@ -6,6 +6,14 @@ CLI example (Y2E2, social / modified A*):
     python -m social_path_planning.heat_map --scenario y2e2 --num-paths 20 \\
         --heatmap-prefix y2e2_routes --max-start-goal-distance 30
 
+Optional sparse-graph planning (``--sparse-graph-threshold`` and ``--sparse-min-component-size``
+match ``sparse_graph.py`` defaults). Use ``--sparse-rebuild-every K`` to rebuild the graph only
+after every K successful paths (default 1 = rebuild before each plan; larger K saves CPU on big maps):
+
+    python -m social_path_planning.heat_map --scenario y2e2 --num-paths 20 \\
+        --use-sparse-graph --sparse-graph-threshold 1.0 --sparse-min-component-size 15 \\
+        --sparse-rebuild-every 5 --heatmap-prefix y2e2_routes
+
 For faster planning on large YAML maps, precompute wall distances once:
 
     python -m social_path_planning.precompute_wall_distances --scenario y2e2
@@ -25,7 +33,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import hsv_to_rgb
 
-from social_path_planning.a_star import AStar
+from social_path_planning.a_star import AStar, AStar_With_Graph
 from social_path_planning.compare_astar import build_occ_grid, generate_random_free_point
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 
@@ -291,6 +299,34 @@ def parse_args():
         default=1.0,
         help="Per-edge increment passed to HeatMap2DVector.add_path (default: 1.0).",
     )
+    parser.add_argument(
+        "--use-sparse-graph",
+        action="store_true",
+        help="Plan with AStar_With_Graph: rebuild FrequentSubgraph from the current heatmap (see --sparse-rebuild-every).",
+    )
+    parser.add_argument(
+        "--sparse-graph-threshold",
+        type=float,
+        default=1.0,
+        metavar="T",
+        help="Minimum directional heat to include a sparse-graph edge (default: 1.0).",
+    )
+    parser.add_argument(
+        "--sparse-min-component-size",
+        type=int,
+        default=15,
+        metavar="K",
+        help="Prune weakly connected graph components with fewer than K nodes (default: 15).",
+    )
+    parser.add_argument(
+        "--sparse-rebuild-every",
+        type=int,
+        default=20,
+        metavar="N",
+        help="In sparse-graph mode, rebuild the graph only after every N successful paths merged "
+             "into the heatmap (default: 20 = rebuild before each plan). Larger N reduces CPU; "
+             "the graph may be briefly stale.",
+    )
     parser.add_argument("--no-plot", action="store_true", help="Do not display the matplotlib figure.")
     return parser.parse_args()
 
@@ -308,6 +344,14 @@ def main() -> int:
         print("error: --max-attempts must be >= 1", file=sys.stderr)
         return 2
 
+    if args.use_sparse_graph and args.sparse_min_component_size < 1:
+        print("error: --sparse-min-component-size must be >= 1", file=sys.stderr)
+        return 2
+
+    if args.use_sparse_graph and args.sparse_rebuild_every < 1:
+        print("error: --sparse-rebuild-every must be >= 1", file=sys.stderr)
+        return 2
+
     seed = args.seed if args.seed is not None else secrets.randbelow(2**32)
     rng = np.random.default_rng(seed)
     print(f"RNG seed: {seed}")
@@ -316,6 +360,15 @@ def main() -> int:
     heatmap = HeatMap2DVector(occ_grid)
     if args.resume:
         heatmap.load_heatmap(args.heatmap_prefix)
+
+    if args.use_sparse_graph:
+        from social_path_planning.sparse_graph import FrequentSubgraph as _FrequentSubgraph
+
+        frequent = _FrequentSubgraph(occ_grid)
+    else:
+        frequent = None
+
+    graph_built_at_successes: int | None = None
 
     successes = 0
     attempts = 0
@@ -335,15 +388,35 @@ def main() -> int:
             if np.linalg.norm(np.array(x_goal) - np.array(x_init)) < args.min_separation:
                 continue
 
-        problem = AStar(
-            [0, 0],
-            statespace_hi,
-            x_init,
-            x_goal,
-            occ_grid,
-            resolution=map_resolution,
-            desired_dist_right_extra=0.25,
-        )
+        if frequent is not None:
+            need_rebuild = graph_built_at_successes is None or (
+                successes - graph_built_at_successes >= args.sparse_rebuild_every
+            )
+            if need_rebuild:
+                frequent.set_heat_map(heatmap.heatmap)
+                frequent.build_graph(threshold=args.sparse_graph_threshold, reset_graph=True)
+                frequent.prune_graph(min_component_size=args.sparse_min_component_size)
+                graph_built_at_successes = successes
+            problem = AStar_With_Graph(
+                [0, 0],
+                statespace_hi,
+                x_init,
+                x_goal,
+                occ_grid,
+                frequent.graph,
+                resolution=map_resolution,
+                desired_dist_right_extra=0.25,
+            )
+        else:
+            problem = AStar(
+                [0, 0],
+                statespace_hi,
+                x_init,
+                x_goal,
+                occ_grid,
+                resolution=map_resolution,
+                desired_dist_right_extra=0.25,
+            )
         if not problem.solve(mode="modified"):
             continue
 

@@ -8,10 +8,9 @@ import glob
 import re
 import pickle
 
-from social_path_planning.compare_astar import generate_random_free_point
+from social_path_planning.compare_astar import build_occ_grid, generate_random_free_point
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 from social_path_planning.heat_map import HeatMap2DVector
-from social_path_planning.grid_loader import load_grid_scenario
 from social_path_planning.a_star import AStar, AStar_With_Graph
 from social_path_planning.utils import *
 
@@ -145,16 +144,7 @@ def save_side_by_side_timeline(
         raise ValueError("batch_k must be > 0")
     os.makedirs(output_dir, exist_ok=True)
 
-    occ, map_size, map_resolution = load_grid_scenario(scenario_name, plot=False)
-    occ_grid = StochOccupancyGrid2D(
-        map_resolution,
-        round(map_size[0] / map_resolution),
-        round(map_size[1] / map_resolution),
-        0,
-        0,
-        10,
-        occ.T
-    )
+    occ_grid, map_size, map_resolution, statespace_hi = build_occ_grid(scenario_name)
 
     heatmap = HeatMap2DVector(occ_grid)
     checkpoint_path = os.path.join(output_dir, CHECKPOINT_FILENAME)
@@ -204,7 +194,7 @@ def save_side_by_side_timeline(
         attempted_this_run += 1
         x_init = generate_random_free_point(occ_grid, _sample_rng)
         x_goal = generate_random_free_point(occ_grid, _sample_rng)
-        problem = AStar([0, 0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
+        problem = AStar([0, 0], statespace_hi, x_init, x_goal, occ_grid, resolution=map_resolution)
 
         if not problem.solve():
             continue
@@ -345,20 +335,18 @@ if __name__ == "__main__":
         print("Timeline export completed:", result)
     else:
         scenario_name = args.scenario_name
-        occ, map_size, map_resolution = load_grid_scenario(scenario_name, plot=False)
-        occ_grid = StochOccupancyGrid2D(map_resolution, round(map_size[0] / map_resolution),
-                                        round(map_size[1] / map_resolution), 0, 0, 10, occ.T)
+        occ_grid, map_size, map_resolution, statespace_hi = build_occ_grid(scenario_name)
 
-        frequent_graph = FrequentSubgraph(occ_grid, "vector_incomplete")
+        frequent_graph = FrequentSubgraph(occ_grid, "y2e2_routes")
         frequent_graph.build_graph(threshold=args.graph_threshold)
         frequent_graph.prune_graph(min_component_size=args.min_component_size)
 
         print("Number of nodes in the graph:", frequent_graph.graph.number_of_nodes())
         print("Number of edges in the graph:", frequent_graph.graph.number_of_edges())
 
-        x_init = snap_to_grid([2, 2], map_resolution)
-        x_goal = snap_to_grid([75, 97], map_resolution)
-        problem = AStar_With_Graph([0, 0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, frequent_graph.graph, resolution=map_resolution)
+        x_init = snap_to_grid([5, 38], map_resolution)
+        x_goal = snap_to_grid([40, 40], map_resolution)
+        problem = AStar_With_Graph([0, 0], statespace_hi, x_init, x_goal, occ_grid, frequent_graph.graph, resolution=map_resolution)
 
         problem_status = problem.solve()
         if problem_status:
