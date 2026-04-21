@@ -224,6 +224,114 @@ def align_occ_map_raster(occ_xy, align_deg, resolution, crop_known=True):
     return rotated, map_size
 
 
+def write_ros_map_pgm_yaml(
+    occ_xy,
+    resolution,
+    output_yaml_path,
+    *,
+    source_map_yaml_path=None,
+    negate=None,
+    occupied_thresh=None,
+    free_thresh=None,
+    origin=None,
+):
+    """
+    Write a ROS ``map_server``-compatible ``.pgm`` + ``.yaml`` pair from an
+    occupancy grid in the same **planner frame** as ``occ_xy`` (x index, y index,
+    origin at the lower-left of the grid in meters).
+
+    Values in ``occ_xy`` are ``-1`` unknown, ``0`` free, ``1`` occupied — matching
+    :func:`align_occ_map_raster` output. Thresholds and ``negate`` default from
+    ``source_map_yaml_path`` when given so reloading classifies cells like the
+    source map; otherwise use explicit ``negate`` / ``occupied_thresh`` /
+    ``free_thresh`` or built-in defaults (``negate=0``, ``0.65``, ``0.196``).
+
+    The written YAML uses ``origin: [0, 0, 0]`` unless ``origin`` is set (e.g. to
+    preserve a global map pose). For an **aligned** export used without further
+    rotation, leave origin at zero so the ROS node can load the map directly.
+
+    Parameters
+    ----------
+    occ_xy : ndarray
+        Shape ``(nx, ny)``, float values ``-1``, ``0``, or ``1``.
+    resolution : float
+        Meters per cell.
+    output_yaml_path : str or Path
+        Path to the ``.yaml`` file; the image is written beside it as the same
+        stem with ``.pgm``.
+    source_map_yaml_path : str or Path, optional
+        If set, read ``negate``, ``occupied_thresh``, and ``free_thresh`` from it.
+    negate : int, optional
+        Overrides source YAML when provided (must be ``0`` or ``1``).
+    occupied_thresh, free_thresh : float, optional
+        Overrides source YAML when provided.
+    origin : sequence of three floats, optional
+        ``[x, y, yaw]`` for the map YAML (default ``[0, 0, 0]``).
+    """
+    occ_xy = np.asarray(occ_xy, dtype=np.float32)
+    if occ_xy.ndim != 2:
+        raise ValueError("occ_xy must be a 2D array.")
+
+    out_yaml = Path(output_yaml_path).expanduser().resolve()
+    out_yaml.parent.mkdir(parents=True, exist_ok=True)
+    out_pgm = out_yaml.with_suffix(".pgm")
+
+    if source_map_yaml_path is not None:
+        src = _load_simple_yaml(Path(source_map_yaml_path))
+        if negate is None:
+            negate = int(src["negate"])
+        if occupied_thresh is None:
+            occupied_thresh = float(src["occupied_thresh"])
+        if free_thresh is None:
+            free_thresh = float(src["free_thresh"])
+    else:
+        if negate is None:
+            negate = 0
+        if occupied_thresh is None:
+            occupied_thresh = 0.65
+        if free_thresh is None:
+            free_thresh = 0.196
+
+    if negate not in (0, 1):
+        raise ValueError("negate must be 0 or 1.")
+    if resolution <= 0:
+        raise ValueError("resolution must be positive.")
+
+    if origin is None:
+        origin = [0.0, 0.0, 0.0]
+    else:
+        origin = [float(origin[0]), float(origin[1]), float(origin[2])]
+
+    # Same layout as _load_occ_from_map_yaml: PGM rows top→bottom, then flipud,
+    # then transpose to occ_xy. Inverse: occ_xy.T then flipud → PGM rows.
+    occ_yx_top = np.flipud(occ_xy.T)
+    mid_unknown = 0.5 * (float(free_thresh) + float(occupied_thresh))
+    occ_prob = np.empty_like(occ_yx_top, dtype=np.float32)
+    occ_prob[occ_yx_top > 0.5] = 1.0
+    occ_prob[occ_yx_top < -0.5] = mid_unknown
+    occ_prob[(occ_yx_top >= -0.5) & (occ_yx_top <= 0.5)] = 0.0
+
+    image_norm = occ_prob if negate == 1 else (1.0 - occ_prob)
+    pixels = np.clip(np.round(image_norm * 255.0), 0, 255).astype(np.uint8)
+
+    height, width = pixels.shape
+    with out_pgm.open("wb") as f:
+        f.write(f"P5\n{width} {height}\n255\n".encode("ascii"))
+        pixels.tofile(f)
+
+    with out_yaml.open("w", encoding="utf-8") as f:
+        f.write(f"image: {out_pgm.name}\n")
+        f.write(f"resolution: {float(resolution)}\n")
+        f.write(
+            f"origin: [{origin[0]}, {origin[1]}, {origin[2]}]\n"
+        )
+        f.write(f"negate: {negate}\n")
+        f.write(f"occupied_thresh: {occupied_thresh}\n")
+        f.write(f"free_thresh: {free_thresh}\n")
+
+    return out_yaml, out_pgm
+
+
 def _load_occ_from_map_yaml(map_yaml_path, crop_unknown=False):
     yaml_data = _load_simple_yaml(map_yaml_path)
     required = {"image", "resolution", "negate", "occupied_thresh", "free_thresh"}

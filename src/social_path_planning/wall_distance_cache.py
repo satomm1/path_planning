@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterable, Optional, Tuple, TypeVar
+from typing import TYPE_CHECKING, Iterable, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 
@@ -62,6 +62,10 @@ NPZ_D_RIGHT = "D_right"
 NPZ_META_VERSION = "cache_version"
 NPZ_PROBS_SHA256 = "probs_sha256"
 NPZ_DIST_THRESH = "dist_thresh"
+
+
+class WallDistanceCacheError(RuntimeError):
+    """Raised when ``load_wall_distance_cache_into_grid(..., strict=True)`` cannot apply a cache."""
 
 
 def opposite_dir_idx(k: int) -> int:
@@ -157,43 +161,149 @@ def save_wall_distance_cache(
     )
 
 
-def try_load_wall_distance_cache(path: Path, grid: StochOccupancyGrid2D) -> Optional[np.ndarray]:
-    """Load cache if file exists and metadata matches ``grid``."""
+def _attempt_load_wall_distance_cache(
+    path: Path, grid: "StochOccupancyGrid2D"
+) -> Tuple[Optional[np.ndarray], Optional[str]]:
+    """
+    Try to load ``D_right`` from ``path`` for ``grid``.
+
+    Returns
+    -------
+    (array, None) on success, or (None, error_message) on failure.
+    """
     path = Path(path)
     if not path.is_file():
-        return None
+        return None, f"wall-distance cache file not found: {path}"
     try:
         data = np.load(path, allow_pickle=False)
-    except (OSError, ValueError):
-        return None
+    except (OSError, ValueError) as exc:
+        return None, f"cannot read wall-distance cache {path}: {exc}"
 
-    if int(np.asarray(data[NPZ_META_VERSION]).item()) != CACHE_VERSION:
-        return None
+    try:
+        ver = int(np.asarray(data[NPZ_META_VERSION]).item())
+    except (KeyError, ValueError, TypeError):
+        return None, f"invalid cache metadata in {path} (missing {NPZ_META_VERSION})"
+
+    if ver != CACHE_VERSION:
+        return None, f"cache version mismatch: file has {ver}, expected {CACHE_VERSION}"
 
     expected_sha = fingerprint_probs(grid.probs)
-    stored = str(np.asarray(data[NPZ_PROBS_SHA256]).item())
+    try:
+        stored = str(np.asarray(data[NPZ_PROBS_SHA256]).item())
+    except (KeyError, ValueError, TypeError):
+        return None, f"invalid cache metadata in {path} (missing {NPZ_PROBS_SHA256})"
+
     if stored != expected_sha:
-        return None
+        return None, (
+            "occupancy fingerprint mismatch: grid.probs does not match the map used to "
+            "build this cache (rebuild with python -m social_path_planning.precompute_wall_distances --force)"
+        )
 
-    if not np.isclose(
-        float(np.asarray(data[NPZ_DIST_THRESH]).item()), DEFAULT_DIST_THRESH
-    ):
-        return None
+    try:
+        dt = float(np.asarray(data[NPZ_DIST_THRESH]).item())
+    except (KeyError, ValueError, TypeError):
+        return None, f"invalid cache metadata in {path} (missing {NPZ_DIST_THRESH})"
 
-    if (
-        not np.isclose(float(np.asarray(data["resolution"]).item()), grid.resolution)
-        or not np.isclose(float(np.asarray(data["origin_x"]).item()), grid.origin_x)
-        or not np.isclose(float(np.asarray(data["origin_y"]).item()), grid.origin_y)
-        or int(np.asarray(data["width"]).item()) != grid.width
-        or int(np.asarray(data["height"]).item()) != grid.height
-    ):
-        return None
+    if not np.isclose(dt, DEFAULT_DIST_THRESH):
+        return None, f"cache dist_thresh={dt} but this code expects {DEFAULT_DIST_THRESH}"
+
+    try:
+        res = float(np.asarray(data["resolution"]).item())
+        ox = float(np.asarray(data["origin_x"]).item())
+        oy = float(np.asarray(data["origin_y"]).item())
+        w = int(np.asarray(data["width"]).item())
+        h = int(np.asarray(data["height"]).item())
+    except (KeyError, ValueError, TypeError) as exc:
+        return None, f"cache missing grid metadata in {path}: {exc}"
+
+    if not np.isclose(res, grid.resolution):
+        return None, f"resolution mismatch: cache={res} grid={grid.resolution}"
+    if not np.isclose(ox, grid.origin_x):
+        return None, f"origin_x mismatch: cache={ox} grid={grid.origin_x}"
+    if not np.isclose(oy, grid.origin_y):
+        return None, f"origin_y mismatch: cache={oy} grid={grid.origin_y}"
+    if w != grid.width:
+        return None, f"width mismatch: cache={w} grid={grid.width}"
+    if h != grid.height:
+        return None, f"height mismatch: cache={h} grid={grid.height}"
 
     d_right = np.asarray(data[NPZ_D_RIGHT], dtype=np.float64)
     if d_right.shape != (grid.height, grid.width, 8):
-        return None
+        return None, (
+            f"{NPZ_D_RIGHT} shape {d_right.shape} != expected {(grid.height, grid.width, 8)}"
+        )
 
+    return d_right, None
+
+
+def try_load_wall_distance_cache(path: Path, grid: StochOccupancyGrid2D) -> Optional[np.ndarray]:
+    """Load cache if file exists and metadata matches ``grid``."""
+    d_right, _err = _attempt_load_wall_distance_cache(path, grid)
     return d_right
+
+
+def diagnose_wall_distance_cache(
+    path: Union[str, Path], grid: "StochOccupancyGrid2D"
+) -> Optional[str]:
+    """
+    Return ``None`` if ``path`` is a compatible cache for ``grid``, else a short reason.
+
+    Use this when loading maps outside this repository (e.g. ROS ``map_server``) to log
+    why a precomputed ``.npz`` cannot be attached before falling back to raycasting.
+    """
+    _d, err = _attempt_load_wall_distance_cache(Path(path), grid)
+    return err
+
+
+def load_wall_distance_cache_into_grid(
+    grid: "StochOccupancyGrid2D",
+    path: Union[str, Path],
+    *,
+    strict: bool = True,
+    verbose: bool = True,
+) -> bool:
+    """
+    Attach precomputed ``D_right`` from an ``.npz`` file to an existing grid.
+
+    For workflows where ``StochOccupancyGrid2D`` is built from an external map
+    (ROS occupancy grid, aligned PGM, etc.), call this **after** construction once
+    ``probs`` matches the map that was used to build the cache.
+
+    Parameters
+    ----------
+    grid : StochOccupancyGrid2D
+        Grid whose ``probs``, ``resolution``, ``width``, ``height``, ``origin_x``,
+        ``origin_y`` must match the cache metadata.
+    path : str or Path
+        Path to ``*_wall_dist.npz`` (same format as ``save_wall_distance_cache``).
+    strict : bool
+        If True (default), raise :exc:`WallDistanceCacheError` when the cache cannot
+        be used. If False, return ``False`` and leave ``grid._d_right`` unchanged.
+    verbose : bool
+        If True, print a short message to stderr when the cache is loaded.
+
+    Returns
+    -------
+    bool
+        True if the cache was applied, False if ``strict`` is False and loading failed.
+
+    Raises
+    ------
+    WallDistanceCacheError
+        If ``strict`` is True and the cache is missing or incompatible.
+    """
+    d_right, err = _attempt_load_wall_distance_cache(Path(path), grid)
+    if d_right is not None:
+        grid._d_right = d_right
+        if verbose:
+            print(
+                f"Using precomputed wall-distance cache: {Path(path)}",
+                file=sys.stderr,
+            )
+        return True
+    if strict:
+        raise WallDistanceCacheError(err or "wall-distance cache could not be loaded")
+    return False
 
 
 def attach_wall_distance_cache(

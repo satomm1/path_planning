@@ -7,6 +7,7 @@ How to run:
 
 import io
 import sys
+import tempfile
 from pathlib import Path
 from unittest import TestCase
 
@@ -19,7 +20,12 @@ if str(SRC) not in sys.path:
 
 from social_path_planning.a_star import AStar
 from social_path_planning.compare_astar import build_occ_grid
-from social_path_planning.grid_loader import align_occ_map_raster, load_grid_scenario
+from social_path_planning.grid_loader import (
+    _load_occ_from_map_yaml,
+    align_occ_map_raster,
+    load_grid_scenario,
+    write_ros_map_pgm_yaml,
+)
 from social_path_planning.utils import snap_to_grid
 
 
@@ -54,6 +60,25 @@ class TestAlignOccMapRaster(TestCase):
         aligned, _ = align_occ_map_raster(tilted, -45.0, res, crop_known=True)
         s_aligned = _horizontal_free_peak_score(aligned)
         self.assertGreater(s_aligned, s_tilted)
+
+
+class TestWriteRosMapRoundTrip(TestCase):
+    def test_write_then_load_matches_occ(self):
+        nx, ny = 24, 16
+        occ = np.full((nx, ny), -1.0, dtype=np.float32)
+        occ[4:10, 3:12] = 0.0
+        occ[15:20, 8:14] = 1.0
+        res = 0.05
+        env_dir = Path(__file__).resolve().parents[1] / "src" / "social_path_planning" / "environments"
+        src_yaml = env_dir / "y2e2.yaml"
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "roundtrip.yaml"
+            write_ros_map_pgm_yaml(
+                occ, res, out, source_map_yaml_path=src_yaml
+            )
+            loaded, _map_size, res2 = _load_occ_from_map_yaml(out, crop_unknown=False)
+        self.assertEqual(res2, res)
+        np.testing.assert_array_equal(loaded, occ)
 
 
 class TestY2E2LoadRegression(TestCase):

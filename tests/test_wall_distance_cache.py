@@ -13,6 +13,9 @@ if str(SRC) not in sys.path:
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 from social_path_planning.wall_distance_cache import (
     NEIGHBOR_OFFSETS,
+    WallDistanceCacheError,
+    diagnose_wall_distance_cache,
+    load_wall_distance_cache_into_grid,
     opposite_dir_idx,
     precompute_d_right,
     save_wall_distance_cache,
@@ -119,6 +122,65 @@ class TestWallDistanceCache(unittest.TestCase):
             v = g1.dist_to_wall_right((wx, wy), (1.0, 0.0))
             v2 = g1._dist_to_wall_right_raycast((wx, wy), (1.0, 0.0))
             self.assertAlmostEqual(v, v2, places=4)
+
+    def test_load_wall_distance_cache_into_grid_post_hoc(self):
+        import tempfile
+
+        probs, res, width, height = _tiny_free_grid()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.npz"
+            g0 = StochOccupancyGrid2D(res, width, height, 0.0, 0.0, 10, probs)
+            save_wall_distance_cache(path, g0, precompute_d_right(g0))
+
+            g1 = StochOccupancyGrid2D(
+                res,
+                width,
+                height,
+                0.0,
+                0.0,
+                10,
+                probs,
+                wall_distance_cache_path=None,
+                auto_build_wall_distance_cache=False,
+            )
+            self.assertIsNone(g1._d_right)
+            ok = load_wall_distance_cache_into_grid(g1, path, strict=True, verbose=False)
+            self.assertTrue(ok)
+            self.assertIsNotNone(g1._d_right)
+
+    def test_load_wall_distance_cache_strict_raises_on_mismatch(self):
+        import tempfile
+
+        probs, res, width, height = _tiny_free_grid()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.npz"
+            g0 = StochOccupancyGrid2D(res, width, height, 0.0, 0.0, 10, probs)
+            save_wall_distance_cache(path, g0, precompute_d_right(g0))
+
+            bad_probs = probs.copy()
+            bad_probs[5, 5] = 1.0
+            g_bad = StochOccupancyGrid2D(
+                res, width, height, 0.0, 0.0, 10, bad_probs,
+                wall_distance_cache_path=None,
+                auto_build_wall_distance_cache=False,
+            )
+            with self.assertRaises(WallDistanceCacheError):
+                load_wall_distance_cache_into_grid(g_bad, path, strict=True, verbose=False)
+
+            msg = diagnose_wall_distance_cache(path, g_bad)
+            self.assertIsNotNone(msg)
+            self.assertIn("fingerprint", msg)
+
+    def test_diagnose_returns_none_when_compatible(self):
+        import tempfile
+
+        probs, res, width, height = _tiny_free_grid()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.npz"
+            g0 = StochOccupancyGrid2D(res, width, height, 0.0, 0.0, 10, probs)
+            save_wall_distance_cache(path, g0, precompute_d_right(g0))
+            g1 = StochOccupancyGrid2D(res, width, height, 0.0, 0.0, 10, probs)
+            self.assertIsNone(diagnose_wall_distance_cache(path, g1))
 
 
 if __name__ == "__main__":

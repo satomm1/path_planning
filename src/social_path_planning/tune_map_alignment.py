@@ -3,11 +3,17 @@ Interactive tool to pick ``map_align_deg`` for map_yaml scenarios.
 
 Loads the occupancy grid **without** applying ``map_align_deg`` from JSON, then
 lets you sweep the angle with a slider. Copy the printed value into
-``environments/grid_scenarios.json`` for that scenario.
+``environments/grid_scenarios.json`` for that scenario, **or** export a ROS
+``map_server`` ``.pgm`` + ``.yaml`` for the current alignment (``Save for ROS``
+button, or ``--export``) so downstream nodes can load the map without applying
+rotation.
 
 Usage (from repository root, with PYTHONPATH=src or after install)::
 
     python -m social_path_planning.tune_map_alignment --scenario y2e2
+
+    python -m social_path_planning.tune_map_alignment --scenario y2e2 \\
+        --export C:/maps/y2e2_aligned.yaml --angle -4.3
 
 Sign convention matches ``align_occ_map_raster``: positive degrees rotate the
 raster counter-clockwise (SciPy).
@@ -21,7 +27,7 @@ import sys
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import BoundaryNorm, ListedColormap
-from matplotlib.widgets import CheckButtons, Slider
+from matplotlib.widgets import Button, CheckButtons, Slider
 
 from social_path_planning.grid_loader import (
     _load_occ_from_map_yaml,
@@ -29,6 +35,7 @@ from social_path_planning.grid_loader import (
     _resolve_relative_path,
     align_occ_map_raster,
     load_grid_config,
+    write_ros_map_pgm_yaml,
 )
 
 
@@ -53,7 +60,7 @@ def _load_raw_occ_for_map_scenario(scenario_name: str, config_path: str | None):
         map_yaml_path, crop_unknown=crop_unknown
     )
     map_align_crop_default = scenario.get("map_align_crop", True)
-    return occ, float(resolution), bool(map_align_crop_default)
+    return occ, float(resolution), bool(map_align_crop_default), map_yaml_path
 
 
 def run_interactive(
@@ -64,7 +71,9 @@ def run_interactive(
     initial_deg: float,
     crop_known: bool,
 ):
-    occ, resolution, _ = _load_raw_occ_for_map_scenario(scenario_name, config_path)
+    occ, resolution, _, map_yaml_path = _load_raw_occ_for_map_scenario(
+        scenario_name, config_path
+    )
     crop_state = [crop_known]
 
     cmap = ListedColormap(["gray", "#9DC6F2", "black"])
@@ -106,7 +115,10 @@ def run_interactive(
     ax_check = plt.axes((0.12, 0.02, 0.25, 0.04))
     check = CheckButtons(ax_check, ["crop after rotate (map_align_crop)"], [crop_state[0]])
 
-    text_ax = plt.axes((0.42, 0.01, 0.56, 0.05))
+    ax_save = plt.axes((0.40, 0.02, 0.18, 0.04))
+    btn_save = Button(ax_save, "Save for ROS")
+
+    text_ax = plt.axes((0.60, 0.01, 0.38, 0.05))
     text_ax.axis("off")
     snippet = text_ax.text(
         0,
@@ -145,6 +157,35 @@ def run_interactive(
     def on_check(_label):
         crop_state[0] = check.get_status()[0]
         _redraw(slider.val)
+
+    def on_save(_event):
+        try:
+            from tkinter import Tk, filedialog
+        except ImportError:
+            print("tkinter not available; use --export instead.", file=sys.stderr)
+            return
+        root = Tk()
+        root.withdraw()
+        path = filedialog.asksaveasfilename(
+            defaultextension=".yaml",
+            filetypes=[("ROS map yaml", "*.yaml"), ("All files", "*.*")],
+            initialfile=f"{scenario_name}_aligned.yaml",
+        )
+        root.destroy()
+        if not path:
+            return
+        al, _ = align_occ_map_raster(
+            occ, float(slider.val), resolution, crop_known=crop_state[0]
+        )
+        ypath, ppath = write_ros_map_pgm_yaml(
+            al,
+            resolution,
+            path,
+            source_map_yaml_path=map_yaml_path,
+        )
+        print(f"Wrote ROS map: {ypath}  {ppath}")
+
+    btn_save.on_clicked(on_save)
 
     slider.on_changed(on_slider_change)
     check.on_clicked(on_check)
@@ -190,13 +231,42 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Start with map_align_crop off (tight bbox crop disabled after rotate).",
     )
+    parser.add_argument(
+        "--export",
+        default=None,
+        metavar="MAP.yaml",
+        help="Write aligned ROS map .yaml and .pgm to this path and exit (no GUI).",
+    )
+    parser.add_argument(
+        "--angle",
+        type=float,
+        default=None,
+        help="Alignment angle in degrees for --export (defaults to --initial-deg).",
+    )
     args = parser.parse_args(argv)
 
-    if args.deg_min >= args.deg_max:
-        print("error: --deg-min must be < --deg-max", file=sys.stderr)
-        return 2
-
     try:
+        if args.export:
+            angle = args.angle if args.angle is not None else args.initial_deg
+            occ, resolution, _, map_yaml_path = _load_raw_occ_for_map_scenario(
+                args.scenario, args.config
+            )
+            aligned, _ = align_occ_map_raster(
+                occ, float(angle), resolution, crop_known=not args.no_crop
+            )
+            ypath, ppath = write_ros_map_pgm_yaml(
+                aligned,
+                resolution,
+                args.export,
+                source_map_yaml_path=map_yaml_path,
+            )
+            print(f"Wrote ROS map: {ypath}  {ppath}")
+            return 0
+
+        if args.deg_min >= args.deg_max:
+            print("error: --deg-min must be < --deg-max", file=sys.stderr)
+            return 2
+
         run_interactive(
             scenario_name=args.scenario,
             config_path=args.config,
