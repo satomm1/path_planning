@@ -1,12 +1,52 @@
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.interpolate import CubicSpline
+from __future__ import annotations
+
+import json
 import time
 from queue import PriorityQueue
-import networkx as nx
+from typing import TYPE_CHECKING
 
-from social_path_planning.occupancy_grid import StochOccupancyGrid2D
-from social_path_planning.utils import *
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+from scipy.interpolate import CubicSpline
+
+if TYPE_CHECKING:
+    from social_path_planning.occupancy_grid import StochOccupancyGrid2D
+
+
+def _empty_solve_telemetry():
+    return {
+        "mode": "unknown",
+        "success": False,
+        "solve_time_s": None,
+        "explored_nodes": 0,
+        "cost_eval_count": 0,
+        "social_cost_sum": 0.0,
+        "social_cost_max": 0.0,
+        "social_nonzero_edges": 0,
+        "path_geometric_length_m": None,
+        "path_social_penalty_sum": None,
+        "graph_edge_cost_evals": 0,
+        "off_graph_social_evals": 0,
+        "graph_weight_sum": 0.0,
+        "off_graph_edge_cost_sum": 0.0,
+        "path_segments_on_graph": 0,
+        "path_segments_total": 0,
+        "path_fraction_on_graph": None,
+    }
+
+
+def _telemetry_json_safe(obj):
+    if isinstance(obj, dict):
+        return {k: _telemetry_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_telemetry_json_safe(v) for v in obj]
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.integer):
+        return int(obj)
+    return obj
+
 
 class AStar(object):
     """Represents a motion planning problem to be solved using A*"""
@@ -51,6 +91,8 @@ class AStar(object):
         self.smoothed_path = None
         self.pp_plan = None  # the post-processed plan
         self.last_solve_time = None
+        self.last_solve_telemetry = _empty_solve_telemetry()
+        self._telemetry_collecting = False
 
     def is_free(self, x):
         """
@@ -96,7 +138,86 @@ class AStar(object):
 
     def cost(self, x1, x2, dist2right_prev=0):
         social_cost, dist2right = self.rightness_penalty(x1, x2, dist2right_prev)
-        return self.distance(x1, x2) + social_cost, dist2right
+        dist = self.distance(x1, x2)
+        edge_total = dist + social_cost
+        self._telemetry_record_edge_cost(dist, edge_total)
+        return edge_total, dist2right
+
+    def _telemetry_record_edge_cost(self, dist, edge_total):
+        if not getattr(self, "_telemetry_collecting", False):
+            return
+        t = self.last_solve_telemetry
+        t["cost_eval_count"] += 1
+        social = float(edge_total - dist)
+        t["social_cost_sum"] += social
+        t["social_cost_max"] = max(t["social_cost_max"], social)
+        if social > 1e-9:
+            t["social_nonzero_edges"] += 1
+
+    def _begin_solve_telemetry(self, mode):
+        self.last_solve_telemetry = _empty_solve_telemetry()
+        self.last_solve_telemetry["mode"] = mode
+        self._telemetry_collecting = True
+
+    def _finalize_solve_telemetry(self, success, mode, elapsed):
+        self._telemetry_collecting = False
+        t = self.last_solve_telemetry
+        t["mode"] = mode
+        t["success"] = bool(success)
+        t["solve_time_s"] = float(elapsed)
+        t["explored_nodes"] = int(len(self.closed_set))
+        if success and self.path is not None and len(self.path) >= 2:
+            path_len = 0.0
+            social_pen = 0.0
+            prev_d2r = 0.0
+            for i in range(len(self.path) - 1):
+                x1, x2 = self.path[i], self.path[i + 1]
+                path_len += float(self.distance(x1, x2))
+                pen, d2r = self.rightness_penalty(x1, x2, prev_d2r)
+                social_pen += float(pen)
+                prev_d2r = float(d2r)
+            t["path_geometric_length_m"] = path_len
+            t["path_social_penalty_sum"] = social_pen
+            self._append_graph_path_metrics(t)
+        else:
+            t["path_geometric_length_m"] = None
+            t["path_social_penalty_sum"] = None
+            self._append_graph_path_metrics(t)
+
+    def _append_graph_path_metrics(self, t):
+        """Override in AStar_With_Graph to fill graph path counters."""
+        pass
+
+    def _solve_return(self, success, elapsed, return_timing, return_telemetry):
+        if return_timing and return_telemetry:
+            return success, elapsed, self.last_solve_telemetry
+        if return_timing:
+            return success, elapsed
+        if return_telemetry:
+            return success, self.last_solve_telemetry
+        return success
+
+    def _emit_solve_return(self, success, elapsed, mode, return_timing, return_telemetry, log_telemetry):
+        self._finalize_solve_telemetry(success, mode, elapsed)
+        if log_telemetry:
+            self.log_last_solve_telemetry_ros()
+        return self._solve_return(success, elapsed, return_timing, return_telemetry)
+
+    def log_last_solve_telemetry_ros(self):
+        """Emit ``last_solve_telemetry`` via ``rospy.loginfo`` if ROS is initialized; otherwise no-op."""
+        if self.last_solve_telemetry is None:
+            return
+        try:
+            import rospy
+        except ImportError:
+            return
+        if not rospy.core.is_initialized():
+            return
+        payload = _telemetry_json_safe(self.last_solve_telemetry)
+        rospy.loginfo(
+            "social_path_planning AStar telemetry: %s",
+            json.dumps(payload, sort_keys=True),
+        )
 
     def rightness_penalty(self, x1, x2, dist2right_prev=0):
         """
@@ -218,19 +339,26 @@ class AStar(object):
 
         return list(reversed(path))
 
-    def solve(self, mode="modified", return_timing=False):
+    def solve(self, mode="modified", return_timing=False, return_telemetry=False, log_telemetry=True):
         if mode not in self.SUPPORTED_SOLVER_MODES:
             raise ValueError(f"Unsupported solver mode '{mode}'. Supported modes: {sorted(self.SUPPORTED_SOLVER_MODES)}")
 
         if mode == "vanilla":
-            return self.vanilla_solve(return_timing=return_timing)
-        elif mode == "modified":
-            return self.modified_solve(return_timing=return_timing)
-        else:
-            raise ValueError(f"Unsupported solver mode '{mode}'. Supported modes: {sorted(self.SUPPORTED_SOLVER_MODES)}")
+            return self.vanilla_solve(
+                return_timing=return_timing,
+                return_telemetry=return_telemetry,
+                log_telemetry=log_telemetry,
+            )
+        if mode == "modified":
+            return self.modified_solve(
+                return_timing=return_timing,
+                return_telemetry=return_telemetry,
+                log_telemetry=log_telemetry,
+            )
+        raise ValueError(f"Unsupported solver mode '{mode}'. Supported modes: {sorted(self.SUPPORTED_SOLVER_MODES)}")
 
-    def modified_solve(self, return_timing=False):
-
+    def modified_solve(self, return_timing=False, return_telemetry=False, log_telemetry=False):
+        self._begin_solve_telemetry("modified")
         t_start = time.time()
         while self.priority_queue.qsize() > 0:
             current_cost, x_current = self.priority_queue.get()
@@ -242,17 +370,13 @@ class AStar(object):
                 self.path = self.reconstruct_path()
                 self.smooth_path()
                 print(f"Social A* found a path in {elapsed:.2f} seconds.")
-                if return_timing:
-                    return True, elapsed
-                return True
+                return self._emit_solve_return(True, elapsed, "modified", return_timing, return_telemetry, log_telemetry)
 
             if time.time() - t_start > 60:
                 elapsed = time.time() - t_start
                 self.last_solve_time = elapsed
                 print("A* took too long.")
-                if return_timing:
-                    return False, elapsed
-                return False
+                return self._emit_solve_return(False, elapsed, "modified", return_timing, return_telemetry, log_telemetry)
 
             self.closed_set.add(x_current)
 
@@ -278,11 +402,10 @@ class AStar(object):
                     )
         elapsed = time.time() - t_start
         self.last_solve_time = elapsed
-        if return_timing:
-            return False, elapsed
-        return False
+        return self._emit_solve_return(False, elapsed, "modified", return_timing, return_telemetry, log_telemetry)
 
-    def vanilla_solve(self, return_timing=False):
+    def vanilla_solve(self, return_timing=False, return_telemetry=False, log_telemetry=False):
+        self._begin_solve_telemetry("vanilla")
         t_start = time.time()
         while self.priority_queue.qsize() > 0:
             current_cost, x_current = self.priority_queue.get()
@@ -294,17 +417,13 @@ class AStar(object):
                 self.path = self.reconstruct_path()
                 self.smooth_path()
                 print(f"Vanilla A* found a path in {elapsed:.2f} seconds.")
-                if return_timing:
-                    return True, elapsed
-                return True
+                return self._emit_solve_return(True, elapsed, "vanilla", return_timing, return_telemetry, log_telemetry)
 
             if time.time() - t_start > 150:
                 elapsed = time.time() - t_start
                 self.last_solve_time = elapsed
                 print("A* took too long.")
-                if return_timing:
-                    return False, elapsed
-                return False
+                return self._emit_solve_return(False, elapsed, "vanilla", return_timing, return_telemetry, log_telemetry)
 
             self.closed_set.add(x_current)
 
@@ -325,9 +444,7 @@ class AStar(object):
                     )
         elapsed = time.time() - t_start
         self.last_solve_time = elapsed
-        if return_timing:
-            return False, elapsed
-        return False
+        return self._emit_solve_return(False, elapsed, "vanilla", return_timing, return_telemetry, log_telemetry)
 
     def postprocess(self):
         """
@@ -433,7 +550,7 @@ class AStar_With_Graph(AStar):
         statespace_hi,
         x_init,
         x_goal,
-        occupancy,
+        occupancy: StochOccupancyGrid2D,
         graph: nx.DiGraph,
         resolution=1,
         robot_d=0.4,
@@ -458,13 +575,54 @@ class AStar_With_Graph(AStar):
         If not in the graph, we follow the usual rightness_penalty function to
         compute a social cost.
         """
+        dist = self.distance(x1, x2)
         x1x, x1y = self.get_index(x1)
         x2x, x2y = self.get_index(x2)
         if self.graph.has_edge((x1x, x1y), (x2x, x2y)):
-            return self.graph[(x1x, x1y)][(x2x, x2y)]['weight'], 0
-        else:
-            social_cost, dist2right = self.rightness_penalty(x1, x2, dist2right_prev)
-            return self.distance(x1, x2) + social_cost + 0.01, dist2right
+            w = float(self.graph[(x1x, x1y)][(x2x, x2y)]["weight"])
+            if getattr(self, "_telemetry_collecting", False):
+                t = self.last_solve_telemetry
+                t["cost_eval_count"] += 1
+                t["graph_edge_cost_evals"] += 1
+                t["graph_weight_sum"] += w
+                social = float(w - dist)
+                t["social_cost_sum"] += social
+                t["social_cost_max"] = max(t["social_cost_max"], social)
+                if social > 1e-9:
+                    t["social_nonzero_edges"] += 1
+            return w, 0
+        social_cost, dist2right = self.rightness_penalty(x1, x2, dist2right_prev)
+        edge_total = dist + social_cost + 0.01
+        if getattr(self, "_telemetry_collecting", False):
+            t = self.last_solve_telemetry
+            t["cost_eval_count"] += 1
+            t["off_graph_social_evals"] += 1
+            t["off_graph_edge_cost_sum"] += edge_total
+            social = float(edge_total - dist)
+            t["social_cost_sum"] += social
+            t["social_cost_max"] = max(t["social_cost_max"], social)
+            if social > 1e-9:
+                t["social_nonzero_edges"] += 1
+        return edge_total, dist2right
+
+    def _append_graph_path_metrics(self, t):
+        if not self.path or len(self.path) < 2:
+            t["path_segments_on_graph"] = 0
+            t["path_segments_total"] = 0
+            t["path_fraction_on_graph"] = None
+            return
+        on = 0
+        tot = 0
+        for i in range(len(self.path) - 1):
+            x1, x2 = self.path[i], self.path[i + 1]
+            i1 = self.get_index(x1)
+            i2 = self.get_index(x2)
+            tot += 1
+            if self.graph.has_edge(i1, i2):
+                on += 1
+        t["path_segments_on_graph"] = on
+        t["path_segments_total"] = tot
+        t["path_fraction_on_graph"] = (on / tot) if tot else None
 
     def show_path_on_graph(self):
         """
