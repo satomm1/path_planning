@@ -329,6 +329,11 @@ def attach_wall_distance_cache(
             file=sys.stderr,
         )
         return
+    else:
+        print(
+            f"No compatible wall-distance cache found at {cache_path} (reason: {diagnose_wall_distance_cache(cache_path, grid)})",
+            file=sys.stderr,
+        )
 
     if not auto_build:
         return
