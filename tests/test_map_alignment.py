@@ -162,17 +162,17 @@ class TestY2E2LoadRegression(TestCase):
         self.fail("could not find a feasible random start/goal on y2e2 after 200 tries")
 
 
-_HEAT_INV = (5, 6, 7, 3, 4, 0, 1, 2)
+_HEAT_INV = (7, 6, 5, 4, 3, 2, 1, 0)
 _WALL_INV = (2, 1, 0, 4, 3, 7, 6, 5)
 
 
 class TestRosLayoutTransforms(TestCase):
-    def test_heatmap_ros_matches_flipud_gather(self):
+    def test_heatmap_ros_matches_flipud_fliplr_gather(self):
         rng = np.random.default_rng(0)
         h, w = 4, 5
         H = rng.standard_normal((h, w, 8)).astype(np.float32)
         inv = np.asarray(_HEAT_INV, dtype=np.intp)
-        expected = np.flipud(H)[..., inv]
+        expected = np.fliplr(np.flipud(H))[..., inv]
         got = heatmap_array_to_ros_pgm_layout(H)
         np.testing.assert_array_equal(got, expected)
 
@@ -185,19 +185,19 @@ class TestRosLayoutTransforms(TestCase):
         got = wall_distance_d_right_to_ros_pgm_layout(D)
         np.testing.assert_array_equal(got, expected)
 
-    def test_scalar_heatmap_ros_is_flipud(self):
+    def test_scalar_heatmap_ros_is_flipud_fliplr(self):
         rng = np.random.default_rng(2)
         s = rng.standard_normal((3, 7)).astype(np.float32)
         np.testing.assert_array_equal(
-            heatmap_array_to_ros_pgm_layout(s), np.flipud(s)
+            heatmap_array_to_ros_pgm_layout(s), np.fliplr(np.flipud(s))
         )
 
-    def test_vector_field_ros_flips_y_component_sign(self):
+    def test_vector_field_ros_flips_xy_component_signs(self):
         rng = np.random.default_rng(3)
         v = rng.standard_normal((2, 3, 2)).astype(np.float32)
         got = heatmap_array_to_ros_pgm_layout(v)
-        fu = np.flipud(v)
-        np.testing.assert_array_equal(got[..., 0], fu[..., 0])
+        fu = np.fliplr(np.flipud(v))
+        np.testing.assert_array_equal(got[..., 0], -fu[..., 0])
         np.testing.assert_array_equal(got[..., 1], -fu[..., 1])
 
     def test_save_wall_distance_cache_includes_d_right_ros(self):

@@ -39,9 +39,9 @@ from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 
 _CHECKPOINT_EVERY_N = 10  # save heatmap after this many successful paths (same file as final save)
 
-# PGM / ROS top-down rows vs planner (height, width) with origin lower-left: same as
-# ``occ_yx_top = np.flipud(occ_xy.T)`` in ``grid_loader.write_ros_map_pgm_yaml``.
-_HEATMAP_ROS_DIR_GATHER = (5, 6, 7, 3, 4, 0, 1, 2)
+# ROS export used by our consumers mirrors both axes (top-down rows and right-origin
+# columns), so gather[j] gives the python channel for ROS slot j after flipud+fliplr.
+_HEATMAP_ROS_DIR_GATHER = (7, 6, 5, 4, 3, 2, 1, 0)
 
 
 def heatmap_array_to_ros_pgm_layout(arr: np.ndarray) -> np.ndarray:
@@ -53,12 +53,13 @@ def heatmap_array_to_ros_pgm_layout(arr: np.ndarray) -> np.ndarray:
     """
     if arr.ndim < 2:
         raise ValueError("heatmap_array_to_ros_pgm_layout expects at least 2 dimensions.")
-    flipped = np.flipud(arr)
+    flipped = np.fliplr(np.flipud(arr))
     if arr.ndim >= 3 and arr.shape[-1] == 8:
         inv = np.asarray(_HEATMAP_ROS_DIR_GATHER, dtype=np.intp)
         return flipped[..., inv]
     if arr.ndim >= 3 and arr.shape[-1] == 2:
         out = flipped.copy()
+        out[..., 0] *= -1.0
         out[..., 1] *= -1.0
         return out
     return flipped
