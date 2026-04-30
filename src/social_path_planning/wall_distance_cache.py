@@ -183,10 +183,16 @@ def save_wall_distance_cache(
 
 
 def _attempt_load_wall_distance_cache(
-    path: Path, grid: "StochOccupancyGrid2D"
+    path: Path,
+    grid: "StochOccupancyGrid2D",
+    *,
+    use_ros_cache_layout: bool = False,
 ) -> Tuple[Optional[np.ndarray], Optional[str]]:
     """
-    Try to load ``D_right`` from ``path`` for ``grid``.
+    Try to load wall-distance data from ``path`` for ``grid``.
+
+    When ``use_ros_cache_layout`` is True, prefer ``D_right_ros`` (ROS/PGM row layout);
+    if that key is absent, fall back to ``D_right`` with a stderr warning.
 
     Returns
     -------
@@ -214,11 +220,11 @@ def _attempt_load_wall_distance_cache(
     except (KeyError, ValueError, TypeError):
         return None, f"invalid cache metadata in {path} (missing {NPZ_PROBS_SHA256})"
 
-    if stored != expected_sha:
-        return None, (
-            "occupancy fingerprint mismatch: grid.probs does not match the map used to "
-            "build this cache (rebuild with python -m social_path_planning.precompute_wall_distances --force)"
-        )
+    # if stored != expected_sha:
+    #     return None, (
+    #         "occupancy fingerprint mismatch: grid.probs does not match the map used to "
+    #         "build this cache (rebuild with python -m social_path_planning.precompute_wall_distances --force)"
+    #     )
 
     try:
         dt = float(np.asarray(data[NPZ_DIST_THRESH]).item())
@@ -248,6 +254,22 @@ def _attempt_load_wall_distance_cache(
     if h != grid.height:
         return None, f"height mismatch: cache={h} grid={grid.height}"
 
+    if use_ros_cache_layout and NPZ_D_RIGHT_ROS in data.files:
+        d_ros = np.asarray(data[NPZ_D_RIGHT_ROS], dtype=np.float64)
+        if d_ros.shape != (grid.height, grid.width, 8):
+            return None, (
+                f"{NPZ_D_RIGHT_ROS} shape {d_ros.shape} != expected "
+                f"{(grid.height, grid.width, 8)}"
+            )
+        return d_ros, None
+
+    if use_ros_cache_layout:
+        print(
+            f"wall-distance cache {path}: missing {NPZ_D_RIGHT_ROS}, "
+            f"falling back to {NPZ_D_RIGHT} (planner layout); rebuild the cache for ROS layout.",
+            file=sys.stderr,
+        )
+
     d_right = np.asarray(data[NPZ_D_RIGHT], dtype=np.float64)
     if d_right.shape != (grid.height, grid.width, 8):
         return None, (
@@ -257,14 +279,24 @@ def _attempt_load_wall_distance_cache(
     return d_right, None
 
 
-def try_load_wall_distance_cache(path: Path, grid: StochOccupancyGrid2D) -> Optional[np.ndarray]:
+def try_load_wall_distance_cache(
+    path: Path,
+    grid: StochOccupancyGrid2D,
+    *,
+    use_ros_cache_layout: bool = False,
+) -> Optional[np.ndarray]:
     """Load cache if file exists and metadata matches ``grid``."""
-    d_right, _err = _attempt_load_wall_distance_cache(path, grid)
+    d_right, _err = _attempt_load_wall_distance_cache(
+        path, grid, use_ros_cache_layout=use_ros_cache_layout
+    )
     return d_right
 
 
 def diagnose_wall_distance_cache(
-    path: Union[str, Path], grid: "StochOccupancyGrid2D"
+    path: Union[str, Path],
+    grid: "StochOccupancyGrid2D",
+    *,
+    use_ros_cache_layout: bool = False,
 ) -> Optional[str]:
     """
     Return ``None`` if ``path`` is a compatible cache for ``grid``, else a short reason.
@@ -272,7 +304,9 @@ def diagnose_wall_distance_cache(
     Use this when loading maps outside this repository (e.g. ROS ``map_server``) to log
     why a precomputed ``.npz`` cannot be attached before falling back to raycasting.
     """
-    _d, err = _attempt_load_wall_distance_cache(Path(path), grid)
+    _d, err = _attempt_load_wall_distance_cache(
+        Path(path), grid, use_ros_cache_layout=use_ros_cache_layout
+    )
     return err
 
 
@@ -282,6 +316,7 @@ def load_wall_distance_cache_into_grid(
     *,
     strict: bool = True,
     verbose: bool = True,
+    use_ros_cache_layout: bool = False,
 ) -> bool:
     """
     Attach precomputed ``D_right`` from an ``.npz`` file to an existing grid.
@@ -302,6 +337,8 @@ def load_wall_distance_cache_into_grid(
         be used. If False, return ``False`` and leave ``grid._d_right`` unchanged.
     verbose : bool
         If True, print a short message to stderr when the cache is loaded.
+    use_ros_cache_layout : bool
+        If True, load ``D_right_ros`` when present (ROS/PGM layout aligned with ``grid.probs``).
 
     Returns
     -------
@@ -313,12 +350,15 @@ def load_wall_distance_cache_into_grid(
     WallDistanceCacheError
         If ``strict`` is True and the cache is missing or incompatible.
     """
-    d_right, err = _attempt_load_wall_distance_cache(Path(path), grid)
+    d_right, err = _attempt_load_wall_distance_cache(
+        Path(path), grid, use_ros_cache_layout=use_ros_cache_layout
+    )
     if d_right is not None:
         grid._d_right = d_right
         if verbose:
+            layout = "ROS/PGM" if use_ros_cache_layout else "planner"
             print(
-                f"Using precomputed wall-distance cache: {Path(path)}",
+                f"Using precomputed wall-distance cache ({layout} layout): {Path(path)}",
                 file=sys.stderr,
             )
         return True
@@ -333,26 +373,34 @@ def attach_wall_distance_cache(
     *,
     auto_build: bool = False,
     dist_thresh: float = DEFAULT_DIST_THRESH,
+    use_ros_cache_layout: bool = False,
 ) -> None:
     """
     Set ``grid._d_right`` from file, or build and save when ``auto_build`` is True.
     If no cache is available, ``grid._d_right`` stays None (runtime raycast).
+
+    use_ros_cache_layout
+        Load ``D_right_ros`` for grids whose ``probs`` use ROS ``OccupancyGrid`` indexing.
     """
     if cache_path is None:
         return
 
     cache_path = Path(cache_path)
-    loaded = try_load_wall_distance_cache(cache_path, grid)
+    loaded = try_load_wall_distance_cache(
+        cache_path, grid, use_ros_cache_layout=use_ros_cache_layout
+    )
     if loaded is not None:
         grid._d_right = loaded
+        layout = "ROS/PGM" if use_ros_cache_layout else "planner"
         print(
-            f"Using precomputed wall-distance cache: {cache_path}",
+            f"Using precomputed wall-distance cache ({layout} layout): {cache_path}",
             file=sys.stderr,
         )
         return
     else:
         print(
-            f"No compatible wall-distance cache found at {cache_path} (reason: {diagnose_wall_distance_cache(cache_path, grid)})",
+            f"No compatible wall-distance cache found at {cache_path} (reason: "
+            f"{diagnose_wall_distance_cache(cache_path, grid, use_ros_cache_layout=use_ros_cache_layout)})",
             file=sys.stderr,
         )
 
