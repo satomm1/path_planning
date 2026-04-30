@@ -3,6 +3,12 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap, BoundaryNorm
 from scipy.ndimage import distance_transform_edt
 
+from social_path_planning.wall_distance_cache import (
+    attach_wall_distance_cache,
+    DEFAULT_DIST_THRESH,
+    travel_dir_to_dir_idx,
+)
+
 class StochOccupancyGrid2D(object):
     def __init__(
         self,
@@ -38,8 +44,6 @@ class StochOccupancyGrid2D(object):
         # Precompute the distance map
         self.distance_map = None
         self.compute_distance_map()
-
-        from social_path_planning.wall_distance_cache import attach_wall_distance_cache
 
         attach_wall_distance_cache(
             self,
@@ -99,10 +103,7 @@ class StochOccupancyGrid2D(object):
         unknown cell found to the right of the travel_dir. If no wall is found inside
         the map bounds, returns 0.
         """
-        from social_path_planning.wall_distance_cache import (
-            DEFAULT_DIST_THRESH,
-            travel_dir_to_dir_idx,
-        )
+
 
         if (
             self._d_right is not None

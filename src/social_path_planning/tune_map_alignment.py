@@ -3,10 +3,11 @@ Interactive tool to pick ``map_align_deg`` for map_yaml scenarios.
 
 Loads the occupancy grid **without** applying ``map_align_deg`` from JSON, then
 lets you sweep the angle with a slider. Copy the printed value into
-``environments/grid_scenarios.json`` for that scenario, **or** export a ROS
-``map_server`` ``.pgm`` + ``.yaml`` for the current alignment (``Save for ROS``
-button, or ``--export``) so downstream nodes can load the map without applying
-rotation.
+``environments/grid_scenarios.json`` for that scenario, **or** export a ``.pgm`` +
+``.yaml`` for the current alignment (``Save for ROS`` button, or ``--export``).
+Exports use ``occupancy_encoding: ros_int8`` (costmap-style PGM bytes ``205`` /
+``254`` / ``0`` for unknown / free / occupied). Pass ``occupancy_encoding='probability'``
+to ``write_ros_map_pgm_yaml`` if you need the older grayscale probability maps.
 
 Usage (from repository root, with PYTHONPATH=src or after install)::
 
