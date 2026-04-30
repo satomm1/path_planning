@@ -15,6 +15,11 @@ _SUPPORTED_OPS = [
 _PLOT_FIGSIZE = (8, 8)
 _PLOT_DPI = 300
 
+# ``occupancy_encoding: ros_int8`` PGM bytes (costmap-style; PGM cannot store int8 -1).
+ROS_PGM_INT8_UNKNOWN_BYTE = 205
+ROS_PGM_INT8_FREE_BYTE = 254
+ROS_PGM_INT8_OCCUPIED_BYTE = 0
+
 
 def _default_config_path():
     module_dir = Path(__file__).resolve().parent
@@ -145,6 +150,66 @@ def _load_pgm_normalized(pgm_path):
         return image, width, height
 
 
+def _load_pgm_uint8(pgm_path):
+    """Load P5 PGM as ``uint8`` raster ``(height, width)`` (values ``0..maxval``)."""
+    with pgm_path.open("rb") as f:
+        magic = _read_pgm_token(f)
+        if magic != b"P5":
+            raise ValueError(f"Unsupported PGM format in '{pgm_path}': expected P5.")
+
+        width_token = _read_pgm_token(f)
+        height_token = _read_pgm_token(f)
+        maxval_token = _read_pgm_token(f)
+        if not width_token or not height_token or not maxval_token:
+            raise ValueError(f"Invalid PGM header in '{pgm_path}'.")
+
+        width = int(width_token)
+        height = int(height_token)
+        maxval = int(maxval_token)
+        if width <= 0 or height <= 0 or maxval <= 0:
+            raise ValueError(f"Invalid PGM dimensions/maxval in '{pgm_path}'.")
+
+        if maxval >= 256:
+            raise ValueError(
+                f"PGM maxval {maxval} in '{pgm_path}' is not supported for uint8 occupancy."
+            )
+
+        dtype = np.uint8
+        count = width * height
+        data = np.fromfile(f, dtype=dtype, count=count)
+        if data.size != count:
+            raise ValueError(f"Incomplete pixel data in '{pgm_path}'.")
+
+        image = data.reshape((height, width))
+        return image, width, height, maxval
+
+
+def _occ_yx_from_ros_int8_pixels(
+    pixels,
+    unknown_byte,
+    free_byte,
+    occupied_byte,
+):
+    """
+    Map costmap-style PGM bytes to planner occupancy.
+
+    Defaults: **205** unknown, **254** free, **0** occupied (common in ROS costmaps).
+    Values **1–99** are partial belief (stored as ``v/100`` in ``occ``); **0** is only
+    treated as occupied when it matches ``occupied_byte``.
+    """
+    p = np.asarray(pixels, dtype=np.uint8)
+    out = np.full(p.shape, -1.0, dtype=np.float32)
+    unk = p == int(unknown_byte)
+    free = p == int(free_byte)
+    occ = p == int(occupied_byte)
+    partial = (p >= 1) & (p <= 99)
+    out[free] = 0.0
+    out[occ] = 1.0
+    out[unk] = -1.0
+    out[partial] = p[partial].astype(np.float32) / 100.0
+    return out
+
+
 def _crop_unknown_only_border(occ_xy):
     known = occ_xy != -1
     if not np.any(known):
@@ -234,66 +299,56 @@ def write_ros_map_pgm_yaml(
     occupied_thresh=None,
     free_thresh=None,
     origin=None,
+    occupancy_encoding="ros_int8",
+    unknown_byte=ROS_PGM_INT8_UNKNOWN_BYTE,
+    free_byte=ROS_PGM_INT8_FREE_BYTE,
+    occupied_byte=ROS_PGM_INT8_OCCUPIED_BYTE,
 ):
     """
-    Write a ROS ``map_server``-compatible ``.pgm`` + ``.yaml`` pair from an
-    occupancy grid in the same **planner frame** as ``occ_xy`` (x index, y index,
-    origin at the lower-left of the grid in meters).
+    Write a ``.pgm`` + ``.yaml`` pair from an occupancy grid in the same **planner
+    frame** as ``occ_xy`` (x index, y index; origin at the lower-left in meters).
 
-    Values in ``occ_xy`` are ``-1`` unknown, ``0`` free, ``1`` occupied — matching
-    :func:`align_occ_map_raster` output. Thresholds and ``negate`` default from
-    ``source_map_yaml_path`` when given so reloading classifies cells like the
-    source map; otherwise use explicit ``negate`` / ``occupied_thresh`` /
-    ``free_thresh`` or built-in defaults (``negate=0``, ``0.65``, ``0.196``).
+    **Default ``occupancy_encoding="ros_int8"``** writes costmap-style PGM bytes:
+    **205** unknown, **254** free, **0** occupied; values **1–99** encode partial
+    belief (same as before in ``occ``). Override with ``unknown_byte`` /
+    ``free_byte`` / ``occupied_byte`` if your stack uses different constants.
 
-    The written YAML uses ``origin: [0, 0, 0]`` unless ``origin`` is set (e.g. to
-    preserve a global map pose). For an **aligned** export used without further
-    rotation, leave origin at zero so the ROS node can load the map directly.
+    **``occupancy_encoding="probability"``** keeps the older grayscale
+    probability PGM (``map_server``-style) using ``negate`` / thresholds.
 
     Parameters
     ----------
     occ_xy : ndarray
-        Shape ``(nx, ny)``, float values ``-1``, ``0``, or ``1``.
+        Shape ``(nx, ny)``. Values ``-1`` unknown, ``0`` free, ``1`` occupied; or
+        partial occupancy in ``(0, 1)`` (written as PGM bytes ``1..99`` in ``ros_int8`` mode).
     resolution : float
         Meters per cell.
     output_yaml_path : str or Path
         Path to the ``.yaml`` file; the image is written beside it as the same
         stem with ``.pgm``.
     source_map_yaml_path : str or Path, optional
-        If set, read ``negate``, ``occupied_thresh``, and ``free_thresh`` from it.
-    negate : int, optional
-        Overrides source YAML when provided (must be ``0`` or ``1``).
-    occupied_thresh, free_thresh : float, optional
-        Overrides source YAML when provided.
+        For ``probability`` mode: read ``negate``, ``occupied_thresh``, ``free_thresh``.
+        Ignored for ``ros_int8`` export.
+    negate, occupied_thresh, free_thresh
+        Used only when ``occupancy_encoding="probability"``.
     origin : sequence of three floats, optional
         ``[x, y, yaw]`` for the map YAML (default ``[0, 0, 0]``).
+    occupancy_encoding : str
+        ``"ros_int8"`` (default) or ``"probability"``.
+    unknown_byte, free_byte, occupied_byte : int
+        PGM byte values for ``ros_int8`` mode (defaults ``205``, ``254``, ``0``).
     """
     occ_xy = np.asarray(occ_xy, dtype=np.float32)
     if occ_xy.ndim != 2:
         raise ValueError("occ_xy must be a 2D array.")
 
+    if occupancy_encoding not in ("ros_int8", "probability"):
+        raise ValueError("occupancy_encoding must be 'ros_int8' or 'probability'.")
+
     out_yaml = Path(output_yaml_path).expanduser().resolve()
     out_yaml.parent.mkdir(parents=True, exist_ok=True)
     out_pgm = out_yaml.with_suffix(".pgm")
 
-    if source_map_yaml_path is not None:
-        src = _load_simple_yaml(Path(source_map_yaml_path))
-        if negate is None:
-            negate = int(src["negate"])
-        if occupied_thresh is None:
-            occupied_thresh = float(src["occupied_thresh"])
-        if free_thresh is None:
-            free_thresh = float(src["free_thresh"])
-    else:
-        if negate is None:
-            negate = 0
-        if occupied_thresh is None:
-            occupied_thresh = 0.65
-        if free_thresh is None:
-            free_thresh = 0.196
-
-    if negate not in (0, 1):
-        raise ValueError("negate must be 0 or 1.")
     if resolution <= 0:
         raise ValueError("resolution must be positive.")
 
@@ -302,63 +357,129 @@ def write_ros_map_pgm_yaml(
     else:
         origin = [float(origin[0]), float(origin[1]), float(origin[2])]
 
-    # Same layout as _load_occ_from_map_yaml: PGM rows top→bottom, then flipud,
-    # then transpose to occ_xy. Inverse: occ_xy.T then flipud → PGM rows.
-    occ_yx_top = np.flipud(occ_xy.T)
-    mid_unknown = 0.5 * (float(free_thresh) + float(occupied_thresh))
-    occ_prob = np.empty_like(occ_yx_top, dtype=np.float32)
-    occ_prob[occ_yx_top > 0.5] = 1.0
-    occ_prob[occ_yx_top < -0.5] = mid_unknown
-    occ_prob[(occ_yx_top >= -0.5) & (occ_yx_top <= 0.5)] = 0.0
+    ub = int(unknown_byte)
+    fb = int(free_byte)
+    ob = int(occupied_byte)
+    if not (0 <= ub <= 255 and 0 <= fb <= 255 and 0 <= ob <= 255):
+        raise ValueError("unknown_byte, free_byte, occupied_byte must be in 0..255.")
+    if ub == fb or ub == ob or fb == ob:
+        raise ValueError("unknown_byte, free_byte, occupied_byte must be distinct.")
 
-    image_norm = occ_prob if negate == 1 else (1.0 - occ_prob)
-    pixels = np.clip(np.round(image_norm * 255.0), 0, 255).astype(np.uint8)
+    # Same layout as _load_occ_from_map_yaml: inverse of occ_xy is occ_yx_top for PGM rows.
+    occ_yx_top = np.flipud(occ_xy.T)
+
+    if occupancy_encoding == "ros_int8":
+        pixels = np.full(occ_yx_top.shape, ub, dtype=np.uint8)
+        unk = occ_yx_top < -0.5
+        free = np.isclose(occ_yx_top, 0.0)
+        occ = occ_yx_top > 0.5
+        partial = ~unk & ~free & ~occ
+        pixels[unk] = ub
+        pixels[free] = fb
+        pixels[occ] = ob
+        if np.any(partial):
+            v = np.clip(np.round(occ_yx_top[partial] * 100.0), 1, 99).astype(np.uint8)
+            pixels[partial] = v
+    else:
+        if source_map_yaml_path is not None:
+            src = _load_simple_yaml(Path(source_map_yaml_path))
+            if negate is None:
+                negate = int(src["negate"])
+            if occupied_thresh is None:
+                occupied_thresh = float(src["occupied_thresh"])
+            if free_thresh is None:
+                free_thresh = float(src["free_thresh"])
+        else:
+            if negate is None:
+                negate = 0
+            if occupied_thresh is None:
+                occupied_thresh = 0.65
+            if free_thresh is None:
+                free_thresh = 0.196
+
+        if negate not in (0, 1):
+            raise ValueError("negate must be 0 or 1.")
+
+        mid_unknown = 0.5 * (float(free_thresh) + float(occupied_thresh))
+        occ_prob = np.empty_like(occ_yx_top, dtype=np.float32)
+        occ_prob[occ_yx_top > 0.5] = 1.0
+        occ_prob[occ_yx_top < -0.5] = mid_unknown
+        occ_prob[(occ_yx_top >= -0.5) & (occ_yx_top <= 0.5)] = 0.0
+
+        image_norm = occ_prob if negate == 1 else (1.0 - occ_prob)
+        pixels = np.clip(np.round(image_norm * 255.0), 0, 255).astype(np.uint8)
 
     height, width = pixels.shape
+    maxval = 255
     with out_pgm.open("wb") as f:
-        f.write(f"P5\n{width} {height}\n255\n".encode("ascii"))
+        f.write(f"P5\n{width} {height}\n{maxval}\n".encode("ascii"))
         pixels.tofile(f)
 
     with out_yaml.open("w", encoding="utf-8") as f:
         f.write(f"image: {out_pgm.name}\n")
         f.write(f"resolution: {float(resolution)}\n")
-        f.write(
-            f"origin: [{origin[0]}, {origin[1]}, {origin[2]}]\n"
-        )
-        f.write(f"negate: {negate}\n")
-        f.write(f"occupied_thresh: {occupied_thresh}\n")
-        f.write(f"free_thresh: {free_thresh}\n")
+        f.write(f"origin: [{origin[0]}, {origin[1]}, {origin[2]}]\n")
+        if occupancy_encoding == "ros_int8":
+            f.write("occupancy_encoding: ros_int8\n")
+            f.write(f"unknown_byte: {ub}\n")
+            f.write(f"free_byte: {fb}\n")
+            f.write(f"occupied_byte: {ob}\n")
+        else:
+            f.write(f"negate: {negate}\n")
+            f.write(f"occupied_thresh: {occupied_thresh}\n")
+            f.write(f"free_thresh: {free_thresh}\n")
 
     return out_yaml, out_pgm
 
 
 def _load_occ_from_map_yaml(map_yaml_path, crop_unknown=False):
     yaml_data = _load_simple_yaml(map_yaml_path)
-    required = {"image", "resolution", "negate", "occupied_thresh", "free_thresh"}
-    missing = required - set(yaml_data.keys())
-    if missing:
-        missing_str = ", ".join(sorted(missing))
+    required_base = {"image", "resolution"}
+    missing_base = required_base - set(yaml_data.keys())
+    if missing_base:
+        missing_str = ", ".join(sorted(missing_base))
         raise ValueError(f"Map YAML '{map_yaml_path}' missing keys: {missing_str}")
 
     image_path = _resolve_relative_path(yaml_data["image"], map_yaml_path.parent)
     if not image_path.exists():
         raise FileNotFoundError(f"Map image not found: {image_path}")
 
-    image_norm, width, height = _load_pgm_normalized(image_path)
-
     resolution = float(yaml_data["resolution"])
-    negate = int(yaml_data["negate"])
-    occupied_thresh = float(yaml_data["occupied_thresh"])
-    free_thresh = float(yaml_data["free_thresh"])
     if resolution <= 0:
         raise ValueError(f"Map YAML '{map_yaml_path}' resolution must be positive.")
-    if negate not in (0, 1):
-        raise ValueError(f"Map YAML '{map_yaml_path}' negate must be 0 or 1.")
 
-    occ_prob = image_norm if negate == 1 else (1.0 - image_norm)
-    occ_yx = np.full((height, width), -1.0, dtype=np.float32)
-    occ_yx[occ_prob > occupied_thresh] = 1.0
-    occ_yx[occ_prob < free_thresh] = 0.0
+    enc = yaml_data.get("occupancy_encoding", "probability")
+    if enc == "ros_int8":
+        pixels, width, height, maxval = _load_pgm_uint8(image_path)
+        if maxval > 255:
+            raise ValueError(
+                f"Map YAML '{map_yaml_path}' PGM maxval {maxval} is not supported for ros_int8."
+            )
+        ub = int(yaml_data.get("unknown_byte", ROS_PGM_INT8_UNKNOWN_BYTE))
+        fb = int(yaml_data.get("free_byte", ROS_PGM_INT8_FREE_BYTE))
+        ob = int(yaml_data.get("occupied_byte", ROS_PGM_INT8_OCCUPIED_BYTE))
+        occ_yx = _occ_yx_from_ros_int8_pixels(pixels, ub, fb, ob)
+    else:
+        required_prob = {"negate", "occupied_thresh", "free_thresh"}
+        missing_prob = required_prob - set(yaml_data.keys())
+        if missing_prob:
+            missing_str = ", ".join(sorted(missing_prob))
+            raise ValueError(
+                f"Map YAML '{map_yaml_path}' missing keys for probability maps: {missing_str}"
+            )
+
+        image_norm, width, height = _load_pgm_normalized(image_path)
+
+        negate = int(yaml_data["negate"])
+        occupied_thresh = float(yaml_data["occupied_thresh"])
+        free_thresh = float(yaml_data["free_thresh"])
+        if negate not in (0, 1):
+            raise ValueError(f"Map YAML '{map_yaml_path}' negate must be 0 or 1.")
+
+        occ_prob = image_norm if negate == 1 else (1.0 - image_norm)
+        occ_yx = np.full((height, width), -1.0, dtype=np.float32)
+        occ_yx[occ_prob > occupied_thresh] = 1.0
+        occ_yx[occ_prob < free_thresh] = 0.0
 
     # ROS image origin is top-left; flip so grid y increases upward.
     occ_yx = np.flipud(occ_yx)
