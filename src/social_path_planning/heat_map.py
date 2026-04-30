@@ -39,6 +39,31 @@ from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 
 _CHECKPOINT_EVERY_N = 10  # save heatmap after this many successful paths (same file as final save)
 
+# PGM / ROS top-down rows vs planner (height, width) with origin lower-left: same as
+# ``occ_yx_top = np.flipud(occ_xy.T)`` in ``grid_loader.write_ros_map_pgm_yaml``.
+_HEATMAP_ROS_DIR_GATHER = (5, 6, 7, 3, 4, 0, 1, 2)
+
+
+def heatmap_array_to_ros_pgm_layout(arr: np.ndarray) -> np.ndarray:
+    """
+    Map a planner-layout raster ``(height, width, ...)`` to PGM row-major / top-down
+    cell layout, matching ``write_ros_map_pgm_yaml``. For 8-way directional data,
+    permute the last axis so each channel still refers to the same world motion when
+    neighbors are indexed in top-down row coordinates.
+    """
+    if arr.ndim < 2:
+        raise ValueError("heatmap_array_to_ros_pgm_layout expects at least 2 dimensions.")
+    flipped = np.flipud(arr)
+    if arr.ndim >= 3 and arr.shape[-1] == 8:
+        inv = np.asarray(_HEATMAP_ROS_DIR_GATHER, dtype=np.intp)
+        return flipped[..., inv]
+    if arr.ndim >= 3 and arr.shape[-1] == 2:
+        out = flipped.copy()
+        out[..., 1] *= -1.0
+        return out
+    return flipped
+
+
 class HeatMap2D(object):
     def __init__(self, occ_grid: StochOccupancyGrid2D):
         self.occ_grid = occ_grid
@@ -95,7 +120,11 @@ class HeatMap2D(object):
     def save_heatmap(self, filename_prefix):
         np.save(f"{filename_prefix}_heatmap.npy", self.heatmap)
         print("Successfully saved heatmap to ", f"{filename_prefix}_heatmap.npy")
-        
+        if self.heatmap.ndim == 2:
+            ros_path = f"{filename_prefix}_heatmap_ros.npy"
+            np.save(ros_path, heatmap_array_to_ros_pgm_layout(self.heatmap))
+            print("Successfully saved heatmap (ROS PGM layout) to ", ros_path)
+
 class HeatMap2DVector(HeatMap2D):
     def __init__(self, occ_grid: StochOccupancyGrid2D):
         super().__init__(occ_grid)
@@ -180,6 +209,12 @@ class HeatMap2DVector(HeatMap2D):
             plt.show()
         return ax
 
+    def save_heatmap(self, filename_prefix):
+        super().save_heatmap(filename_prefix)
+        ros_path = f"{filename_prefix}_heatmap_ros.npy"
+        np.save(ros_path, heatmap_array_to_ros_pgm_layout(self.heatmap))
+        print("Successfully saved heatmap (ROS PGM layout) to ", ros_path)
+
 
 class HeatMap2DVectorField(HeatMap2D):
     def __init__(self, occ_grid: StochOccupancyGrid2D):
@@ -235,6 +270,12 @@ class HeatMap2DVectorField(HeatMap2D):
         if show:
             plt.show()
         return ax
+
+    def save_heatmap(self, filename_prefix):
+        super().save_heatmap(filename_prefix)
+        ros_path = f"{filename_prefix}_heatmap_ros.npy"
+        np.save(ros_path, heatmap_array_to_ros_pgm_layout(self.heatmap))
+        print("Successfully saved heatmap (ROS PGM layout) to ", ros_path)
 
 
 def parse_args():

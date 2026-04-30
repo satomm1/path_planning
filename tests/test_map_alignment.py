@@ -26,7 +26,14 @@ from social_path_planning.grid_loader import (
     load_grid_scenario,
     write_ros_map_pgm_yaml,
 )
+from social_path_planning.heat_map import heatmap_array_to_ros_pgm_layout
+from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 from social_path_planning.utils import snap_to_grid
+from social_path_planning.wall_distance_cache import (
+    NPZ_D_RIGHT_ROS,
+    save_wall_distance_cache,
+    wall_distance_d_right_to_ros_pgm_layout,
+)
 
 
 def _horizontal_free_peak_score(occ):
@@ -68,13 +75,31 @@ class TestWriteRosMapRoundTrip(TestCase):
         occ = np.full((nx, ny), -1.0, dtype=np.float32)
         occ[4:10, 3:12] = 0.0
         occ[15:20, 8:14] = 1.0
+        occ[8, 8] = 0.37
+        res = 0.05
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "roundtrip.yaml"
+            write_ros_map_pgm_yaml(occ, res, out, occupancy_encoding="ros_int8")
+            loaded, _map_size, res2 = _load_occ_from_map_yaml(out, crop_unknown=False)
+        self.assertEqual(res2, res)
+        np.testing.assert_array_equal(loaded, occ)
+
+    def test_probability_encoding_roundtrip(self):
+        nx, ny = 12, 10
+        occ = np.full((nx, ny), -1.0, dtype=np.float32)
+        occ[2:8, 2:7] = 0.0
+        occ[9:11, 4:6] = 1.0
         res = 0.05
         env_dir = Path(__file__).resolve().parents[1] / "src" / "social_path_planning" / "environments"
         src_yaml = env_dir / "y2e2.yaml"
         with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "roundtrip.yaml"
+            out = Path(tmp) / "prob.yaml"
             write_ros_map_pgm_yaml(
-                occ, res, out, source_map_yaml_path=src_yaml
+                occ,
+                res,
+                out,
+                source_map_yaml_path=src_yaml,
+                occupancy_encoding="probability",
             )
             loaded, _map_size, res2 = _load_occ_from_map_yaml(out, crop_unknown=False)
         self.assertEqual(res2, res)
@@ -135,3 +160,62 @@ class TestY2E2LoadRegression(TestCase):
                 continue
             return
         self.fail("could not find a feasible random start/goal on y2e2 after 200 tries")
+
+
+_HEAT_INV = (5, 6, 7, 3, 4, 0, 1, 2)
+_WALL_INV = (2, 1, 0, 4, 3, 7, 6, 5)
+
+
+class TestRosLayoutTransforms(TestCase):
+    def test_heatmap_ros_matches_flipud_gather(self):
+        rng = np.random.default_rng(0)
+        h, w = 4, 5
+        H = rng.standard_normal((h, w, 8)).astype(np.float32)
+        inv = np.asarray(_HEAT_INV, dtype=np.intp)
+        expected = np.flipud(H)[..., inv]
+        got = heatmap_array_to_ros_pgm_layout(H)
+        np.testing.assert_array_equal(got, expected)
+
+    def test_wall_dist_ros_matches_flipud_gather(self):
+        rng = np.random.default_rng(1)
+        h, w = 4, 5
+        D = rng.standard_normal((h, w, 8)).astype(np.float32)
+        inv = np.asarray(_WALL_INV, dtype=np.intp)
+        expected = np.flipud(D)[..., inv]
+        got = wall_distance_d_right_to_ros_pgm_layout(D)
+        np.testing.assert_array_equal(got, expected)
+
+    def test_scalar_heatmap_ros_is_flipud(self):
+        rng = np.random.default_rng(2)
+        s = rng.standard_normal((3, 7)).astype(np.float32)
+        np.testing.assert_array_equal(
+            heatmap_array_to_ros_pgm_layout(s), np.flipud(s)
+        )
+
+    def test_vector_field_ros_flips_y_component_sign(self):
+        rng = np.random.default_rng(3)
+        v = rng.standard_normal((2, 3, 2)).astype(np.float32)
+        got = heatmap_array_to_ros_pgm_layout(v)
+        fu = np.flipud(v)
+        np.testing.assert_array_equal(got[..., 0], fu[..., 0])
+        np.testing.assert_array_equal(got[..., 1], -fu[..., 1])
+
+    def test_save_wall_distance_cache_includes_d_right_ros(self):
+        height, width = 6, 8
+        probs = np.zeros((height, width), dtype=np.float32)
+        grid = StochOccupancyGrid2D(0.1, width, height, 0.0, 0.0, 10, probs)
+        d_right = np.arange(height * width * 8, dtype=np.float64).reshape(
+            height, width, 8
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "w.npz"
+            save_wall_distance_cache(path, grid, d_right)
+            with np.load(path, allow_pickle=False) as data:
+                self.assertIn(NPZ_D_RIGHT_ROS, data)
+                self.assertEqual(data[NPZ_D_RIGHT_ROS].shape, (height, width, 8))
+                np.testing.assert_allclose(
+                    data[NPZ_D_RIGHT_ROS],
+                    wall_distance_d_right_to_ros_pgm_layout(d_right),
+                    rtol=0,
+                    atol=1e-5,
+                )
