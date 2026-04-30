@@ -47,9 +47,11 @@ NEIGHBOR_OFFSETS: Tuple[Tuple[int, int], ...] = tuple(
 )
 assert len(NEIGHBOR_OFFSETS) == 8
 
-# PGM top-down rows vs planner (height, width): same as ``np.flipud(occ_xy.T)`` in
-# ``grid_loader.write_ros_map_pgm_yaml``; gather[j] = python channel for ROS slot j.
-_WALL_DIST_ROS_DIR_GATHER = (2, 1, 0, 4, 3, 7, 6, 5)
+# ROS export: ``fliplr(flipud(...))`` on (height, width) to match top-down rows and a
+# right-origin column mirror (same as ``heatmap_array_to_ros_pgm_layout``). Neighbor
+# (ii, jj) in ROS cell indices is (-ii, -jj) in planner (col, row); gather[j] selects
+# python channel for ROS slot j, i.e. opposite_dir_idx(j) == 7 - j.
+_WALL_DIST_ROS_DIR_GATHER = (7, 6, 5, 4, 3, 2, 1, 0)
 
 # Unit travel directions (for dot-product matching)
 _UNIT_TRAVEL_DIRS = np.array(
@@ -142,13 +144,14 @@ def precompute_d_right(
 
 def wall_distance_d_right_to_ros_pgm_layout(d_right: np.ndarray) -> np.ndarray:
     """
-    ``flipud`` on (height, width) plus last-axis gather so PGM top-down row neighbors
-    match the same world travel as ``NEIGHBOR_OFFSETS`` in planner row coordinates.
+    ``fliplr(flipud(...))`` on (height, width) plus last-axis gather so ROS cell
+    neighbors (top-down row, mirrored col) match the same world travel as
+    ``NEIGHBOR_OFFSETS`` in planner (col, row) coordinates.
     """
     if d_right.shape[-1] != 8:
         raise ValueError("d_right must have shape (..., 8).")
     inv = np.asarray(_WALL_DIST_ROS_DIR_GATHER, dtype=np.intp)
-    return np.flipud(d_right)[..., inv]
+    return np.fliplr(np.flipud(d_right))[..., inv]
 
 
 def save_wall_distance_cache(

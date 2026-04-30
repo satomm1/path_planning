@@ -3,6 +3,10 @@ Offline precompute of directional wall-distance cache (.npz) for a scenario.
 
 Example:
     python -m social_path_planning.precompute_wall_distances --scenario y2e2
+
+Re-save an existing cache to add/update ``D_right_ros`` (no raycast):
+
+    python -m social_path_planning.precompute_wall_distances --scenario y2e2 --resave-ros
 """
 
 from __future__ import annotations
@@ -11,9 +15,12 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
+
 from social_path_planning.grid_loader import load_grid_scenario
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 from social_path_planning.wall_distance_cache import (
+    NPZ_D_RIGHT,
     precompute_d_right,
     save_wall_distance_cache,
 )
@@ -43,6 +50,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Disable tqdm progress bar (stderr).",
     )
+    parser.add_argument(
+        "--resave-ros",
+        action="store_true",
+        help="Load existing cache .npz and re-save it (adds/updates D_right_ros; no raycast).",
+    )
     args = parser.parse_args(argv)
 
     module_dir = Path(__file__).resolve().parent
@@ -53,7 +65,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     out = out.resolve()
 
-    if out.is_file() and not args.force:
+    if args.resave_ros:
+        if not out.is_file():
+            print(f"--resave-ros: cache file not found: {out}", file=sys.stderr)
+            return 1
+    elif out.is_file() and not args.force:
         print(f"Refusing to overwrite existing file: {out}\nUse --force to rebuild.", file=sys.stderr)
         return 1
 
@@ -68,6 +84,20 @@ def main(argv: list[str] | None = None) -> int:
         10,
         occ.T,
     )
+
+    if args.resave_ros:
+        with np.load(out, allow_pickle=False) as data:
+            d_right = np.asarray(data[NPZ_D_RIGHT], dtype=np.float64)
+        if d_right.shape != (occ_grid.height, occ_grid.width, 8):
+            print(
+                f"--resave-ros: {NPZ_D_RIGHT} shape {d_right.shape} != "
+                f"expected {(occ_grid.height, occ_grid.width, 8)}",
+                file=sys.stderr,
+            )
+            return 1
+        save_wall_distance_cache(out, occ_grid, d_right)
+        print(f"Re-saved {out} (including ROS layout tensor).")
+        return 0
 
     print(
         f"Precomputing wall distances ({occ_grid.width}x{occ_grid.height}x8)...",

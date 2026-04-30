@@ -163,7 +163,7 @@ class TestY2E2LoadRegression(TestCase):
 
 
 _HEAT_INV = (7, 6, 5, 4, 3, 2, 1, 0)
-_WALL_INV = (2, 1, 0, 4, 3, 7, 6, 5)
+_WALL_INV = (7, 6, 5, 4, 3, 2, 1, 0)
 
 
 class TestRosLayoutTransforms(TestCase):
@@ -176,12 +176,12 @@ class TestRosLayoutTransforms(TestCase):
         got = heatmap_array_to_ros_pgm_layout(H)
         np.testing.assert_array_equal(got, expected)
 
-    def test_wall_dist_ros_matches_flipud_gather(self):
+    def test_wall_dist_ros_matches_flipud_fliplr_gather(self):
         rng = np.random.default_rng(1)
         h, w = 4, 5
         D = rng.standard_normal((h, w, 8)).astype(np.float32)
         inv = np.asarray(_WALL_INV, dtype=np.intp)
-        expected = np.flipud(D)[..., inv]
+        expected = np.fliplr(np.flipud(D))[..., inv]
         got = wall_distance_d_right_to_ros_pgm_layout(D)
         np.testing.assert_array_equal(got, expected)
 
