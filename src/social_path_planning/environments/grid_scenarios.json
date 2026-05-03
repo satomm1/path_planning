@@ -142,7 +142,7 @@
     "map_align_deg": -4.3,
     "map_align_crop": true
   },
-  "y2e2_aligned_file": {
+  "y2e2_aligned": {
   "map_yaml": "C:/maps/y2e2_aligned.yaml",
   "map_align_deg": 0,
   "crop_unknown": false
