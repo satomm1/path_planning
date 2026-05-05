@@ -6,13 +6,25 @@
 from __future__ import print_function
 
 import argparse
+import os
 import sys
 
 import rospy
 from mattbot_dds.msg import MultiRobotGoalPlan, RobotGoalEntry
 
 
-def _parse_goals(s):
+def _default_goals_file():
+    """Path to package config/sample_multi_robot_goals.txt (rospack when available, else next to this script)."""
+    try:
+        import rospkg
+
+        return os.path.join(rospkg.RosPack().get_path("path_planning"), "config", "sample_multi_robot_goals.txt")
+    except Exception:
+        here = os.path.dirname(os.path.abspath(__file__))
+        return os.path.normpath(os.path.join(here, "..", "config", "sample_multi_robot_goals.txt"))
+
+
+def _parse_goals_line_format(s):
     """Parse 'id,x,y,th;id2,x2,y2,th2' into list of (int, float, float, float)."""
     out = []
     for part in s.split(";"):
@@ -27,6 +39,31 @@ def _parse_goals(s):
         out.append((rid, x, y, th))
     if not out:
         raise ValueError("No goals parsed from %r" % (s,))
+    return out
+
+
+def _parse_goals_file(path):
+    """
+    Read goals from a text file: one goal per line as id,x,y,theta (commas).
+    Lines starting with # and blank lines are ignored. Order matches MultiRobotGoalPlan.goals.
+    """
+    out = []
+    with open(path, "r") as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            bits = [b.strip() for b in line.split(",")]
+            if len(bits) != 4:
+                raise ValueError("%s line %d: expected id,x,y,theta (4 comma-separated fields), got: %r" % (path, lineno, line))
+            try:
+                rid = int(bits[0])
+                x, y, th = float(bits[1]), float(bits[2]), float(bits[3])
+            except ValueError as e:
+                raise ValueError("%s line %d: invalid number: %s" % (path, lineno, e))
+            out.append((rid, x, y, th))
+    if not out:
+        raise ValueError("No goals in file %r (empty or only comments)" % path)
     return out
 
 
@@ -50,9 +87,16 @@ def main():
         help="Set coordinated=false",
     )
     parser.add_argument(
+        "--goals-file",
+        "-f",
+        metavar="PATH",
+        default=_default_goals_file(),
+        help="Goals file (default: path_planning/config/sample_multi_robot_goals.txt); one id,x,y,theta per line; # ok",
+    )
+    parser.add_argument(
         "--goals",
-        required=True,
-        help='Semicolon-separated goals: id,x,y,theta  e.g. "1,1.0,2.0,0;2,3.0,1.0,0"',
+        default=None,
+        help='If set, use inline goals instead of --goals-file: id,x,y,theta separated by ";"',
     )
     parser.add_argument(
         "--topic",
@@ -64,8 +108,11 @@ def main():
     args = parser.parse_args(argv[1:])
     topic = args.topic or rospy.get_param("~topic", "/multi_robot_goal_plan")
     try:
-        goalspec = _parse_goals(args.goals)
-    except ValueError as e:
+        if args.goals is not None:
+            goalspec = _parse_goals_line_format(args.goals)
+        else:
+            goalspec = _parse_goals_file(args.goals_file)
+    except (ValueError, OSError) as e:
         print("Error:", e, file=sys.stderr)
         return 1
 
