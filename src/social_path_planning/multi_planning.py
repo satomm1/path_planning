@@ -18,6 +18,30 @@ ROBOT_DIAMETER = 1  # meters
 M = 1e6  # Big-M constant for constraints
 DELTA = 1  # Safety margin in seconds
 
+
+def _scalar_times_from_solver(prob, time_var, context):
+    """Read one cvxpy time vector after ``prob.solve()``; raise if infeasible / no primal."""
+    val = time_var.value
+    if val is None:
+        raise RuntimeError(
+            f"{context}: no solution (cvxpy status={getattr(prob, 'status', None)!r}); likely infeasible or unbounded"
+        )
+    return val.tolist()
+
+
+def _multi_agent_times_from_solver(prob, agent_times, context):
+    """Read per-agent time vectors after ``prob.solve()``; raise if any primal is missing."""
+    out = []
+    for i, at in enumerate(agent_times):
+        val = at.value
+        if val is None:
+            raise RuntimeError(
+                f"{context}: no solution for agent {i} (cvxpy status={getattr(prob, 'status', None)!r}); likely infeasible or unbounded"
+            )
+        out.append(val.tolist())
+    return out
+
+
 class MultiAgentPlanner:
 
     def __init__(self, occupancy_grid: StochOccupancyGrid2D, v):
@@ -117,7 +141,7 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         num_z = z_index
         return collision_pairs, num_z
 
-    def plan(self):
+    def plan(self, verbose=False):
         if self.path is None:
             raise ValueError("Path not assigned. Please assign a path before planning.")
 
@@ -140,9 +164,8 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         objective = cp.Minimize(t[-1])  # Minimize time to reach final point
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=True)
-        optimized_times = t.value.tolist()
-        return optimized_times
+        prob.solve(verbose=verbose)
+        return _scalar_times_from_solver(prob, t, "MultiAgentSequentialPlanner")
 
 class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
 
@@ -242,7 +265,7 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         self._pair_detection_stats = pair_detection_stats
         return collision_pairs, num_z
 
-    def plan(self):
+    def plan(self, verbose=False):
         if self.paths is None:
             raise ValueError("Paths not assigned. Please assign paths before planning.")
 
@@ -299,9 +322,8 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=True)
-        optimized_times = [agent_time.value.tolist() for agent_time in agent_times]
-        return optimized_times
+        prob.solve(verbose=verbose)
+        return _multi_agent_times_from_solver(prob, agent_times, "MultiAgentSimultaneousPlanner")
 
 class MultiAgentCombinedPlanner(MultiAgentPlanner):
 
@@ -388,7 +410,7 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
 
         return (sequential_pairs, simultaneous_pairs), z_index
 
-    def plan(self):
+    def plan(self, verbose=False):
         if self.paths is None:
             raise ValueError("Paths not assigned. Please assign paths before planning.")
 
@@ -425,9 +447,8 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
         objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=True)
-        optimized_times = [agent_time.value.tolist() for agent_time in agent_times]
-        return optimized_times
+        prob.solve(verbose=verbose)
+        return _multi_agent_times_from_solver(prob, agent_times, "MultiAgentCombinedPlanner")
 
 def get_position_at_time(t, path, time_points):
     """
