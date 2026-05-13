@@ -145,19 +145,28 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         if self.path is None:
             raise ValueError("Path not assigned. Please assign a path before planning.")
 
-        t = cp.Variable(len(self.path))  # CP variable for time to reach each waypoint
+        n = len(self.path)
+        if n < 1:
+            raise ValueError("ego path is empty for sequential planner")
+        if n == 1:
+            return [0.0]
+
+        t = cp.Variable(n)  # CP variable for time to reach each waypoint
         constraints = []
         constraints += [t[0] == 0]  # Start at time 0
 
         # Max velocity constraints (also enforces t_i+1 >= t_i)
-        for i in range(len(self.path) - 1):
+        for i in range(n - 1):
             delta_pos = np.linalg.norm(np.array(self.path[i + 1]) - np.array(self.path[i]))
             constraints += [t[i + 1] - t[i] >= delta_pos / self.v]
 
         # Collision Avoiding Constraints using Big-M method
         collision_pairs, max_z = self.find_collision_pairs()
-        z = cp.Variable(max_z, boolean=True)
+        # cvxpy rejects boolean Variable(0); skip z when there are no collision disjunctions.
+        z = cp.Variable(max_z, boolean=True) if max_z > 0 else None
         for (i, start_time, end_time, z_index) in collision_pairs:
+            if z is None:
+                continue
             constraints += [t[i] <= start_time - DELTA + M * z[z_index]]
             constraints += [t[i] >= end_time + DELTA - M * (1 - z[z_index])]
 
@@ -433,13 +442,17 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
         # Collision Avoiding Constraints using Big-M method
         collision_pairs, max_z = self.find_collision_pairs()  # Get all the collision pairs
         sequential_pairs, simultaneous_pairs = collision_pairs
-        z = cp.Variable(max_z, boolean=True)
+        z = cp.Variable(max_z, boolean=True) if max_z > 0 else None
         # First Consider collisions with other agents with fixed paths
         for (a, i, start_time, end_time, z_index) in sequential_pairs:
+            if z is None:
+                continue
             constraints += [agent_times[a][i] <= start_time - DELTA + M * z[z_index]]
             constraints += [agent_times[a][i] >= end_time + DELTA - M * (1 - z[z_index])]
         # Second consider collisions between agents with variable paths
         for (a1, a2, i, j1, j2, z_index) in simultaneous_pairs:
+            if z is None:
+                continue
             constraints += [agent_times[a1][i] <= agent_times[a2][j1] - DELTA + M * z[z_index]]
             constraints += [agent_times[a1][i] >= agent_times[a2][j2] + DELTA - M * (1 - z[z_index])]
 
