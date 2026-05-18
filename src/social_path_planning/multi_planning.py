@@ -18,6 +18,30 @@ ROBOT_DIAMETER = 1  # meters
 M = 1e6  # Big-M constant for constraints
 DELTA = 1  # Safety margin in seconds
 
+
+def _scalar_times_from_solver(prob, time_var, context):
+    """Read one cvxpy time vector after ``prob.solve()``; raise if infeasible / no primal."""
+    val = time_var.value
+    if val is None:
+        raise RuntimeError(
+            f"{context}: no solution (cvxpy status={getattr(prob, 'status', None)!r}); likely infeasible or unbounded"
+        )
+    return val.tolist()
+
+
+def _multi_agent_times_from_solver(prob, agent_times, context):
+    """Read per-agent time vectors after ``prob.solve()``; raise if any primal is missing."""
+    out = []
+    for i, at in enumerate(agent_times):
+        val = at.value
+        if val is None:
+            raise RuntimeError(
+                f"{context}: no solution for agent {i} (cvxpy status={getattr(prob, 'status', None)!r}); likely infeasible or unbounded"
+            )
+        out.append(val.tolist())
+    return out
+
+
 class MultiAgentPlanner:
 
     def __init__(self, occupancy_grid: StochOccupancyGrid2D, v):
@@ -117,32 +141,40 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         num_z = z_index
         return collision_pairs, num_z
 
-    def plan(self):
+    def plan(self, verbose=False):
         if self.path is None:
             raise ValueError("Path not assigned. Please assign a path before planning.")
 
-        t = cp.Variable(len(self.path))  # CP variable for time to reach each waypoint
+        n = len(self.path)
+        if n < 1:
+            raise ValueError("ego path is empty for sequential planner")
+        if n == 1:
+            return [0.0]
+
+        t = cp.Variable(n)  # CP variable for time to reach each waypoint
         constraints = []
         constraints += [t[0] == 0]  # Start at time 0
 
         # Max velocity constraints (also enforces t_i+1 >= t_i)
-        for i in range(len(self.path) - 1):
+        for i in range(n - 1):
             delta_pos = np.linalg.norm(np.array(self.path[i + 1]) - np.array(self.path[i]))
             constraints += [t[i + 1] - t[i] >= delta_pos / self.v]
 
         # Collision Avoiding Constraints using Big-M method
         collision_pairs, max_z = self.find_collision_pairs()
-        z = cp.Variable(max_z, boolean=True)
+        # cvxpy rejects boolean Variable(0); skip z when there are no collision disjunctions.
+        z = cp.Variable(max_z, boolean=True) if max_z > 0 else None
         for (i, start_time, end_time, z_index) in collision_pairs:
+            if z is None:
+                continue
             constraints += [t[i] <= start_time - DELTA + M * z[z_index]]
             constraints += [t[i] >= end_time + DELTA - M * (1 - z[z_index])]
 
         objective = cp.Minimize(t[-1])  # Minimize time to reach final point
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=True)
-        optimized_times = t.value.tolist()
-        return optimized_times
+        prob.solve(verbose=verbose)
+        return _scalar_times_from_solver(prob, t, "MultiAgentSequentialPlanner")
 
 class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
 
@@ -242,7 +274,7 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         self._pair_detection_stats = pair_detection_stats
         return collision_pairs, num_z
 
-    def plan(self):
+    def plan(self, verbose=False):
         if self.paths is None:
             raise ValueError("Paths not assigned. Please assign paths before planning.")
 
@@ -299,9 +331,8 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=True)
-        optimized_times = [agent_time.value.tolist() for agent_time in agent_times]
-        return optimized_times
+        prob.solve(verbose=verbose)
+        return _multi_agent_times_from_solver(prob, agent_times, "MultiAgentSimultaneousPlanner")
 
 class MultiAgentCombinedPlanner(MultiAgentPlanner):
 
@@ -388,7 +419,7 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
 
         return (sequential_pairs, simultaneous_pairs), z_index
 
-    def plan(self):
+    def plan(self, verbose=False):
         if self.paths is None:
             raise ValueError("Paths not assigned. Please assign paths before planning.")
 
@@ -411,13 +442,17 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
         # Collision Avoiding Constraints using Big-M method
         collision_pairs, max_z = self.find_collision_pairs()  # Get all the collision pairs
         sequential_pairs, simultaneous_pairs = collision_pairs
-        z = cp.Variable(max_z, boolean=True)
+        z = cp.Variable(max_z, boolean=True) if max_z > 0 else None
         # First Consider collisions with other agents with fixed paths
         for (a, i, start_time, end_time, z_index) in sequential_pairs:
+            if z is None:
+                continue
             constraints += [agent_times[a][i] <= start_time - DELTA + M * z[z_index]]
             constraints += [agent_times[a][i] >= end_time + DELTA - M * (1 - z[z_index])]
         # Second consider collisions between agents with variable paths
         for (a1, a2, i, j1, j2, z_index) in simultaneous_pairs:
+            if z is None:
+                continue
             constraints += [agent_times[a1][i] <= agent_times[a2][j1] - DELTA + M * z[z_index]]
             constraints += [agent_times[a1][i] >= agent_times[a2][j2] + DELTA - M * (1 - z[z_index])]
 
@@ -425,9 +460,8 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
         objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=True)
-        optimized_times = [agent_time.value.tolist() for agent_time in agent_times]
-        return optimized_times
+        prob.solve(verbose=verbose)
+        return _multi_agent_times_from_solver(prob, agent_times, "MultiAgentCombinedPlanner")
 
 def get_position_at_time(t, path, time_points):
     """

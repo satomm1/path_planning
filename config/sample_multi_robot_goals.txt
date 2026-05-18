@@ -1,0 +1,6 @@
+# Sample fleet goals for publish_multi_robot_goal_plan.py
+# Format: robot_id, x, y, theta (radians, map frame)
+# Line order is the fleet order used in MultiRobotGoalPlan / fleet_robot_ids.
+
+6, 3.0, 2.0, 0.0
+# 5, 3.0, 1.0, 0.0

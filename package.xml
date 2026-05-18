@@ -35,6 +35,8 @@
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>tf</exec_depend>
+  <build_depend>mattbot_dds</build_depend>
+  <exec_depend>mattbot_dds</exec_depend>
 
   <export>
     <architecture_independent/>
