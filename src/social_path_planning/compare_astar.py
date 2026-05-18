@@ -1,6 +1,7 @@
 import argparse
 import csv
 import json
+import os
 from pathlib import Path
 
 _MODULE_DIR = Path(__file__).resolve().parent
@@ -9,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 
-from social_path_planning.a_star import AStar
+from social_path_planning.a_star import AStar, AStar_With_Graph
 from social_path_planning.grid_loader import load_grid_scenario
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 from social_path_planning.utils import snap_to_grid
@@ -140,15 +141,79 @@ def compute_metrics(path, occ_grid, dist_thresh=15.0, return_analysis=False):
     return metrics
 
 
-def run_solver(mode, occ_grid, statespace_hi, x_init, x_goal, resolution):
-    planner = AStar(
-        [0, 0],
-        statespace_hi,
-        x_init,
-        x_goal,
-        occ_grid,
-        resolution=resolution,
+def build_sparse_graph_from_heatmap(
+    occ_grid,
+    *,
+    heatmap_prefix=None,
+    heatmap_path=None,
+    sparse_graph_threshold=2.0,
+    sparse_min_component_size=15,
+):
+    """Load a directional heatmap and build the pruned sparse graph for AStar_With_Graph."""
+    from social_path_planning.sparse_graph import FrequentSubgraph
+
+    if not heatmap_prefix and not heatmap_path:
+        raise ValueError("build_sparse_graph_from_heatmap requires heatmap_prefix or heatmap_path")
+
+    frequent = FrequentSubgraph(occ_grid)
+    hm = frequent.heat_map_object
+    expected = (hm.height, hm.width, 8)
+
+    if heatmap_path:
+        heatmap_path = os.path.abspath(heatmap_path)
+        if not os.path.exists(heatmap_path):
+            raise FileNotFoundError(f"Heatmap file not found: {heatmap_path}")
+        hm.heatmap = np.load(heatmap_path)
+        print(f"Loaded heatmap from {heatmap_path}")
+    else:
+        frequent = FrequentSubgraph(occ_grid, heat_map_filename=heatmap_prefix)
+
+    if frequent.heat_map.shape != expected:
+        raise ValueError(
+            f"Heatmap shape mismatch. Expected {expected}, got {frequent.heat_map.shape}. "
+            "Wrong scenario or not a HeatMap2DVector save."
+        )
+
+    frequent.build_graph(threshold=sparse_graph_threshold, reset_graph=True)
+    frequent.prune_graph(min_component_size=sparse_min_component_size)
+    print(
+        f"Sparse graph: {frequent.graph.number_of_nodes()} nodes, "
+        f"{frequent.graph.number_of_edges()} edges "
+        f"(threshold={sparse_graph_threshold}, min_component_size={sparse_min_component_size})"
     )
+    return frequent.graph
+
+
+def run_solver(
+    mode,
+    occ_grid,
+    statespace_hi,
+    x_init,
+    x_goal,
+    resolution,
+    *,
+    social_graph=None,
+):
+    if mode == "modified" and social_graph is not None:
+        planner = AStar_With_Graph(
+            [0, 0],
+            statespace_hi,
+            x_init,
+            x_goal,
+            occ_grid,
+            social_graph,
+            resolution=resolution,
+            desired_dist_right_extra=0.25,
+        )
+    else:
+        planner = AStar(
+            [0, 0],
+            statespace_hi,
+            x_init,
+            x_goal,
+            occ_grid,
+            resolution=resolution,
+        )
     solved, solve_time = planner.solve(mode=mode, return_timing=True)
     if not solved:
         return None, solve_time
@@ -194,12 +259,49 @@ def load_resume_payload(path):
     return payload
 
 
-def validate_resume_compatibility(resume_payload, scenario, wall_dist_thresh):
+def _modified_solver_config(heatmap_prefix, heatmap_file, sparse_graph_threshold, sparse_min_component_size):
+    if heatmap_prefix or heatmap_file:
+        return {
+            "modified_solver": "heatmap_graph",
+            "heatmap_prefix": heatmap_prefix,
+            "heatmap_file": heatmap_file,
+            "sparse_graph_threshold": sparse_graph_threshold,
+            "sparse_min_component_size": sparse_min_component_size,
+        }
+    return {"modified_solver": "rightness_penalty"}
+
+
+def validate_resume_compatibility(
+    resume_payload,
+    scenario,
+    wall_dist_thresh,
+    *,
+    heatmap_prefix=None,
+    heatmap_file=None,
+    sparse_graph_threshold=2.0,
+    sparse_min_component_size=15,
+):
     cfg = resume_payload.get("config", {})
     existing_scenario = cfg.get("scenario")
     existing_wall_thresh = cfg.get("wall_dist_thresh")
     existing_policy = cfg.get("failure_policy")
     existing_source = cfg.get("path_metric_source")
+    requested_modified = _modified_solver_config(
+        heatmap_prefix, heatmap_file, sparse_graph_threshold, sparse_min_component_size
+    )
+    existing_modified_solver = cfg.get("modified_solver", "rightness_penalty")
+    if existing_modified_solver != requested_modified["modified_solver"]:
+        raise ValueError(
+            f"Resume modified_solver mismatch. Existing='{existing_modified_solver}', "
+            f"requested='{requested_modified['modified_solver']}'."
+        )
+    if requested_modified["modified_solver"] == "heatmap_graph":
+        for key in ("heatmap_prefix", "heatmap_file", "sparse_graph_threshold", "sparse_min_component_size"):
+            if cfg.get(key) != requested_modified.get(key):
+                raise ValueError(
+                    f"Resume heatmap config mismatch for {key}. "
+                    f"Existing={cfg.get(key)!r}, requested={requested_modified.get(key)!r}."
+                )
 
     if existing_scenario != scenario:
         raise ValueError(
@@ -332,7 +434,7 @@ def plot_debug_pair(
     plt.close(fig)
 
 
-def plot_sample_paths(occ_grid, sample_pairs, plot_output=None):
+def plot_sample_paths(occ_grid, sample_pairs, plot_output=None, modified_title=None):
     if not sample_pairs:
         print("No sample paths available to plot.")
         return
@@ -355,6 +457,8 @@ def plot_sample_paths(occ_grid, sample_pairs, plot_output=None):
 
         if solver == "vanilla":
             ax.set_title("A*", fontsize=16)
+        elif modified_title:
+            ax.set_title(modified_title, fontsize=16)
         else:
             ax.set_title("Social Planner", fontsize=16)
         ax.set_xlabel("X (m)")
@@ -391,9 +495,30 @@ def run_experiment(
     plot_samples=0,
     plot_output=None,
     debug_plot_each_run=False,
+    heatmap_prefix=None,
+    heatmap_file=None,
+    sparse_graph_threshold=2.0,
+    sparse_min_component_size=15,
 ):
     rng = np.random.default_rng(seed)
     occ_grid, _, resolution, statespace_hi = build_occ_grid(scenario)
+
+    social_graph = None
+    modified_config = _modified_solver_config(
+        heatmap_prefix, heatmap_file, sparse_graph_threshold, sparse_min_component_size
+    )
+    if modified_config["modified_solver"] == "heatmap_graph":
+        social_graph = build_sparse_graph_from_heatmap(
+            occ_grid,
+            heatmap_prefix=heatmap_prefix,
+            heatmap_path=heatmap_file,
+            sparse_graph_threshold=sparse_graph_threshold,
+            sparse_min_component_size=sparse_min_component_size,
+        )
+
+    modified_plot_title = (
+        "Social (heatmap graph)" if social_graph is not None else "Social Planner"
+    )
 
     records = []
     prior_attempts = 0
@@ -401,7 +526,15 @@ def run_experiment(
     seen_pairs = set()
     if resume_from:
         prior_payload = load_resume_payload(resume_from)
-        validate_resume_compatibility(prior_payload, scenario, wall_dist_thresh)
+        validate_resume_compatibility(
+            prior_payload,
+            scenario,
+            wall_dist_thresh,
+            heatmap_prefix=heatmap_prefix,
+            heatmap_file=heatmap_file,
+            sparse_graph_threshold=sparse_graph_threshold,
+            sparse_min_component_size=sparse_min_component_size,
+        )
         records = list(prior_payload["routes"])
         prior_attempts = int(prior_payload.get("sampling_attempts", 0))
         start_trial = len(records) + 1
@@ -426,8 +559,18 @@ def run_experiment(
         if pair_key in seen_pairs:
             continue
 
-        vanilla_path, vanilla_time = run_solver("vanilla", occ_grid, statespace_hi, x_init, x_goal, resolution)
-        modified_path, modified_time = run_solver("modified", occ_grid, statespace_hi, x_init, x_goal, resolution)
+        vanilla_path, vanilla_time = run_solver(
+            "vanilla", occ_grid, statespace_hi, x_init, x_goal, resolution
+        )
+        modified_path, modified_time = run_solver(
+            "modified",
+            occ_grid,
+            statespace_hi,
+            x_init,
+            x_goal,
+            resolution,
+            social_graph=social_graph,
+        )
         if vanilla_path is None or modified_path is None:
             continue
 
@@ -497,6 +640,7 @@ def run_experiment(
             "failure_policy": "resample_until_both_succeed",
             "path_metric_source": "raw_path",
             "resumed_from": resume_from,
+            **modified_config,
         },
         "sampling_attempts": prior_attempts + attempts,
         "summary": summary,
@@ -510,11 +654,22 @@ def run_experiment(
         print(f"\nSaved resumed results to: {resume_from}")
 
     if plot_samples > 0:
-        plot_sample_paths(occ_grid, sample_pairs, plot_output=plot_output)
+        plot_sample_paths(
+            occ_grid,
+            sample_pairs,
+            plot_output=plot_output,
+            modified_title=modified_plot_title,
+        )
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Compare vanilla and modified A* on paired random start/goal routes.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compare vanilla and modified A* on paired random start/goal routes. "
+            "By default modified uses rightness-penalty A*; pass --heatmap-prefix or "
+            "--heatmap-file to use AStar_With_Graph from a saved directional heatmap."
+        )
+    )
     parser.add_argument("--scenario", default="sample2_default", help="Grid scenario name from "
                                                                       "environments/grid_scenarios.json")
     parser.add_argument(
@@ -565,7 +720,34 @@ def parse_args():
         action="store_true",
         help="Show an interactive per-trial overlay plot (vanilla + modified) for each successful pair",
     )
+    heatmap_group = parser.add_argument_group("heatmap graph (optional modified solver)")
+    heatmap_group.add_argument(
+        "--heatmap-prefix",
+        type=str,
+        default=None,
+        help="Prefix P such that P_heatmap.npy exists; builds sparse graph for modified A*.",
+    )
+    heatmap_group.add_argument(
+        "--heatmap-file",
+        type=str,
+        default=None,
+        help="Path to directional heatmap .npy (overrides --heatmap-prefix).",
+    )
+    heatmap_group.add_argument(
+        "--sparse-graph-threshold",
+        type=float,
+        default=2.0,
+        help="Minimum directional heat for a sparse-graph edge (default: 2.0).",
+    )
+    heatmap_group.add_argument(
+        "--sparse-min-component-size",
+        type=int,
+        default=15,
+        help="Prune graph components with fewer than this many nodes (default: 15).",
+    )
     args = parser.parse_args()
+    if args.heatmap_prefix and args.heatmap_file:
+        parser.error("Use only one of --heatmap-prefix or --heatmap-file.")
     if args.num_routes <= 0:
         raise ValueError("--num-routes must be > 0")
     if args.max_attempts is None:
@@ -590,4 +772,8 @@ if __name__ == "__main__":
         plot_samples=cli.plot_samples,
         plot_output=cli.plot_output,
         debug_plot_each_run=cli.debug_plot_each_run,
+        heatmap_prefix=cli.heatmap_prefix,
+        heatmap_file=cli.heatmap_file,
+        sparse_graph_threshold=cli.sparse_graph_threshold,
+        sparse_min_component_size=cli.sparse_min_component_size,
     )
