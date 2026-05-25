@@ -69,6 +69,13 @@ For a **vanilla vs modified** comparison on the same map (only pairs where **bot
 python3 -m social_path_planning.compare_astar --scenario y2e2 --num-routes 10
 ```
 
+To compare vanilla A* against **social A* on a saved heatmap graph** (loads `{prefix}_heatmap.npy`, same as `plan_with_heatmap`):
+
+```bash
+python3 -m social_path_planning.compare_astar --scenario y2e2 --num-routes 10 \
+    --heatmap-prefix y2e2_routes --output results/y2e2_compare_heatmap.json
+```
+
 **Wall-distance cache (faster social A\*):** one-time offline precompute writes `src/social_path_planning/environments/<scenario>_wall_dist.npz`. If that file is present and matches the loaded occupancy grid, planning uses table lookups instead of ray marching. Install **`tqdm`** (`pip install tqdm`) for a row-wise progress bar during precompute; use **`--no-progress`** to disable it.
 
 ```bash
