@@ -1,0 +1,7 @@
+image: y2e2_aligned.pgm
+resolution: 0.05
+origin: [0.0, 0.0, 0.0]
+occupancy_encoding: ros_int8
+unknown_byte: 205
+free_byte: 254
+occupied_byte: 0
