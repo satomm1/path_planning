@@ -339,7 +339,7 @@ class AStar(object):
 
         return list(reversed(path))
 
-    def solve(self, mode="modified", return_timing=False, return_telemetry=False, log_telemetry=True):
+    def solve(self, mode="modified", return_timing=False, return_telemetry=False, log_telemetry=False):
         if mode not in self.SUPPORTED_SOLVER_MODES:
             raise ValueError(f"Unsupported solver mode '{mode}'. Supported modes: {sorted(self.SUPPORTED_SOLVER_MODES)}")
 
@@ -372,7 +372,7 @@ class AStar(object):
                 print(f"Social A* found a path in {elapsed:.2f} seconds.")
                 return self._emit_solve_return(True, elapsed, "modified", return_timing, return_telemetry, log_telemetry)
 
-            if time.time() - t_start > 60:
+            if time.time() - t_start > 120:
                 elapsed = time.time() - t_start
                 self.last_solve_time = elapsed
                 print("A* took too long.")
