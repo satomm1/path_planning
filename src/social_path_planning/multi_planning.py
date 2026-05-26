@@ -17,6 +17,7 @@ MAX_VELOCITY = 0.7 # m/s
 ROBOT_DIAMETER = 0.5  # meters
 M = 1e6  # Big-M constant for constraints
 DELTA = 1  # Safety margin in seconds
+MAX_ACCELERATION = 0.2  # m/s^2 cap on |v_{k+1} - v_k| / dt
 
 
 def _scalar_times_from_solver(prob, time_var, context):
@@ -40,6 +41,47 @@ def _multi_agent_times_from_solver(prob, agent_times, context):
             )
         out.append(val.tolist())
     return out
+
+
+def _add_acceleration_constraints(constraints, time_var, path, v_max, a_max):
+    """
+    Add convex acceleration constraints using per-segment speed variables.
+
+    For segment k:
+      dt_k = t_{k+1} - t_k
+      d_k  = ||p_{k+1} - p_k||
+      v_k  = average segment speed (decision variable)
+
+    Constraints:
+      - 0 <= v_k <= v_max
+      - d_k <= v_k * dt_k (convex via geo_mean form)
+      - |v_{k+1} - v_k| <= a_max * 0.5 * (dt_k + dt_{k+1})
+    """
+    num_segments = len(path) - 1
+    if num_segments <= 0:
+        return None
+
+    seg_speeds = cp.Variable(num_segments, nonneg=True)
+    constraints += [seg_speeds <= v_max]
+
+    dists = [
+        float(np.linalg.norm(np.array(path[i + 1]) - np.array(path[i])))
+        for i in range(num_segments)
+    ]
+    for i in range(num_segments):
+        dt_k = time_var[i + 1] - time_var[i]
+        if dists[i] <= 0.0:
+            continue
+        # Enforce dt_k * v_k >= d_k in a DCP-compliant way.
+        constraints += [cp.geo_mean(cp.hstack([dt_k, seg_speeds[i]])) >= np.sqrt(dists[i])]
+
+    for i in range(num_segments - 1):
+        dt_k = time_var[i + 1] - time_var[i]
+        dt_kp1 = time_var[i + 2] - time_var[i + 1]
+        dt_mid = 0.5 * (dt_k + dt_kp1)
+        constraints += [cp.abs(seg_speeds[i + 1] - seg_speeds[i]) <= a_max * dt_mid]
+
+    return seg_speeds
 
 
 def _segment_endpoint_conflict(p0, p1, q0, q1, threshold):
@@ -201,6 +243,7 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         for i in range(n - 1):
             delta_pos = np.linalg.norm(np.array(self.path[i + 1]) - np.array(self.path[i]))
             constraints += [t[i + 1] - t[i] >= delta_pos / self.v]
+        _add_acceleration_constraints(constraints, t, self.path, self.v, MAX_ACCELERATION)
 
         # Collision Avoiding Constraints using Big-M method (segment occupancy intervals)
         collision_pairs, max_z = self.find_collision_pairs()
@@ -215,7 +258,7 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         objective = cp.Minimize(t[-1])  # Minimize time to reach final point
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=verbose)
+        prob.solve(verbose=verbose, solver=cp.ECOS_BB)
         return _scalar_times_from_solver(prob, t, "MultiAgentSequentialPlanner")
 
 
@@ -307,6 +350,13 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
             for i in range(len(path) - 1):
                 delta_pos = np.linalg.norm(np.array(path[i + 1]) - np.array(path[i]))
                 constraints += [agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / self.v[agent_idx]]
+            _add_acceleration_constraints(
+                constraints,
+                agent_times[agent_idx],
+                path,
+                self.v[agent_idx],
+                MAX_ACCELERATION,
+            )
 
         # Collision Avoiding Constraints using Big-M method
         collision_pairs, max_z = self.find_collision_pairs()  # Get all the collision pairs
@@ -346,7 +396,7 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=verbose)
+        prob.solve(verbose=verbose, solver=cp.ECOS_BB)
         return _multi_agent_times_from_solver(prob, agent_times, "MultiAgentSimultaneousPlanner")
 
 class MultiAgentCombinedPlanner(MultiAgentPlanner):
@@ -422,6 +472,13 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
                 delta_pos = np.linalg.norm(np.array(path[i + 1]) - np.array(path[i]))
                 constraints += [
                     agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / self.v[agent_idx]]
+            _add_acceleration_constraints(
+                constraints,
+                agent_times[agent_idx],
+                path,
+                self.v[agent_idx],
+                MAX_ACCELERATION,
+            )
 
         # Collision Avoiding Constraints using Big-M method
         collision_pairs, max_z = self.find_collision_pairs()  # Get all the collision pairs
@@ -443,7 +500,7 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
         objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=verbose)
+        prob.solve(verbose=verbose, solver=cp.ECOS_BB)
         return _multi_agent_times_from_solver(prob, agent_times, "MultiAgentCombinedPlanner")
 
 def get_position_at_time(t, path, time_points):
