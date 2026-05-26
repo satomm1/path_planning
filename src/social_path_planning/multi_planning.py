@@ -11,10 +11,10 @@ from social_path_planning.a_star import AStar
 from social_path_planning.grid_loader import load_grid_scenario
 from social_path_planning.utils import *
 
-NOMINAL_VELOCITY = 0.5  # m/s
+NOMINAL_VELOCITY = 0.35  # m/s
 TIME_STEP = 5  # seconds
 MAX_VELOCITY = 0.7 # m/s
-ROBOT_DIAMETER = 1  # meters
+ROBOT_DIAMETER = 0.5  # meters
 M = 1e6  # Big-M constant for constraints
 DELTA = 1  # Safety margin in seconds
 
@@ -40,6 +40,66 @@ def _multi_agent_times_from_solver(prob, agent_times, context):
             )
         out.append(val.tolist())
     return out
+
+
+def _segment_endpoint_conflict(p0, p1, q0, q1, threshold):
+    """
+    True if any endpoint of segment (p0, p1) is within threshold of any endpoint of (q0, q1).
+
+    Endpoint-only C-space overlap; does not detect crossing segments whose interiors overlap
+    while all four endpoints remain farther apart than threshold.
+    """
+    for pa in (p0, p1):
+        for qb in (q0, q1):
+            if np.linalg.norm(np.array(pa) - np.array(qb)) <= threshold:
+                return True
+    return False
+
+
+def _segment_shares_exact_vertex(p0, p1, q0, q1):
+    """True if any segment endpoint equals any endpoint of the other segment."""
+    for pa in (p0, p1):
+        for qb in (q0, q1):
+            if pa == qb:
+                return True
+    return False
+
+
+def _iter_conflicting_segment_pairs(path_a, path_b, threshold):
+    """Yield (segment_index_i, segment_index_j) for conflicting segment pairs."""
+    if len(path_a) < 2 or len(path_b) < 2:
+        return
+    for i in range(len(path_a) - 1):
+        for j in range(len(path_b) - 1):
+            if _segment_endpoint_conflict(
+                path_a[i], path_a[i + 1], path_b[j], path_b[j + 1], threshold
+            ):
+                yield i, j
+
+
+def _collect_segment_collision_pairs(
+    collision_pairs, path_a, path_b, threshold, prefix=(), start_z_index=0
+):
+    """
+    Append segment collision tuples with z_index, reusing z for consecutive shared-vertex segments.
+
+    Returns:
+        num_z: total number of binary z variables required after this batch
+    """
+    z_index = start_z_index
+    prev_reuse = False
+    prev_i = None
+    for i, j in _iter_conflicting_segment_pairs(path_a, path_b, threshold):
+        p0, p1 = path_a[i], path_a[i + 1]
+        q0, q1 = path_b[j], path_b[j + 1]
+        current_reuse = _segment_shares_exact_vertex(p0, p1, q0, q1)
+        if current_reuse and prev_reuse and prev_i is not None and i == prev_i + 1:
+            z_index -= 1
+        collision_pairs.append(prefix + (i, j, z_index))
+        z_index += 1
+        prev_reuse = current_reuse
+        prev_i = i
+    return z_index
 
 
 class MultiAgentPlanner:
@@ -100,46 +160,28 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
 
     def find_collision_pairs(self):
         """
-        Identify potential collision intervals with other agents along the assigned path.
-        returns a list of tuples indicating the (t, start_time, end_time, z_index) for collision intervals.
-        The z variable can be reused for consecutive same-waypoint collisions. This function identifies
-        when z can be reused and provides the appropriate z_index for each collision interval.
-
-        Args:
-            None
+        Identify conflicting segment pairs with fixed other-agent schedules.
 
         Returns:
-            collision_pairs: a list of tuples (i, start_time, end_time, z_index)
-                i: index along ego path
-                start_time: earliest time of collision with other agents at waypoint i
-                end_time: latest time of collision with other agents at waypoint i
-                z_index: index of the z variable for this collision interval
+            collision_pairs: list of (other_idx, i, j, z_index)
+                other_idx: index into other_agent_paths / other_agent_times
+                i: ego segment index (occupancy [t_i, t_{i+1}])
+                j: other-agent segment index (fixed [other_times[j], other_times[j+1]])
+                z_index: binary variable for the ordering disjunction
             num_z: total number of z variables needed
         """
         collision_pairs = []
-        z_index = 0  # Index for z variables
-        prev_same = False  # To track if previous waypoint was the same
-
-        for other_path, other_times in zip(self.other_agent_paths, self.other_agent_times):
-            for i, waypoint in enumerate(self.path):
-                collision_times = []
-                current_same = False  # To track if current waypoint is the same
-                for j, other_waypoint in enumerate(other_path):
-                    if np.linalg.norm(np.array(waypoint) - np.array(other_waypoint)) <= ROBOT_DIAMETER:
-                        collision_times.append(other_times[j])  # If waypoints are within collision distance, record the time
-                        if waypoint == other_waypoint:
-                            current_same = True  # Mark if the waypoints are exactly the same
-
-                if collision_times:
-                    if current_same and prev_same:
-                        z_index -= 1  # Reuse z variable
-                    collision_pairs.append((i, min(collision_times), max(collision_times), z_index))
-                    z_index += 1
-                prev_same = current_same
-            prev_same = False
-
-        num_z = z_index
-        return collision_pairs, num_z
+        z_index = 0
+        for other_idx, other_path in enumerate(self.other_agent_paths):
+            z_index = _collect_segment_collision_pairs(
+                collision_pairs,
+                self.path,
+                other_path,
+                ROBOT_DIAMETER,
+                prefix=(other_idx,),
+                start_z_index=z_index,
+            )
+        return collision_pairs, z_index
 
     def plan(self, verbose=False):
         if self.path is None:
@@ -160,21 +202,22 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
             delta_pos = np.linalg.norm(np.array(self.path[i + 1]) - np.array(self.path[i]))
             constraints += [t[i + 1] - t[i] >= delta_pos / self.v]
 
-        # Collision Avoiding Constraints using Big-M method
+        # Collision Avoiding Constraints using Big-M method (segment occupancy intervals)
         collision_pairs, max_z = self.find_collision_pairs()
-        # cvxpy rejects boolean Variable(0); skip z when there are no collision disjunctions.
         z = cp.Variable(max_z, boolean=True) if max_z > 0 else None
-        for (i, start_time, end_time, z_index) in collision_pairs:
+        for (other_idx, i, j, z_index) in collision_pairs:
             if z is None:
                 continue
-            constraints += [t[i] <= start_time - DELTA + M * z[z_index]]
-            constraints += [t[i] >= end_time + DELTA - M * (1 - z[z_index])]
+            other_times = self.other_agent_times[other_idx]
+            constraints += [t[i + 1] <= other_times[j] - DELTA + M * z[z_index]]
+            constraints += [other_times[j + 1] <= t[i] - DELTA - M * (1 - z[z_index])]
 
         objective = cp.Minimize(t[-1])  # Minimize time to reach final point
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
         prob.solve(verbose=verbose)
         return _scalar_times_from_solver(prob, t, "MultiAgentSequentialPlanner")
+
 
 class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
 
@@ -209,70 +252,42 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
 
     def find_collision_pairs(self):
         """
-        Identify potential collision pairs between agents along their paths.
-        Returns a list of tuples indicating the time intervals for collision avoidance constraints.
-        Since mobile robots may follow same waypoints consecutively, we can reuse the
-        same z variable for consecutive same-waypoint collisions. This function identifies
-        when z can be reused and also provides which collision pairs can use the same z variable.
+        Identify conflicting segment pairs between agents (Section 3.3 interval occupancy).
 
         Returns:
-            collision_pairs: a tuple of (a1, a2, i, j1, j2, z_index)
-                a1: index of first agent
-                a2: index of second agent
-                i: index along agent1's path
-                j1: earliest index along agent2's path that collides
-                j2: latest index along agent2's path that collides
-                z_index: index of the z variable for this collision pair
+            collision_pairs: list of (a1, a2, i, j, z_index)
+                a1, a2: agent indices
+                i, j: segment indices (occupancy [t_i, t_{i+1}], [t_j, t_{j+1}])
+                z_index: binary variable for the ordering disjunction
             num_z: total number of z variables needed
         """
-        collision_pairs = []  # List to store collision pairs
-        z_index = 0  # Index for z variables
-        prev_same = False  # To track if previous waypoint was the same
-        num_agents = len(self.paths)  # Number of agents
+        collision_pairs = []
+        z_index = 0
+        num_agents = len(self.paths)
         pair_detection_stats = {}
+        count_before = 0
 
-        # Find collision pairs for all agent combinations
         for a1 in range(num_agents):
             for a2 in range(a1 + 1, num_agents):
                 pair_t0 = time.perf_counter()
-                pair_collision_count = 0
-                # Get paths for both agents
-                path1 = self.paths[a1]
-                path2 = self.paths[a2]
-
-                for i, waypoint1 in enumerate(path1):  # Iterate through all waypoints in path1
-                    collision_indices = []
-                    current_same = False  # To track if current waypoint is the same
-                    for j, waypoint2 in enumerate(path2):  # Check for collisions with waypoints in path2
-                        if np.linalg.norm(np.array(waypoint1) - np.array(waypoint2)) <= ROBOT_DIAMETER:
-                            collision_indices.append(j)  # If waypoints are within collision distance, record the index
-                            if waypoint1 == waypoint2:
-                                current_same = True  # Mark if the waypoints are exactly the same
-
-                    if collision_indices:
-                        if current_same and prev_same:
-                            # The two paths are the same in this segment, we can reuse the same z variable since
-                            # in both cases, a1 should either arrive before or after a2 at the same waypoint
-                            # This means we do not allow overtaking
-                            z_index -= 1
-
-                        # Store the collision pair with the appropriate z_index
-                        # Only use min and max of collision_indices for j1 and j2 to get the interval
-                        collision_pairs.append((a1, a2, i, min(collision_indices), max(collision_indices), z_index))
-                        pair_collision_count += 1
-                        z_index += 1
-                    prev_same = current_same
+                count_before = len(collision_pairs)
+                z_index = _collect_segment_collision_pairs(
+                    collision_pairs,
+                    self.paths[a1],
+                    self.paths[a2],
+                    0.5,
+                    prefix=(a1, a2),
+                    start_z_index=z_index,
+                )
                 pair_detection_stats[(a1, a2)] = {
                     "robot_i": a1,
                     "robot_j": a2,
                     "pair_detect_time_s": float(time.perf_counter() - pair_t0),
-                    "collision_tuple_count": int(pair_collision_count),
+                    "collision_tuple_count": int(len(collision_pairs) - count_before),
                 }
-            prev_same = False
 
-        num_z = z_index
         self._pair_detection_stats = pair_detection_stats
-        return collision_pairs, num_z
+        return collision_pairs, z_index
 
     def plan(self, verbose=False):
         if self.paths is None:
@@ -298,12 +313,12 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         z = cp.Variable(max_z, boolean=True) if max_z > 0 else None
         pair_constraint_build_time = defaultdict(float)
         pair_constraint_count = defaultdict(int)
-        for (a1, a2, i, j1, j2, z_index) in collision_pairs:
+        for (a1, a2, i, j, z_index) in collision_pairs:
             if z is None:
                 continue
             build_t0 = time.perf_counter()
-            constraints += [agent_times[a1][i] <= agent_times[a2][j1] - DELTA + M * z[z_index]]
-            constraints += [agent_times[a1][i] >= agent_times[a2][j2] + DELTA - M * (1 - z[z_index])]
+            constraints += [agent_times[a1][i + 1] <= agent_times[a2][j] - DELTA + M * z[z_index]]
+            constraints += [agent_times[a2][j + 1] <= agent_times[a1][i] - DELTA - M * (1 - z[z_index])]
             pair_key = (a1, a2)
             pair_constraint_build_time[pair_key] += float(time.perf_counter() - build_t0)
             pair_constraint_count[pair_key] += 2
@@ -359,63 +374,32 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
         self.paths = paths
 
     def find_collision_pairs(self):
+        z_index = 0
+        num_agents = len(self.paths)
 
-        z_index = 0  # Index for z variables
-        prev_same = False  # To track if previous waypoint was the same
-        num_agents = len(self.paths)  # Number of agents
-
-        # First we find collision pairs from sequential planning
         sequential_pairs = []
-        for other_path, other_times in zip(self.other_agent_paths, self.other_agent_times):
+        for other_idx, other_path in enumerate(self.other_agent_paths):
             for a, path in enumerate(self.paths):
-                for i, waypoint in enumerate(path):
-                    collision_times = []
-                    current_same = False  # To track if current waypoint is the same
-                    for j, other_waypoint in enumerate(other_path):
-                        if np.linalg.norm(np.array(waypoint) - np.array(other_waypoint)) <= ROBOT_DIAMETER:
-                            collision_times.append(other_times[j])  # If waypoints are within collision distance, record the time
-                            if waypoint == other_waypoint:
-                                current_same = True  # Mark if the waypoints are exactly the same
+                z_index = _collect_segment_collision_pairs(
+                    sequential_pairs,
+                    path,
+                    other_path,
+                    ROBOT_DIAMETER,
+                    prefix=(other_idx, a),
+                    start_z_index=z_index,
+                )
 
-                    if collision_times:
-                        if current_same and prev_same:
-                            z_index -= 1  # Reuse z variable
-                        sequential_pairs.append((a, i, min(collision_times), max(collision_times), z_index))
-                        z_index += 1
-                    prev_same = current_same
-                prev_same = False
-
-        # Next we find collision pairs from simultaneous planning
-        prev_same = False
         simultaneous_pairs = []
         for a1 in range(num_agents):
             for a2 in range(a1 + 1, num_agents):
-                # Get paths for both agents
-                path1 = self.paths[a1]
-                path2 = self.paths[a2]
-
-                for i, waypoint1 in enumerate(path1):  # Iterate through all waypoints in path1
-                    collision_indices = []
-                    current_same = False  # To track if current waypoint is the same
-                    for j, waypoint2 in enumerate(path2):  # Check for collisions with waypoints in path2
-                        if np.linalg.norm(np.array(waypoint1) - np.array(waypoint2)) <= ROBOT_DIAMETER:
-                            collision_indices.append(j)  # If waypoints are within collision distance, record the index
-                            if waypoint1 == waypoint2:
-                                current_same = True  # Mark if the waypoints are exactly the same
-
-                    if collision_indices:
-                        if current_same and prev_same:
-                            # The two paths are the same in this segment, we can reuse the same z variable since
-                            # in both cases, a1 should either arrive before or after a2 at the same waypoint
-                            # This means we do not allow overtaking
-                            z_index -= 1
-
-                        # Store the collision pair with the appropriate z_index
-                        # Only use min and max of collision_indices for j1 and j2 to get the interval
-                        simultaneous_pairs.append((a1, a2, i, min(collision_indices), max(collision_indices), z_index))
-                        z_index += 1
-                    prev_same = current_same
-            prev_same = False
+                z_index = _collect_segment_collision_pairs(
+                    simultaneous_pairs,
+                    self.paths[a1],
+                    self.paths[a2],
+                    ROBOT_DIAMETER,
+                    prefix=(a1, a2),
+                    start_z_index=z_index,
+                )
 
         return (sequential_pairs, simultaneous_pairs), z_index
 
@@ -443,18 +427,17 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
         collision_pairs, max_z = self.find_collision_pairs()  # Get all the collision pairs
         sequential_pairs, simultaneous_pairs = collision_pairs
         z = cp.Variable(max_z, boolean=True) if max_z > 0 else None
-        # First Consider collisions with other agents with fixed paths
-        for (a, i, start_time, end_time, z_index) in sequential_pairs:
+        for (other_idx, a, i, j, z_index) in sequential_pairs:
             if z is None:
                 continue
-            constraints += [agent_times[a][i] <= start_time - DELTA + M * z[z_index]]
-            constraints += [agent_times[a][i] >= end_time + DELTA - M * (1 - z[z_index])]
-        # Second consider collisions between agents with variable paths
-        for (a1, a2, i, j1, j2, z_index) in simultaneous_pairs:
+            other_times = self.other_agent_times[other_idx]
+            constraints += [agent_times[a][i + 1] <= other_times[j] - DELTA + M * z[z_index]]
+            constraints += [other_times[j + 1] <= agent_times[a][i] - DELTA - M * (1 - z[z_index])]
+        for (a1, a2, i, j, z_index) in simultaneous_pairs:
             if z is None:
                 continue
-            constraints += [agent_times[a1][i] <= agent_times[a2][j1] - DELTA + M * z[z_index]]
-            constraints += [agent_times[a1][i] >= agent_times[a2][j2] + DELTA - M * (1 - z[z_index])]
+            constraints += [agent_times[a1][i + 1] <= agent_times[a2][j] - DELTA + M * z[z_index]]
+            constraints += [agent_times[a2][j + 1] <= agent_times[a1][i] - DELTA - M * (1 - z[z_index])]
 
         final_time_vars = cp.hstack([agent_time[-1] for agent_time in agent_times])
         objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
