@@ -17,7 +17,9 @@ MAX_VELOCITY = 0.7 # m/s
 ROBOT_DIAMETER = 0.5  # meters
 M = 1e6  # Big-M constant for constraints
 DELTA = 1  # Safety margin in seconds
-MAX_ACCELERATION = 0.2  # m/s^2 cap on |v_{k+1} - v_k| / dt
+# Max factor k between consecutive segment speeds v_i = d_i / (t_{i+1} - t_i):
+# v_{i+1} <= k * v_i and v_i <= k * v_{i+1} (linear in waypoint times).
+MAX_VELOCITY_CHANGE_FACTOR = 1.5
 
 
 def _scalar_times_from_solver(prob, time_var, context):
@@ -43,45 +45,36 @@ def _multi_agent_times_from_solver(prob, agent_times, context):
     return out
 
 
-def _add_acceleration_constraints(constraints, time_var, path, v_max, a_max):
-    """
-    Add convex acceleration constraints using per-segment speed variables.
-
-    For segment k:
-      dt_k = t_{k+1} - t_k
-      d_k  = ||p_{k+1} - p_k||
-      v_k  = average segment speed (decision variable)
-
-    Constraints:
-      - 0 <= v_k <= v_max
-      - d_k <= v_k * dt_k (convex via geo_mean form)
-      - |v_{k+1} - v_k| <= a_max * 0.5 * (dt_k + dt_{k+1})
-    """
-    num_segments = len(path) - 1
-    if num_segments <= 0:
-        return None
-
-    seg_speeds = cp.Variable(num_segments, nonneg=True)
-    constraints += [seg_speeds <= v_max]
-
-    dists = [
+def _segment_lengths(path):
+    """Return Euclidean length d_i for each segment (waypoint i -> i+1)."""
+    return [
         float(np.linalg.norm(np.array(path[i + 1]) - np.array(path[i])))
-        for i in range(num_segments)
+        for i in range(len(path) - 1)
     ]
-    for i in range(num_segments):
-        dt_k = time_var[i + 1] - time_var[i]
-        if dists[i] <= 0.0:
+
+
+def _add_velocity_change_constraints(constraints, time_var, path, k):
+    """
+    Limit consecutive segment speed changes with linear constraints (1-indexed i = 1..N-2):
+
+      d_i * (t_{i+2} - t_{i+1}) - k * d_{i+1} * (t_{i+1} - t_i) <= 0
+      d_{i+1} * (t_{i+1} - t_i) - k * d_i * (t_{i+2} - t_{i+1}) <= 0
+
+    Equivalently bounds v_i = d_i / (t_{i+1}-t_i) so v_{i+1} <= k*v_i and v_i <= k*v_{i+1}.
+    Long holds (large dt) are allowed; only relative speeds between adjacent segments are limited.
+    """
+    dists = _segment_lengths(path)
+    if len(dists) < 2:
+        return
+    for i in range(len(dists) - 1):
+        d_i = dists[i]
+        d_ip1 = dists[i + 1]
+        if d_i <= 0.0 and d_ip1 <= 0.0:
             continue
-        # Enforce dt_k * v_k >= d_k in a DCP-compliant way.
-        constraints += [cp.geo_mean(cp.hstack([dt_k, seg_speeds[i]])) >= np.sqrt(dists[i])]
-
-    for i in range(num_segments - 1):
-        dt_k = time_var[i + 1] - time_var[i]
-        dt_kp1 = time_var[i + 2] - time_var[i + 1]
-        dt_mid = 0.5 * (dt_k + dt_kp1)
-        constraints += [cp.abs(seg_speeds[i + 1] - seg_speeds[i]) <= a_max * dt_mid]
-
-    return seg_speeds
+        dt_i = time_var[i + 1] - time_var[i]
+        dt_ip1 = time_var[i + 2] - time_var[i + 1]
+        constraints += [d_i * dt_ip1 - k * d_ip1 * dt_i <= 0]
+        constraints += [d_ip1 * dt_i - k * d_i * dt_ip1 <= 0]
 
 
 def _segment_endpoint_conflict(p0, p1, q0, q1, threshold):
@@ -243,7 +236,7 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         for i in range(n - 1):
             delta_pos = np.linalg.norm(np.array(self.path[i + 1]) - np.array(self.path[i]))
             constraints += [t[i + 1] - t[i] >= delta_pos / self.v]
-        _add_acceleration_constraints(constraints, t, self.path, self.v, MAX_ACCELERATION)
+        _add_velocity_change_constraints(constraints, t, self.path, MAX_VELOCITY_CHANGE_FACTOR)
 
         # Collision Avoiding Constraints using Big-M method (segment occupancy intervals)
         collision_pairs, max_z = self.find_collision_pairs()
@@ -350,12 +343,11 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
             for i in range(len(path) - 1):
                 delta_pos = np.linalg.norm(np.array(path[i + 1]) - np.array(path[i]))
                 constraints += [agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / self.v[agent_idx]]
-            _add_acceleration_constraints(
+            _add_velocity_change_constraints(
                 constraints,
                 agent_times[agent_idx],
                 path,
-                self.v[agent_idx],
-                MAX_ACCELERATION,
+                MAX_VELOCITY_CHANGE_FACTOR,
             )
 
         # Collision Avoiding Constraints using Big-M method
@@ -472,12 +464,11 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
                 delta_pos = np.linalg.norm(np.array(path[i + 1]) - np.array(path[i]))
                 constraints += [
                     agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / self.v[agent_idx]]
-            _add_acceleration_constraints(
+            _add_velocity_change_constraints(
                 constraints,
                 agent_times[agent_idx],
                 path,
-                self.v[agent_idx],
-                MAX_ACCELERATION,
+                MAX_VELOCITY_CHANGE_FACTOR,
             )
 
         # Collision Avoiding Constraints using Big-M method
