@@ -137,6 +137,63 @@ def _collect_segment_collision_pairs(
     return z_index
 
 
+def _append_segment_pairs_with_z(
+    collision_pairs, path_a, path_b, segment_pairs, prefix=(), start_z_index=0
+):
+    """Append pre-detected ``(seg_i, seg_j)`` tuples with shared-vertex z reuse."""
+    z_index = start_z_index
+    prev_reuse = False
+    prev_i = None
+    for i, j in segment_pairs:
+        p0, p1 = path_a[i], path_a[i + 1]
+        q0, q1 = path_b[j], path_b[j + 1]
+        current_reuse = _segment_shares_exact_vertex(p0, p1, q0, q1)
+        if current_reuse and prev_reuse and prev_i is not None and i == prev_i + 1:
+            z_index -= 1
+        collision_pairs.append(prefix + (i, j, z_index))
+        z_index += 1
+        prev_reuse = current_reuse
+        prev_i = i
+    return z_index
+
+
+def detect_collision_pairs_for_agent_pair(path_a, path_b, a_idx, b_idx, threshold=0.5):
+    """Return ``(a_idx, b_idx, seg_i, seg_j)`` for one agent pair (detection only)."""
+    segment_i = []
+    segment_j = []
+    for i, j in _iter_conflicting_segment_pairs(path_a, path_b, threshold):
+        segment_i.append(int(i))
+        segment_j.append(int(j))
+    return int(a_idx), int(b_idx), segment_i, segment_j
+
+
+def merge_collision_reports(paths, reports, threshold=0.5):
+    """Merge distributed segment reports into full ``(a1, a2, i, j, z_index)`` tuples.
+
+    ``reports`` is a list of dicts with keys ``a1``, ``a2``, ``segment_i``, ``segment_j``.
+    """
+    collision_pairs = []
+    z_index = 0
+    ordered = sorted(reports, key=lambda row: (int(row["a1"]), int(row["a2"])))
+    for row in ordered:
+        a1 = int(row["a1"])
+        a2 = int(row["a2"])
+        seg_i = row.get("segment_i") or []
+        seg_j = row.get("segment_j") or []
+        if len(seg_i) != len(seg_j):
+            raise ValueError(f"segment_i/segment_j length mismatch for pair ({a1}, {a2})")
+        segment_pairs = [(int(i), int(j)) for i, j in zip(seg_i, seg_j)]
+        z_index = _append_segment_pairs_with_z(
+            collision_pairs,
+            paths[a1],
+            paths[a2],
+            segment_pairs,
+            prefix=(a1, a2),
+            start_z_index=z_index,
+        )
+    return collision_pairs, z_index
+
+
 class MultiAgentPlanner:
 
     def __init__(self, occupancy_grid: StochOccupancyGrid2D, v):
@@ -325,24 +382,22 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         self._pair_detection_stats = pair_detection_stats
         return collision_pairs, z_index
 
-    def plan(self, verbose=False):
-        if self.paths is None:
-            raise ValueError("Paths not assigned. Please assign paths before planning.")
-
+    def _build_and_solve_from_collision_pairs(self, collision_pairs, max_z, verbose=False):
+        """Build velocity + Big-M constraints from precomputed collision pairs and solve."""
         if len(self.v) == 1:
             self.v = [self.v[0] for _ in range(len(self.paths))]
 
-        # Create CP variables for each agent's time to reach each waypoint
         agent_times = [cp.Variable(len(path)) for path in self.paths]
         constraints = []
         for agent_time in agent_times:
-            constraints += [agent_time[0] == 0]  # All agents start at same time (t=0)
+            constraints += [agent_time[0] == 0]
 
-        # Max velocity constraints (also enforces t_i+1 >= t_i)
         for agent_idx, path in enumerate(self.paths):
             for i in range(len(path) - 1):
                 delta_pos = np.linalg.norm(np.array(path[i + 1]) - np.array(path[i]))
-                constraints += [agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / self.v[agent_idx]]
+                constraints += [
+                    agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / self.v[agent_idx]
+                ]
             _add_velocity_change_constraints(
                 constraints,
                 agent_times[agent_idx],
@@ -350,8 +405,6 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
                 MAX_VELOCITY_CHANGE_FACTOR,
             )
 
-        # Collision Avoiding Constraints using Big-M method
-        collision_pairs, max_z = self.find_collision_pairs()  # Get all the collision pairs
         z = cp.Variable(max_z, boolean=True) if max_z > 0 else None
         pair_constraint_build_time = defaultdict(float)
         pair_constraint_count = defaultdict(int)
@@ -368,7 +421,7 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         detection_stats = getattr(self, "_pair_detection_stats", {})
         all_pair_keys = sorted(
             set(detection_stats.keys()) | set(pair_constraint_build_time.keys()),
-            key=lambda pair: (pair[0], pair[1])
+            key=lambda pair: (pair[0], pair[1]),
         )
         self.constraint_timing_records = []
         for pair_key in all_pair_keys:
@@ -385,11 +438,24 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
             )
 
         final_time_vars = cp.hstack([agent_time[-1] for agent_time in agent_times])
-        objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
+        objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
         prob.solve(verbose=verbose, solver=cp.ECOS_BB)
         return _multi_agent_times_from_solver(prob, agent_times, "MultiAgentSimultaneousPlanner")
+
+    def plan_from_collision_pairs(self, collision_pairs, max_z, verbose=False):
+        """Solve timing MILP using pre-merged collision pairs (skips detection)."""
+        if self.paths is None:
+            raise ValueError("Paths not assigned. Please assign paths before planning.")
+        return self._build_and_solve_from_collision_pairs(collision_pairs, max_z, verbose=verbose)
+
+    def plan(self, verbose=False):
+        if self.paths is None:
+            raise ValueError("Paths not assigned. Please assign paths before planning.")
+
+        collision_pairs, max_z = self.find_collision_pairs()
+        return self.plan_from_collision_pairs(collision_pairs, max_z, verbose=verbose)
 
 class MultiAgentCombinedPlanner(MultiAgentPlanner):
 

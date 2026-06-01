@@ -6,6 +6,8 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 
+from social_path_planning.distributed_pair_assignment import assigned_pairs_for_fleet_index
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -103,18 +105,11 @@ def build_pair_times(rows_for_stage, stage_size):
 
 
 def assigned_pairs_for_robot(robot_id_1b, stage_size):
-    half = stage_size // 2
-    hop_count = half if robot_id_1b <= half else half - 1
-    pairs = []
-    for hop in range(1, hop_count + 1):
-        other = ((robot_id_1b - 1 + hop) % stage_size) + 1
-        pairs.append(tuple(sorted((robot_id_1b, other))))
-    return pairs
+    pairs_0b = assigned_pairs_for_fleet_index(robot_id_1b - 1, stage_size)
+    return [tuple(sorted((i + 1, j + 1))) for i, j in pairs_0b]
 
 
 def compute_stage_metrics(run_id, stage_size, rows_for_stage):
-    if stage_size % 2 != 0:
-        raise ValueError(f"Stage {stage_size} is odd; this assignment rule requires even robot counts.")
     if stage_size < 2:
         raise ValueError(f"Stage {stage_size} must be at least 2.")
 
