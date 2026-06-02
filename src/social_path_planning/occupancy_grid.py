@@ -94,6 +94,23 @@ class StochOccupancyGrid2D(object):
         else:
             return True
 
+    def is_segment_free(self, p0, p1, step=None):
+        """Return True if every sampled point along segment p0->p1 is collision-free."""
+        p0 = np.asarray(p0, dtype=float)
+        p1 = np.asarray(p1, dtype=float)
+        if step is None:
+            step = max(self.resolution / 2.0, 1e-4)
+        seg_len = float(np.linalg.norm(p1 - p0))
+        if seg_len < 1e-9:
+            return self.is_free(tuple(p0))
+        n_steps = max(int(np.ceil(seg_len / step)), 1)
+        for i in range(n_steps + 1):
+            t = i / n_steps
+            pt = p0 + t * (p1 - p0)
+            if not self.is_free((float(pt[0]), float(pt[1]))):
+                return False
+        return True
+
     def dist_to_wall_left(self, x, travel_dir, dist_thresh=15.0):
         return self.dist_to_wall_right(x, [-travel_dir[0], -travel_dir[1]], dist_thresh=dist_thresh)
 

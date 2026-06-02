@@ -13,10 +13,17 @@ from matplotlib.lines import Line2D
 from social_path_planning.a_star import AStar, AStar_With_Graph
 from social_path_planning.grid_loader import load_grid_scenario
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
+from social_path_planning.rrt_star import RRTStar
 from social_path_planning.utils import snap_to_grid
 
 
-SOLVER_MODES = ("vanilla", "modified")
+SOLVER_MODES = ("vanilla", "modified", "rrt_vanilla")
+FAILURE_POLICY = "resample_until_all_succeed"
+SOLVER_PLOT_TITLES = {
+    "vanilla": "A* vanilla",
+    "modified": "A* social",
+    "rrt_vanilla": "RRT* vanilla",
+}
 RIGHT_WALL_EXCLUSION_RADIUS = 5.0
 RIGHT_WALL_LARGE_RATIO = 0.7
 
@@ -181,6 +188,25 @@ def build_sparse_graph_from_heatmap(
         f"{frequent.graph.number_of_edges()} edges "
         f"(threshold={sparse_graph_threshold}, min_component_size={sparse_min_component_size})"
     )
+
+    ax = frequent.visualize_graph(
+        show=False,
+        title="Environment 3",
+        xlabel="",
+        ylabel="",
+        title_fontsize=35,
+        label_fontsize=16,
+        tick_fontsize=25,
+        edge_color="red",
+        edge_linewidth=1,
+        edge_alpha=1,
+        figsize=(10, 10))
+
+    # Save the figure
+    fig = ax.figure
+    fig.tight_layout()
+    fig.savefig("outputs_timeline/env3.png", dpi=600)
+
     return frequent.graph
 
 
@@ -193,28 +219,46 @@ def run_solver(
     resolution,
     *,
     social_graph=None,
+    rrt_kwargs=None,
 ):
-    if mode == "modified" and social_graph is not None:
-        planner = AStar_With_Graph(
+    rrt_kwargs = {} if rrt_kwargs is None else dict(rrt_kwargs)
+
+    if mode in ("vanilla", "modified"):
+        if mode == "modified" and social_graph is not None:
+            planner = AStar_With_Graph(
+                [0, 0],
+                statespace_hi,
+                x_init,
+                x_goal,
+                occ_grid,
+                social_graph,
+                resolution=resolution,
+                desired_dist_right_extra=0.25,
+            )
+        else:
+            planner = AStar(
+                [0, 0],
+                statespace_hi,
+                x_init,
+                x_goal,
+                occ_grid,
+                resolution=resolution,
+            )
+        solved, solve_time = planner.solve(mode=mode, return_timing=True)
+    elif mode == "rrt_vanilla":
+        planner = RRTStar(
             [0, 0],
             statespace_hi,
             x_init,
             x_goal,
             occ_grid,
-            social_graph,
             resolution=resolution,
-            desired_dist_right_extra=0.25,
+            **rrt_kwargs,
         )
+        solved, solve_time = planner.solve(mode="vanilla", return_timing=True)
     else:
-        planner = AStar(
-            [0, 0],
-            statespace_hi,
-            x_init,
-            x_goal,
-            occ_grid,
-            resolution=resolution,
-        )
-    solved, solve_time = planner.solve(mode=mode, return_timing=True)
+        raise ValueError(f"Unsupported solver mode '{mode}'")
+
     if not solved:
         return None, solve_time
     return planner.path, solve_time
@@ -307,9 +351,14 @@ def validate_resume_compatibility(
         raise ValueError(
             f"Resume scenario mismatch. Existing='{existing_scenario}', requested='{scenario}'."
         )
-    if existing_policy != "resample_until_both_succeed":
+    if existing_policy not in (FAILURE_POLICY, "resample_until_both_succeed"):
         raise ValueError(
-            "Resume file uses unsupported failure policy. Expected 'resample_until_both_succeed'."
+            f"Resume file uses unsupported failure policy. Expected '{FAILURE_POLICY}'."
+        )
+    if existing_policy == "resample_until_both_succeed":
+        raise ValueError(
+            "Resume file uses legacy 2-planner failure policy "
+            "('resample_until_both_succeed'). Re-run without --resume-from."
         )
     if existing_source != "raw_path":
         raise ValueError("Resume file uses unsupported path metric source. Expected 'raw_path'.")
@@ -317,6 +366,14 @@ def validate_resume_compatibility(
         raise ValueError(
             f"Resume wall threshold mismatch. Existing={existing_wall_thresh}, requested={wall_dist_thresh}."
         )
+
+    for row in resume_payload.get("routes", []):
+        missing = [mode for mode in SOLVER_MODES if mode not in row]
+        if missing:
+            raise ValueError(
+                "Resume file is missing planner results for: "
+                f"{', '.join(missing)}. Re-run without --resume-from."
+            )
 
 
 def save_results(output_path, payload):
@@ -385,15 +442,18 @@ def plot_debug_pair(
     trial_num,
     x_init,
     x_goal,
-    vanilla_path,
-    modified_path,
-    vanilla_metrics,
-    modified_metrics,
-    vanilla_used_mask,
-    modified_used_mask,
+    paths_by_solver,
+    metrics_by_solver,
+    used_masks_by_solver,
 ):
-    fig, ax = plt.subplots(1, 1, figsize=(7, 7))
+    fig, ax = plt.subplots(1, 1, figsize=(8, 8))
     occ_grid.plot_grid(ax=ax)
+
+    colors = {
+        "vanilla": "tab:blue",
+        "modified": "tab:orange",
+        "rrt_vanilla": "tab:green",
+    }
 
     def draw_segments(path, used_mask, base_color):
         for k in range(len(path) - 1):
@@ -405,30 +465,31 @@ def plot_debug_pair(
             else:
                 ax.plot([x0, x1], [y0, y1], color=base_color, linewidth=1.2, alpha=0.25, linestyle="--")
 
-    draw_segments(vanilla_path, vanilla_used_mask, "tab:blue")
-    draw_segments(modified_path, modified_used_mask, "tab:orange")
+    handles = []
+    for solver in SOLVER_MODES:
+        draw_segments(
+            paths_by_solver[solver],
+            used_masks_by_solver[solver],
+            colors[solver],
+        )
+        avg = metrics_by_solver[solver]["right_wall_avg"]
+        avg_label = f"{avg:.3f}" if not np.isnan(avg) else "nan"
+        handles.append(
+            Line2D(
+                [0],
+                [0],
+                color=colors[solver],
+                linewidth=2.2,
+                label=f"{solver} used (avg right dist={avg_label})",
+            )
+        )
+
     ax.scatter(x_init[0], x_init[1], c="green", s=40, zorder=5, label="start")
     ax.scatter(x_goal[0], x_goal[1], c="gold", marker="*", s=70, zorder=5, label="goal")
-    ax.set_title(f"Trial {trial_num}: Vanilla vs Modified")
+    ax.set_title(f"Trial {trial_num}: Three-planner overlay")
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
-    handles = [
-        Line2D(
-            [0],
-            [0],
-            color="tab:blue",
-            linewidth=2.2,
-            label=f"vanilla used (avg right dist={vanilla_metrics['right_wall_avg']:.3f})",
-        ),
-        Line2D(
-            [0],
-            [0],
-            color="tab:orange",
-            linewidth=2.2,
-            label=f"modified used (avg right dist={modified_metrics['right_wall_avg']:.3f})",
-        ),
-    ]
-    ax.legend(handles=handles, loc="upper right", fontsize=9)
+    ax.legend(handles=handles, loc="upper right", fontsize=8)
     fig.tight_layout()
     plt.show()
     plt.close(fig)
@@ -439,9 +500,7 @@ def plot_sample_paths(occ_grid, sample_pairs, plot_output=None, modified_title=N
         print("No sample paths available to plot.")
         return
 
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
-    if not isinstance(axes, np.ndarray):
-        axes = np.array([axes])
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
 
     cmap = plt.get_cmap("tab10", max(len(sample_pairs), 1))
     for j, solver in enumerate(SOLVER_MODES):
@@ -455,21 +514,16 @@ def plot_sample_paths(occ_grid, sample_pairs, plot_output=None, modified_title=N
             ax.scatter(sample["x_init"][0], sample["x_init"][1], c=[color], s=40, zorder=5, marker="o")
             ax.scatter(sample["x_goal"][0], sample["x_goal"][1], c=[color], marker="*", s=80, zorder=5)
 
-        if solver == "vanilla":
-            ax.set_title("A*", fontsize=16)
-        elif modified_title:
-            ax.set_title(modified_title, fontsize=16)
-        else:
-            ax.set_title("Social Planner", fontsize=16)
+        title = SOLVER_PLOT_TITLES[solver]
+        if solver == "modified" and modified_title:
+            title = modified_title
+        ax.set_title(title, fontsize=16)
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Y (m)")
 
-        # Legend: show that circle = start and star = goal
         handles = [
-            Line2D([0], [0], marker="o", color="k", markerfacecolor="green", markersize=6,
-                   label="start"),
-            Line2D([0], [0], marker="*", color="k", markerfacecolor="gold", markersize=10,
-                   label="goal"),
+            Line2D([0], [0], marker="o", color="k", markerfacecolor="green", markersize=6, label="start"),
+            Line2D([0], [0], marker="*", color="k", markerfacecolor="gold", markersize=10, label="goal"),
         ]
         ax.legend(handles=handles, loc="best", fontsize=12)
 
@@ -482,6 +536,32 @@ def plot_sample_paths(occ_grid, sample_pairs, plot_output=None, modified_title=N
         print(f"Saved sample path figure to: {plot_output}")
     else:
         plt.show()
+
+
+def _rrt_kwargs_from_config(
+    *,
+    rrt_max_iter,
+    rrt_step_size,
+    rrt_goal_sample_rate,
+    rrt_goal_tolerance,
+    rrt_rewire_radius,
+    resolution,
+):
+    kwargs = {
+        "max_iterations": rrt_max_iter,
+        "goal_sample_rate": rrt_goal_sample_rate,
+    }
+    if rrt_step_size is not None:
+        kwargs["step_size"] = rrt_step_size
+    if rrt_goal_tolerance is not None:
+        kwargs["goal_tolerance"] = rrt_goal_tolerance
+    if rrt_rewire_radius is not None:
+        kwargs["rewire_radius"] = rrt_rewire_radius
+    elif rrt_step_size is not None:
+        kwargs["rewire_radius"] = 2.0 * rrt_step_size
+    elif resolution is not None:
+        kwargs["rewire_radius"] = 2.0 * resolution
+    return kwargs
 
 
 def run_experiment(
@@ -499,6 +579,11 @@ def run_experiment(
     heatmap_file=None,
     sparse_graph_threshold=2.0,
     sparse_min_component_size=15,
+    rrt_max_iter=5000,
+    rrt_step_size=None,
+    rrt_goal_sample_rate=0.10,
+    rrt_goal_tolerance=None,
+    rrt_rewire_radius=None,
 ):
     rng = np.random.default_rng(seed)
     occ_grid, _, resolution, statespace_hi = build_occ_grid(scenario)
@@ -517,7 +602,15 @@ def run_experiment(
         )
 
     modified_plot_title = (
-        "Social (heatmap graph)" if social_graph is not None else "Social Planner"
+        "A* social (heatmap graph)" if social_graph is not None else SOLVER_PLOT_TITLES["modified"]
+    )
+    rrt_kwargs = _rrt_kwargs_from_config(
+        rrt_max_iter=rrt_max_iter,
+        rrt_step_size=rrt_step_size,
+        rrt_goal_sample_rate=rrt_goal_sample_rate,
+        rrt_goal_tolerance=rrt_goal_tolerance,
+        rrt_rewire_radius=rrt_rewire_radius,
+        resolution=resolution,
     )
 
     records = []
@@ -559,43 +652,48 @@ def run_experiment(
         if pair_key in seen_pairs:
             continue
 
-        vanilla_path, vanilla_time = run_solver(
-            "vanilla", occ_grid, statespace_hi, x_init, x_goal, resolution
-        )
-        modified_path, modified_time = run_solver(
-            "modified",
-            occ_grid,
-            statespace_hi,
-            x_init,
-            x_goal,
-            resolution,
-            social_graph=social_graph,
-        )
-        if vanilla_path is None or modified_path is None:
+        solver_results = {}
+        all_succeeded = True
+        for mode in SOLVER_MODES:
+            path, solve_time = run_solver(
+                mode,
+                occ_grid,
+                statespace_hi,
+                x_init,
+                x_goal,
+                resolution,
+                social_graph=social_graph,
+                rrt_kwargs=rrt_kwargs,
+            )
+            if path is None:
+                all_succeeded = False
+                break
+            solver_results[mode] = (path, solve_time)
+        if not all_succeeded:
             continue
 
         trial_num = len(records) + 1
-        vanilla_metrics, vanilla_analysis = compute_metrics(
-            vanilla_path, occ_grid, dist_thresh=wall_dist_thresh, return_analysis=True
-        )
-        modified_metrics, modified_analysis = compute_metrics(
-            modified_path, occ_grid, dist_thresh=wall_dist_thresh, return_analysis=True
-        )
-        records.append(
-            {
-                "trial": trial_num,
-                "x_init": [float(x_init[0]), float(x_init[1])],
-                "x_goal": [float(x_goal[0]), float(x_goal[1])],
-                "vanilla": {
-                    **vanilla_metrics,
-                    "solve_time_sec": float(vanilla_time),
-                },
-                "modified": {
-                    **modified_metrics,
-                    "solve_time_sec": float(modified_time),
-                },
+        metrics_by_solver = {}
+        analysis_by_solver = {}
+        for mode in SOLVER_MODES:
+            path, solve_time = solver_results[mode]
+            metrics, analysis = compute_metrics(
+                path, occ_grid, dist_thresh=wall_dist_thresh, return_analysis=True
+            )
+            metrics_by_solver[mode] = {
+                **metrics,
+                "solve_time_sec": float(solve_time),
             }
-        )
+            analysis_by_solver[mode] = analysis
+
+        record = {
+            "trial": trial_num,
+            "x_init": [float(x_init[0]), float(x_init[1])],
+            "x_goal": [float(x_goal[0]), float(x_goal[1])],
+        }
+        for mode in SOLVER_MODES:
+            record[mode] = metrics_by_solver[mode]
+        records.append(record)
         seen_pairs.add(pair_key)
         if debug_plot_each_run:
             plot_debug_pair(
@@ -603,23 +701,21 @@ def run_experiment(
                 trial_num=trial_num,
                 x_init=x_init,
                 x_goal=x_goal,
-                vanilla_path=vanilla_path,
-                modified_path=modified_path,
-                vanilla_metrics=vanilla_metrics,
-                modified_metrics=modified_metrics,
-                vanilla_used_mask=vanilla_analysis["used_segment_mask"],
-                modified_used_mask=modified_analysis["used_segment_mask"],
+                paths_by_solver={mode: solver_results[mode][0] for mode in SOLVER_MODES},
+                metrics_by_solver=metrics_by_solver,
+                used_masks_by_solver={
+                    mode: analysis_by_solver[mode]["used_segment_mask"] for mode in SOLVER_MODES
+                },
             )
         if len(sample_pairs) < plot_samples:
-            sample_pairs.append(
-                {
-                    "trial": trial_num,
-                    "x_init": [float(x_init[0]), float(x_init[1])],
-                    "x_goal": [float(x_goal[0]), float(x_goal[1])],
-                    "vanilla_path": vanilla_path,
-                    "modified_path": modified_path,
-                }
-            )
+            sample_entry = {
+                "trial": trial_num,
+                "x_init": [float(x_init[0]), float(x_init[1])],
+                "x_goal": [float(x_goal[0]), float(x_goal[1])],
+            }
+            for mode in SOLVER_MODES:
+                sample_entry[f"{mode}_path"] = solver_results[mode][0]
+            sample_pairs.append(sample_entry)
 
     summary = summarize_by_solver(records)
     print_summary(summary, attempts=prior_attempts + attempts, requested_routes=len(records))
@@ -637,9 +733,14 @@ def run_experiment(
             "max_attempts": max_attempts,
             "wall_dist_thresh": wall_dist_thresh,
             "wall_metric_exclusion_radius": RIGHT_WALL_EXCLUSION_RADIUS,
-            "failure_policy": "resample_until_both_succeed",
+            "failure_policy": FAILURE_POLICY,
             "path_metric_source": "raw_path",
             "resumed_from": resume_from,
+            "rrt_max_iter": rrt_max_iter,
+            "rrt_step_size": rrt_step_size,
+            "rrt_goal_sample_rate": rrt_goal_sample_rate,
+            "rrt_goal_tolerance": rrt_goal_tolerance,
+            "rrt_rewire_radius": rrt_rewire_radius,
             **modified_config,
         },
         "sampling_attempts": prior_attempts + attempts,
@@ -665,9 +766,9 @@ def run_experiment(
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Compare vanilla and modified A* on paired random start/goal routes. "
-            "By default modified uses rightness-penalty A*; pass --heatmap-prefix or "
-            "--heatmap-file to use AStar_With_Graph from a saved directional heatmap."
+            "Compare vanilla A*, social A*, and vanilla RRT* on paired random "
+            "start/goal routes. By default social A* uses rightness-penalty costs; pass "
+            "--heatmap-prefix or --heatmap-file to use graph-based social costs."
         )
     )
     parser.add_argument("--scenario", default="sample2_default", help="Grid scenario name from "
@@ -707,7 +808,7 @@ def parse_args():
         "--plot-samples",
         type=int,
         default=0,
-        help="Number of new sample route pairs to plot side-by-side (vanilla vs modified)",
+        help="Number of new sample route sets to plot in a 1x3 three-planner figure",
     )
     parser.add_argument(
         "--plot-output",
@@ -718,8 +819,14 @@ def parse_args():
     parser.add_argument(
         "--debug-plot-each-run",
         action="store_true",
-        help="Show an interactive per-trial overlay plot (vanilla + modified) for each successful pair",
+        help="Show an interactive per-trial overlay plot for all three planners",
     )
+    rrt_group = parser.add_argument_group("RRT* parameters")
+    rrt_group.add_argument("--rrt-max-iter", type=int, default=5000, help="Max RRT* iterations per solve")
+    rrt_group.add_argument("--rrt-step-size", type=float, default=None, help="RRT* steer step size (default: map resolution)")
+    rrt_group.add_argument("--rrt-goal-sample-rate", type=float, default=0.10, help="Probability of sampling the goal")
+    rrt_group.add_argument("--rrt-goal-tolerance", type=float, default=None, help="Goal connection tolerance (default: resolution)")
+    rrt_group.add_argument("--rrt-rewire-radius", type=float, default=None, help="RRT* rewiring radius (default: 2 * step size)")
     heatmap_group = parser.add_argument_group("heatmap graph (optional modified solver)")
     heatmap_group.add_argument(
         "--heatmap-prefix",
@@ -776,4 +883,9 @@ if __name__ == "__main__":
         heatmap_file=cli.heatmap_file,
         sparse_graph_threshold=cli.sparse_graph_threshold,
         sparse_min_component_size=cli.sparse_min_component_size,
+        rrt_max_iter=cli.rrt_max_iter,
+        rrt_step_size=cli.rrt_step_size,
+        rrt_goal_sample_rate=cli.rrt_goal_sample_rate,
+        rrt_goal_tolerance=cli.rrt_goal_tolerance,
+        rrt_rewire_radius=cli.rrt_rewire_radius,
     )

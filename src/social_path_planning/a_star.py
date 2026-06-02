@@ -10,6 +10,8 @@ import networkx as nx
 import numpy as np
 from scipy.interpolate import CubicSpline
 
+from social_path_planning.social_cost import rightness_penalty as compute_rightness_penalty
+
 if TYPE_CHECKING:
     from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 
@@ -220,62 +222,17 @@ class AStar(object):
         )
 
     def rightness_penalty(self, x1, x2, dist2right_prev=0):
-        """
-        Computes the heuristic distance between two states.
-        Inputs:
-            x1: First state tuple
-            x2: Second state tuple
-        Output:
-            Float: heuristic distance
-        """
-        if self.distance(x2, self.x_goal) < 2:
-            # Don't penalize when near goal, may need to take non-social behavior to be able to get to goal
-            return 0, 0
-        elif self.distance(x2, self.x_init) < 2:
-            # Don't penalize when near start, may need to take non-social behavior to be able to get to socially compliant path later
-            return 0, 0
-
-        penalty = 0
-
-        travel_dir = np.array(x2) - np.array(x1)
-        travel_dir /= np.linalg.norm(travel_dir)
-        dist_to_right = self.occupancy.dist_to_wall_right(x2, travel_dir)
-
-        if dist_to_right > 10:
-            penalty += self.resolution
-            # Get distance to left
-            dist_to_left = self.occupancy.dist_to_wall_left(x2, travel_dir)
-
-            if dist_to_left > 3:
-                dist_to_left_prev = self.occupancy.dist_to_wall_left(x1, travel_dir)
-                delta_dist_to_left = dist_to_left - dist_to_left_prev
-
-                # To account for when you just enter an intersection and the distance to left wall jumps up dramatically
-                if delta_dist_to_left < 0 or delta_dist_to_left > 10:
-                    delta_dist_to_left = 0
-                penalty += 5*delta_dist_to_left
-            else:
-                # If far from right side, we should just penalize being close to left side (and we also want to penalize
-                # moving closer to the left side)
-                penalty =  max(0, (4 - dist_to_left))
-        else:
-            dist_to_right_prev = dist2right_prev # self.occupancy.dist_to_wall_right(x1, travel_dir)
-            delta_raw = dist_to_right - dist_to_right_prev
-
-            desired_dist_right = self.robot_d / 2 + self.desired_dist_right_extra
-            # Penalize being both too far and too close to the desired standoff from the right wall
-            penalty = abs(dist_to_right - desired_dist_right)
-
-            # When too far from the right wall: penalize drifting even farther (same as before, with spike suppression)
-            delta_far = delta_raw
-            if delta_far > 15 or delta_far < 0:
-                delta_far = 0
-            if dist_to_right > desired_dist_right:
-                penalty += 2 * delta_far
-            # When too close: penalize moving still closer to the wall (negative delta along the ray)
-            elif dist_to_right < desired_dist_right and -15 < delta_raw < 0:
-                penalty += 2 * (-delta_raw)
-        return penalty, dist_to_right
+        return compute_rightness_penalty(
+            self.occupancy,
+            self.x_init,
+            self.x_goal,
+            x1,
+            x2,
+            dist2right_prev,
+            robot_d=self.robot_d,
+            desired_dist_right_extra=self.desired_dist_right_extra,
+            resolution=self.resolution,
+        )
 
     def leftness_penalty(self, x1, x2):
         travel_dir = (np.array(x2) - np.array(x1)) / np.linalg.norm(np.array(x2) - np.array(x1))
