@@ -79,23 +79,55 @@ class FrequentSubgraph:
             if len(component) < min_component_size:
                 self.graph.remove_nodes_from(component)
 
-    def visualize_graph(self, ax=None, show=True):
+    def visualize_graph(
+        self,
+        ax=None,
+        show=True,
+        title="Sparse Graph",
+        xlabel="X (m)",
+        ylabel="Y (m)",
+        title_fontsize=16,
+        label_fontsize=16,
+        tick_fontsize=36,
+        edge_color="red",
+        edge_linewidth=2,
+        edge_alpha=0.75,
+        figsize=(10, 10),
+        heatmap_layer=None,
+        min_visible_intensity=5.0,
+        heatmap_legend=False,
+    ):
         if ax is None:
-            _, ax = plt.subplots(figsize=(10, 10))
-        self.occ_grid.plot_grid(ax=ax)
+            _, ax = plt.subplots(figsize=figsize)
+        if heatmap_layer is not None:
+            heatmap_layer.plot_heatmap(
+                ax=ax,
+                show=False,
+                min_visible_intensity=min_visible_intensity,
+                add_legend=heatmap_legend,
+            )
+        else:
+            self.occ_grid.plot_grid(ax=ax)
         for edge in self.graph.edges():
             from_node = edge[0]
             to_node = edge[1]
-            ax.plot([from_node[0] * self.occ_grid.resolution + self.occ_grid.origin_x,
-                     to_node[0] * self.occ_grid.resolution + self.occ_grid.origin_x],
-                    [from_node[1] * self.occ_grid.resolution + self.occ_grid.origin_y,
-                     to_node[1] * self.occ_grid.resolution + self.occ_grid.origin_y],
-                    color='red', linewidth=2)
-        ax.set_title("Sparse Graph")
-        ax.set_xlabel("X (m)", fontsize=16)
-        ax.set_ylabel("Y (m)", fontsize=16)
-        # Set x and y tick size
-        ax.tick_params(axis='both', which='major', labelsize=16)
+            ax.plot(
+                [
+                    from_node[0] * self.occ_grid.resolution + self.occ_grid.origin_x,
+                    to_node[0] * self.occ_grid.resolution + self.occ_grid.origin_x,
+                ],
+                [
+                    from_node[1] * self.occ_grid.resolution + self.occ_grid.origin_y,
+                    to_node[1] * self.occ_grid.resolution + self.occ_grid.origin_y,
+                ],
+                color=edge_color,
+                linewidth=edge_linewidth,
+                alpha=edge_alpha,
+            )
+        ax.set_title(title, fontsize=title_fontsize)
+        ax.set_xlabel(xlabel, fontsize=label_fontsize)
+        ax.set_ylabel(ylabel, fontsize=label_fontsize)
+        ax.tick_params(axis="both", which="major", labelsize=tick_fontsize)
         if show:
             plt.show()
         return ax
@@ -129,6 +161,353 @@ def _deserialize_rng_state(serialized):
         int(serialized["has_gauss"]),
         float(serialized["cached_gaussian"]),
     )
+
+
+def _extract_snapshot_idx(path_obj):
+    basename = os.path.basename(str(path_obj))
+    match = re.search(r"graph_(\d+)\.pkl$", basename)
+    if not match:
+        return -1
+    return int(match.group(1))
+
+
+def _load_timeline_metadata(timeline_dir):
+    metadata_path = os.path.join(timeline_dir, METADATA_FILENAME)
+    if os.path.exists(metadata_path):
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def _discover_graph_snapshots(timeline_dir):
+    timeline_dir = os.path.abspath(timeline_dir)
+    metadata = _load_timeline_metadata(timeline_dir)
+
+    graph_paths = []
+    if isinstance(metadata.get("graph_snapshots"), list) and metadata["graph_snapshots"]:
+        for p in metadata["graph_snapshots"]:
+            pp = p if os.path.isabs(p) else os.path.join(timeline_dir, p)
+            if os.path.exists(pp):
+                graph_paths.append(os.path.abspath(pp))
+
+    if not graph_paths:
+        graph_paths = sorted(
+            glob.glob(os.path.join(timeline_dir, "graph_*.pkl")),
+            key=_extract_snapshot_idx,
+        )
+
+    if not graph_paths:
+        raise FileNotFoundError(f"No graph snapshots found in {timeline_dir}")
+
+    return graph_paths, metadata
+
+
+def _resolve_graph_snapshot_path(timeline_dir, snapshot_idx=None, graph_file=None):
+    if graph_file is not None:
+        graph_file = os.path.abspath(graph_file)
+        if not os.path.exists(graph_file):
+            raise FileNotFoundError(f"Graph file not found: {graph_file}")
+        return graph_file
+
+    if snapshot_idx is None:
+        raise ValueError("Either snapshot_idx or graph_file must be provided")
+
+    graph_paths, _metadata = _discover_graph_snapshots(timeline_dir)
+    target_name = f"graph_{snapshot_idx:04d}.pkl"
+    for path in graph_paths:
+        if os.path.basename(path) == target_name:
+            return path
+
+    fallback = os.path.join(os.path.abspath(timeline_dir), target_name)
+    if os.path.exists(fallback):
+        return os.path.abspath(fallback)
+
+    available = [os.path.basename(p) for p in graph_paths]
+    raise FileNotFoundError(
+        f"No graph snapshot {target_name} in {timeline_dir}. Available: {available}"
+    )
+
+
+def _load_heatmap_layer(occ_grid, heatmap_prefix=None, heatmap_path=None):
+    """Load a directional heatmap for optional underlay (prefix -> <prefix>_heatmap.npy)."""
+    if not heatmap_prefix and not heatmap_path:
+        return None
+
+    heatmap_layer = HeatMap2DVector(occ_grid)
+    if heatmap_path:
+        heatmap_path = os.path.abspath(heatmap_path)
+        if not os.path.exists(heatmap_path):
+            raise FileNotFoundError(f"Heatmap file not found: {heatmap_path}")
+        heatmap_layer.heatmap = np.load(heatmap_path)
+    else:
+        heatmap_layer.load_heatmap(heatmap_prefix)
+
+    expected = (heatmap_layer.height, heatmap_layer.width, 8)
+    if heatmap_layer.heatmap.shape != expected:
+        raise ValueError(
+            f"Heatmap shape mismatch. Expected {expected}, got {heatmap_layer.heatmap.shape}"
+        )
+    return heatmap_layer
+
+
+def plan_random_social_paths(
+    occ_grid,
+    statespace_hi,
+    map_resolution,
+    graph,
+    num_paths: int,
+    *,
+    seed: int = 0,
+    max_attempts: int = 200,
+):
+    """Plan up to ``num_paths`` random start/goal routes with ``AStar_With_Graph``."""
+    if num_paths <= 0:
+        return []
+
+    rng = np.random.default_rng(seed)
+    paths = []
+    attempts = 0
+    while len(paths) < num_paths and attempts < max_attempts:
+        attempts += 1
+        x_init = generate_random_free_point(occ_grid, rng)
+        x_goal = generate_random_free_point(occ_grid, rng)
+        if x_init == x_goal:
+            continue
+        problem = AStar_With_Graph(
+            [0, 0],
+            statespace_hi,
+            x_init,
+            x_goal,
+            occ_grid,
+            graph,
+            resolution=map_resolution,
+        )
+        if problem.solve(mode="modified") and problem.path and len(problem.path) >= 2:
+            paths.append(problem.path)
+
+    if len(paths) < num_paths:
+        print(
+            f"Warning: planned {len(paths)}/{num_paths} overlay paths "
+            f"after {attempts} attempts (max_attempts={max_attempts})"
+        )
+    else:
+        print(f"Planned {len(paths)} overlay path(s) in {attempts} attempt(s)")
+    return paths
+
+
+def _plot_paths_on_ax(ax, paths, *, linewidth=1.8, alpha=0.9):
+    cmap = plt.cm.tab10
+    for i, path in enumerate(paths):
+        xs, ys = zip(*path)
+        ax.plot(
+            xs,
+            ys,
+            color=cmap(i % 10),
+            linewidth=linewidth,
+            alpha=alpha,
+            linestyle="-",
+            zorder=6,
+        )
+
+
+def plot_graph_snapshot(
+    timeline_dir="outputs_timeline",
+    snapshot_idx=None,
+    graph_file=None,
+    scenario_name=None,
+    graph_threshold=1.0,
+    min_component_size=15,
+    title="Social Graph",
+    xlabel="X (m)",
+    ylabel="Y (m)",
+    title_fontsize=16,
+    label_fontsize=16,
+    tick_fontsize=30,
+    edge_color="red",
+    edge_linewidth=2,
+    edge_alpha=0.75,
+    figsize=(10, 10),
+    heatmap_prefix=None,
+    heatmap_path=None,
+    min_visible_intensity=5.0,
+    heatmap_legend=False,
+    save_fig=None,
+    show=True,
+    dpi=600,
+    num_overlay_paths=0,
+    overlay_seed=0,
+    max_overlay_attempts=200,
+    overlay_linewidth=1.8,
+    overlay_alpha=0.9,
+):
+    has_graph_source = snapshot_idx is not None or graph_file is not None
+    has_heatmap_source = bool(heatmap_prefix or heatmap_path)
+    if not has_graph_source and not has_heatmap_source:
+        raise ValueError(
+            "Provide a saved graph (--snapshot-idx or --graph-file) and/or a heatmap "
+            "(--heatmap-prefix or --heatmap-file to build the graph from the heatmap)."
+        )
+
+    timeline_dir = os.path.abspath(timeline_dir)
+    metadata = _load_timeline_metadata(timeline_dir)
+    if scenario_name is None:
+        scenario_name = metadata.get("scenario_name")
+    if not scenario_name:
+        raise ValueError(
+            "scenario_name is required when run_metadata.json is missing or has no scenario_name"
+        )
+
+    occ_grid, _, map_resolution, statespace_hi = build_occ_grid(scenario_name)
+    frequent_graph = FrequentSubgraph(occ_grid)
+    heatmap_layer = _load_heatmap_layer(
+        occ_grid, heatmap_prefix=heatmap_prefix, heatmap_path=heatmap_path
+    )
+
+    graph_path = None
+    built_from_heatmap = False
+    if has_graph_source:
+        graph_path = _resolve_graph_snapshot_path(
+            timeline_dir, snapshot_idx=snapshot_idx, graph_file=graph_file
+        )
+        with open(graph_path, "rb") as graph_fp:
+            frequent_graph.graph = pickle.load(graph_fp)
+    else:
+        frequent_graph.set_heat_map(heatmap_layer.heatmap)
+        frequent_graph.build_graph(threshold=graph_threshold, reset_graph=True)
+        frequent_graph.prune_graph(min_component_size=min_component_size)
+        built_from_heatmap = True
+
+    ax = frequent_graph.visualize_graph(
+        show=False,
+        title=title,
+        xlabel=xlabel,
+        ylabel=ylabel,
+        title_fontsize=title_fontsize,
+        label_fontsize=label_fontsize,
+        tick_fontsize=tick_fontsize,
+        edge_color=edge_color,
+        edge_linewidth=edge_linewidth,
+        edge_alpha=edge_alpha,
+        figsize=figsize,
+        heatmap_layer=heatmap_layer,
+        min_visible_intensity=min_visible_intensity,
+        heatmap_legend=heatmap_legend,
+    )
+
+    overlay_paths = []
+    if num_overlay_paths > 0:
+        overlay_paths = plan_random_social_paths(
+            occ_grid,
+            statespace_hi,
+            map_resolution,
+            frequent_graph.graph,
+            num_overlay_paths,
+            seed=overlay_seed,
+            max_attempts=max_overlay_attempts,
+        )
+        if overlay_paths:
+            _plot_paths_on_ax(
+                ax,
+                overlay_paths,
+                linewidth=overlay_linewidth,
+                alpha=overlay_alpha,
+            )
+
+    ax.set_axis_off()
+    fig = ax.figure
+    fig.tight_layout()
+
+    if save_fig:
+        save_parent = os.path.dirname(os.path.abspath(save_fig))
+        if save_parent:
+            os.makedirs(save_parent, exist_ok=True)
+        fig.savefig(save_fig, dpi=dpi, bbox_inches="tight")
+        print(f"Saved figure: {save_fig}")
+
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    graph = frequent_graph.graph
+    return {
+        "graph_path": graph_path,
+        "built_from_heatmap": built_from_heatmap,
+        "scenario_name": scenario_name,
+        "nodes": graph.number_of_nodes(),
+        "edges": graph.number_of_edges(),
+        "save_fig": save_fig,
+        "overlay_paths": len(overlay_paths),
+    }
+
+
+def plot_all_graph_snapshots(
+    timeline_dir="outputs_timeline",
+    scenario_name=None,
+    title="Social Graph",
+    xlabel="X (m)",
+    ylabel="Y (m)",
+    title_fontsize=16,
+    label_fontsize=16,
+    tick_fontsize=16,
+    edge_color="red",
+    edge_linewidth=2,
+    edge_alpha=0.75,
+    figsize=(10, 10),
+    heatmap_prefix=None,
+    heatmap_path=None,
+    min_visible_intensity=5.0,
+    heatmap_legend=False,
+    save_dir=None,
+    dpi=300,
+    num_overlay_paths=0,
+    overlay_seed=0,
+    max_overlay_attempts=200,
+    overlay_linewidth=1.8,
+    overlay_alpha=0.9,
+):
+    timeline_dir = os.path.abspath(timeline_dir)
+    if save_dir is None:
+        save_dir = os.path.join(timeline_dir, "social_graph_replots")
+    save_dir = os.path.abspath(save_dir)
+    os.makedirs(save_dir, exist_ok=True)
+
+    graph_paths, _metadata = _discover_graph_snapshots(timeline_dir)
+    results = []
+    for graph_path in graph_paths:
+        snapshot_idx = _extract_snapshot_idx(graph_path)
+        save_fig = os.path.join(save_dir, f"social_graph_{snapshot_idx:04d}.png")
+        result = plot_graph_snapshot(
+            timeline_dir=timeline_dir,
+            graph_file=graph_path,
+            scenario_name=scenario_name,
+            title=title,
+            xlabel=xlabel,
+            ylabel=ylabel,
+            title_fontsize=title_fontsize,
+            label_fontsize=label_fontsize,
+            tick_fontsize=tick_fontsize,
+            edge_color=edge_color,
+            edge_linewidth=edge_linewidth,
+            edge_alpha=edge_alpha,
+            figsize=figsize,
+            heatmap_prefix=heatmap_prefix,
+            heatmap_path=heatmap_path,
+            min_visible_intensity=min_visible_intensity,
+            heatmap_legend=heatmap_legend,
+            save_fig=save_fig,
+            show=False,
+            dpi=dpi,
+            num_overlay_paths=num_overlay_paths,
+            overlay_seed=overlay_seed,
+            max_overlay_attempts=max_overlay_attempts,
+            overlay_linewidth=overlay_linewidth,
+            overlay_alpha=overlay_alpha,
+        )
+        results.append(result)
+    print(f"Replotted {len(results)} snapshots to {save_dir}")
+    return results
+
 
 def save_side_by_side_timeline(
     scenario_name: str = "sample2_default",
@@ -270,14 +649,20 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--mode",
-        choices=["demo", "timeline"],
+        choices=["demo", "timeline", "plot-snapshot"],
         default="timeline",
-        help="Run mode: 'timeline' saves progressive heatmap+graph snapshots, 'demo' runs a one-off graph planning demo.",
+        help=(
+            "Run mode: 'timeline' saves progressive heatmap+graph snapshots; "
+            "'plot-snapshot' replots a saved graph_*.pkl; 'demo' runs a one-off graph planning demo."
+        ),
     )
     parser.add_argument(
         "--scenario-name",
-        default="sample2_default",
-        help="Scenario key from grid_scenarios.json used to build the occupancy map.",
+        default=None,
+        help=(
+            "Scenario key from grid_scenarios.json. "
+            "Defaults to sample2_default for timeline/demo; for plot-snapshot, uses run_metadata.json when omitted."
+        ),
     )
     parser.add_argument(
         "--num-paths",
@@ -319,11 +704,210 @@ if __name__ == "__main__":
         action="store_true",
         help="Resume timeline from heatmap checkpoint and metadata in --output-dir instead of starting from scratch.",
     )
+    plot_group = parser.add_argument_group("plot-snapshot mode")
+    plot_group.add_argument(
+        "--snapshot-idx",
+        type=int,
+        default=None,
+        help=(
+            "Snapshot index for graph_XXXX.pkl in --output-dir (plot-snapshot mode). "
+            "Not needed if you only pass --heatmap-prefix/--heatmap-file (graph is built from heatmap)."
+        ),
+    )
+    plot_group.add_argument(
+        "--graph-file",
+        default=None,
+        help="Direct path to a graph pickle (plot-snapshot mode; overrides --snapshot-idx).",
+    )
+    plot_group.add_argument(
+        "--save-fig",
+        default=None,
+        help="Output PNG path for plot-snapshot mode.",
+    )
+    plot_group.add_argument(
+        "--save-dir",
+        default=None,
+        help="Output directory when --all-snapshots is set (default: <output-dir>/social_graph_replots).",
+    )
+    plot_group.add_argument(
+        "--all-snapshots",
+        action="store_true",
+        help="Replot every graph_*.pkl in --output-dir with the same style (plot-snapshot mode).",
+    )
+    plot_group.add_argument(
+        "--no-show",
+        action="store_true",
+        help="Do not open a matplotlib window (plot-snapshot mode).",
+    )
+    plot_group.add_argument(
+        "--title",
+        default="Social Graph",
+        help="Figure title (plot-snapshot mode).",
+    )
+    plot_group.add_argument(
+        "--xlabel",
+        default="",
+        help="X-axis label (plot-snapshot mode).",
+    )
+    plot_group.add_argument(
+        "--ylabel",
+        default="",
+        help="Y-axis label (plot-snapshot mode).",
+    )
+    plot_group.add_argument(
+        "--title-fontsize",
+        type=float,
+        default=45,
+        help="Title font size (plot-snapshot mode).",
+    )
+    plot_group.add_argument(
+        "--label-fontsize",
+        type=float,
+        default=16,
+        help="Axis label font size (plot-snapshot mode).",
+    )
+    plot_group.add_argument(
+        "--tick-fontsize",
+        type=float,
+        default=30,
+        help="Tick label font size (plot-snapshot mode).",
+    )
+    plot_group.add_argument(
+        "--edge-linewidth",
+        type=float,
+        default=3,
+        help="Graph edge line width (plot-snapshot mode).",
+    )
+    plot_group.add_argument(
+        "--edge-alpha",
+        "--transparency",
+        type=float,
+        default=1.0,
+        dest="edge_alpha",
+        metavar="ALPHA",
+        help="Graph edge transparency in [0, 1] (plot-snapshot mode).",
+    )
+    plot_group.add_argument(
+        "--heatmap-prefix",
+        default=None,
+        help=(
+            "Optional heatmap prefix P; loads P_heatmap.npy under the occupancy grid "
+            "(e.g. y2e2_routes for y2e2_routes_heatmap.npy)."
+        ),
+    )
+    plot_group.add_argument(
+        "--heatmap-file",
+        default=None,
+        help="Optional path to a directional heatmap .npy (overrides --heatmap-prefix).",
+    )
+    plot_group.add_argument(
+        "--min-heatmap-intensity",
+        type=float,
+        default=5.0,
+        help="Minimum heat count shown when a heatmap underlay is used.",
+    )
+    plot_group.add_argument(
+        "--heatmap-legend",
+        action="store_true",
+        help="Show direction hue legend when a heatmap underlay is used.",
+    )
+    plot_group.add_argument(
+        "--figsize",
+        type=float,
+        nargs=2,
+        default=[10, 10],
+        metavar=("W", "H"),
+        help="Figure size in inches (plot-snapshot mode).",
+    )
+    plot_group.add_argument(
+        "--plot-dpi",
+        type=int,
+        default=600,
+        help="DPI for saved figures (plot-snapshot mode).",
+    )
+    plot_group.add_argument(
+        "--num-overlay-paths",
+        type=int,
+        default=0,
+        help="Number of random social A* paths to overlay on the graph plot (0 = none).",
+    )
+    plot_group.add_argument(
+        "--overlay-seed",
+        type=int,
+        default=0,
+        help="RNG seed for sampling random overlay start/goal pairs.",
+    )
+    plot_group.add_argument(
+        "--max-overlay-attempts",
+        type=int,
+        default=200,
+        help="Max random start/goal tries when planning overlay paths.",
+    )
+    plot_group.add_argument(
+        "--overlay-linewidth",
+        type=float,
+        default=1.8,
+        help="Line width for overlay paths.",
+    )
+    plot_group.add_argument(
+        "--overlay-alpha",
+        type=float,
+        default=0.9,
+        help="Line alpha for overlay paths.",
+    )
     args = parser.parse_args()
 
-    if args.mode == "timeline":
+    if args.mode == "plot-snapshot":
+        style_kwargs = {
+            "timeline_dir": args.output_dir,
+            "scenario_name": args.scenario_name,
+            "title": args.title,
+            "xlabel": args.xlabel,
+            "ylabel": args.ylabel,
+            "title_fontsize": args.title_fontsize,
+            "label_fontsize": args.label_fontsize,
+            "tick_fontsize": args.tick_fontsize,
+            "edge_linewidth": args.edge_linewidth,
+            "edge_alpha": args.edge_alpha,
+            "heatmap_prefix": args.heatmap_prefix,
+            "heatmap_path": args.heatmap_file,
+            "min_visible_intensity": args.min_heatmap_intensity,
+            "heatmap_legend": args.heatmap_legend,
+            "graph_threshold": args.graph_threshold,
+            "min_component_size": args.min_component_size,
+            "figsize": tuple(args.figsize),
+            "dpi": args.plot_dpi,
+            "num_overlay_paths": args.num_overlay_paths,
+            "overlay_seed": args.overlay_seed,
+            "max_overlay_attempts": args.max_overlay_attempts,
+            "overlay_linewidth": args.overlay_linewidth,
+            "overlay_alpha": args.overlay_alpha,
+        }
+        if args.all_snapshots:
+            results = plot_all_graph_snapshots(
+                save_dir=args.save_dir,
+                **style_kwargs,
+            )
+            print("Plot-snapshot batch completed:", len(results), "figures")
+        else:
+            has_graph = args.snapshot_idx is not None or args.graph_file is not None
+            has_heatmap = bool(args.heatmap_prefix or args.heatmap_file)
+            if not has_graph and not has_heatmap:
+                parser.error(
+                    "plot-snapshot mode requires --snapshot-idx, --graph-file, "
+                    "--heatmap-prefix/--heatmap-file, or --all-snapshots"
+                )
+            result = plot_graph_snapshot(
+                snapshot_idx=args.snapshot_idx,
+                graph_file=args.graph_file,
+                save_fig=args.save_fig,
+                show=not args.no_show,
+                **style_kwargs,
+            )
+            print("Plot-snapshot completed:", result)
+    elif args.mode == "timeline":
         result = save_side_by_side_timeline(
-            scenario_name=args.scenario_name,
+            scenario_name=args.scenario_name or "sample2_default",
             num_paths=args.num_paths,
             batch_k=args.batch_k,
             graph_threshold=args.graph_threshold,
@@ -334,7 +918,7 @@ if __name__ == "__main__":
         )
         print("Timeline export completed:", result)
     else:
-        scenario_name = args.scenario_name
+        scenario_name = args.scenario_name or "sample2_default"
         occ_grid, map_size, map_resolution, statespace_hi = build_occ_grid(scenario_name)
 
         frequent_graph = FrequentSubgraph(occ_grid, "y2e2_routes")
