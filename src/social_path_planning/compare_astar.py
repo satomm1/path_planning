@@ -12,6 +12,7 @@ from matplotlib.lines import Line2D
 
 from social_path_planning.a_star import AStar, AStar_With_Graph
 from social_path_planning.grid_loader import load_grid_scenario
+from social_path_planning.mapf_comparison.grid_traversability import ROBOT_DIAMETER_M
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 from social_path_planning.rrt_star import RRTStar
 from social_path_planning.utils import snap_to_grid
@@ -49,6 +50,7 @@ def build_occ_grid(scenario_name):
         0,
         10,
         occ.T,
+        robot_d=ROBOT_DIAMETER_M,
         wall_distance_cache_path=cache_path if cache_path.is_file() else None,
         auto_build_wall_distance_cache=True,
     )

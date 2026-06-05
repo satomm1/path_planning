@@ -11,9 +11,11 @@ from social_path_planning.a_star import AStar
 from social_path_planning.grid_loader import load_grid_scenario
 from social_path_planning.utils import *
 
+from social_path_planning.mapf_comparison.motion import DEFAULT_MAX_VELOCITY_MPS
+
 NOMINAL_VELOCITY = 0.35  # m/s
 TIME_STEP = 5  # seconds
-MAX_VELOCITY = 0.7 # m/s
+MAX_VELOCITY = DEFAULT_MAX_VELOCITY_MPS
 ROBOT_DIAMETER = 0.5  # meters
 M = 1e6  # Big-M constant for constraints
 DELTA = 1  # Safety margin in seconds

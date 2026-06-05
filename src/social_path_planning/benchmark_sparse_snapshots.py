@@ -11,6 +11,7 @@ import numpy as np
 
 from social_path_planning.a_star import AStar, AStar_With_Graph
 from social_path_planning.grid_loader import load_grid_scenario
+from social_path_planning.mapf_comparison.grid_traversability import ROBOT_DIAMETER_M
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 from social_path_planning.utils import snap_to_grid
 
@@ -26,6 +27,7 @@ def build_occ_grid(scenario_name):
         0,
         10,
         occ.T,
+        robot_d=ROBOT_DIAMETER_M,
     )
     statespace_hi = snap_to_grid(map_size, map_resolution)
     return occ_grid, map_size, map_resolution, statespace_hi
@@ -122,17 +124,215 @@ def _path_from_serializable(path_data):
     return [tuple(float(v) for v in point) for point in path_data]
 
 
-def _save_path_bank(path_bank_path, scenario_name, benchmark_seed, num_robots, attempts, routes):
+def _save_path_bank(
+    path_bank_path,
+    scenario_name,
+    benchmark_seed,
+    num_robots,
+    attempts,
+    routes,
+    astar_mode="vanilla",
+):
     payload = {
         "scenario_name": scenario_name,
         "benchmark_seed": int(benchmark_seed),
         "num_robots": int(num_robots),
         "sampling_attempts": int(attempts),
+        "astar_mode": str(astar_mode),
         "routes": routes,
     }
     path_bank_path.parent.mkdir(parents=True, exist_ok=True)
     with path_bank_path.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+
+
+def enrich_routes_with_astar_paths(
+    occ_grid,
+    statespace_hi,
+    map_resolution,
+    routes,
+    mode="modified",
+    social_graph=None,
+):
+    """
+    Re-plan each route's geometry with A* (vanilla or modified/social) at fixed start/goal.
+    """
+    from social_path_planning.compare_astar import run_solver
+
+    enriched = []
+    for route in routes:
+        path, _solve_time = run_solver(
+            mode,
+            occ_grid,
+            statespace_hi,
+            route["x_init"],
+            route["x_goal"],
+            map_resolution,
+            social_graph=social_graph,
+        )
+        if path is None or len(path) < 2:
+            raise RuntimeError(
+                f"A* mode={mode!r} failed for route {route.get('route_id')}: "
+                f"{route['x_init']} -> {route['x_goal']}"
+            )
+        enriched.append(
+            {
+                **route,
+                "path": [(float(p[0]), float(p[1])) for p in path],
+                "astar_mode": mode,
+            }
+        )
+    return enriched
+
+
+def astar_path_cache_meta(
+    mode: str,
+    social_graph=None,
+    *,
+    heatmap_prefix=None,
+    heatmap_file=None,
+):
+    """Metadata describing how cached ``paths_by_mode`` polylines were produced."""
+    if mode == "vanilla":
+        return {"mode": "vanilla", "solver": "vanilla"}
+    if social_graph is not None:
+        return {
+            "mode": mode,
+            "solver": "heatmap_graph",
+            "heatmap_prefix": heatmap_prefix,
+            "heatmap_file": str(heatmap_file) if heatmap_file is not None else None,
+        }
+    return {"mode": mode, "solver": "rightness_penalty"}
+
+
+def _route_endpoints_match(route_a, route_b) -> bool:
+    a_init = tuple(float(v) for v in route_a["x_init"])
+    a_goal = tuple(float(v) for v in route_a["x_goal"])
+    b_init = tuple(float(v) for v in route_b["x_init"])
+    b_goal = tuple(float(v) for v in route_b["x_goal"])
+    return a_init == b_init and a_goal == b_goal
+
+
+def _try_load_cached_astar_paths(routes, path_bank_path, mode, cache_meta):
+    """
+    Return routes with ``path`` taken from ``paths_by_mode[mode]`` when the bank
+    matches ``cache_meta`` and endpoints agree; otherwise return None.
+    """
+    path_bank_path = Path(path_bank_path)
+    if not path_bank_path.exists():
+        return None
+
+    with path_bank_path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    stored_meta = (payload.get("paths_by_mode_meta") or {}).get(mode)
+    if stored_meta != cache_meta:
+        return None
+
+    bank_routes = payload.get("routes") or []
+    bank_by_id = {int(r["route_id"]): r for r in bank_routes}
+
+    loaded = []
+    for route in routes:
+        bank_route = bank_by_id.get(int(route["route_id"]))
+        if bank_route is None or not _route_endpoints_match(route, bank_route):
+            return None
+        mode_paths = bank_route.get("paths_by_mode") or {}
+        if mode not in mode_paths:
+            return None
+        path = _path_from_serializable(mode_paths[mode])
+        if len(path) < 2:
+            return None
+        loaded.append(
+            {
+                **route,
+                "path": path,
+                "astar_mode": mode,
+            }
+        )
+    return loaded
+
+
+def merge_astar_paths_into_path_bank(path_bank_path, routes, mode, cache_meta):
+    """Persist per-mode polylines into an existing path-bank JSON file."""
+    path_bank_path = Path(path_bank_path)
+    if not path_bank_path.exists():
+        raise FileNotFoundError(f"Path bank not found for merge: {path_bank_path}")
+
+    with path_bank_path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    bank_routes = payload.get("routes") or []
+    bank_by_id = {int(r["route_id"]): r for r in bank_routes}
+
+    for route in routes:
+        route_id = int(route["route_id"])
+        bank_route = bank_by_id.get(route_id)
+        if bank_route is None:
+            raise ValueError(f"Route id {route_id} missing from path bank {path_bank_path}")
+        if not _route_endpoints_match(route, bank_route):
+            raise ValueError(
+                f"Route {route_id} endpoints differ between run and path bank {path_bank_path}"
+            )
+        mode_paths = bank_route.setdefault("paths_by_mode", {})
+        mode_paths[mode] = _path_to_serializable(route["path"])
+
+    meta = payload.setdefault("paths_by_mode_meta", {})
+    meta[mode] = cache_meta
+
+    with path_bank_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def get_or_compute_astar_paths(
+    occ_grid,
+    statespace_hi,
+    map_resolution,
+    routes,
+    mode,
+    path_bank_path,
+    *,
+    social_graph=None,
+    heatmap_prefix=None,
+    heatmap_file=None,
+    refresh=False,
+):
+    """
+    Use path-bank polylines for ``vanilla``; load or compute other modes and cache them
+    in ``paths_by_mode`` on the same JSON file as the vanilla bank.
+    """
+    if mode == "vanilla":
+        return routes
+
+    path_bank_path = Path(path_bank_path)
+    cache_meta = astar_path_cache_meta(
+        mode,
+        social_graph,
+        heatmap_prefix=heatmap_prefix,
+        heatmap_file=heatmap_file,
+    )
+
+    if not refresh:
+        cached = _try_load_cached_astar_paths(routes, path_bank_path, mode, cache_meta)
+        if cached is not None:
+            print(
+                f"Using cached A* mode={mode!r} paths from {path_bank_path.resolve()} "
+                f"({cache_meta.get('solver', mode)})"
+            )
+            return cached
+
+    print(f"Planning A* mode={mode!r} (will cache in path bank)...")
+    computed = enrich_routes_with_astar_paths(
+        occ_grid,
+        statespace_hi,
+        map_resolution,
+        routes,
+        mode=mode,
+        social_graph=social_graph,
+    )
+    merge_astar_paths_into_path_bank(path_bank_path, computed, mode, cache_meta)
+    print(f"Cached {mode!r} paths in {path_bank_path.resolve()}")
+    return computed
 
 
 def load_or_generate_path_bank(
@@ -144,6 +344,7 @@ def load_or_generate_path_bank(
     benchmark_seed,
     max_attempts,
     path_bank_path,
+    astar_mode="vanilla",
 ):
     path_bank_path = Path(path_bank_path)
     if path_bank_path.exists():
@@ -185,7 +386,7 @@ def load_or_generate_path_bank(
             continue
 
         planner = AStar([0, 0], statespace_hi, x_init, x_goal, occ_grid, resolution=map_resolution)
-        solved = planner.solve(mode="vanilla")
+        solved = planner.solve(mode=astar_mode)
         if not solved or planner.path is None or len(planner.path) < 2:
             continue
 
@@ -199,7 +400,9 @@ def load_or_generate_path_bank(
             }
         )
 
-    _save_path_bank(path_bank_path, scenario_name, benchmark_seed, num_robots, attempts, routes)
+    _save_path_bank(
+        path_bank_path, scenario_name, benchmark_seed, num_robots, attempts, routes, astar_mode=astar_mode
+    )
     parsed = [
         {
             "route_id": int(route["route_id"]),

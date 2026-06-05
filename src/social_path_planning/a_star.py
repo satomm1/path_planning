@@ -256,21 +256,28 @@ class AStar(object):
         Gets the FREE neighbor states of a given state x. Assumes a motion model
         where we can move up, down, left, right, or along the diagonals by an
         amount equal to self.resolution.
-        Input:
-            x: tuple state
-        Ouput:
-            List of neighbors that are free, as a list of TUPLES
+
+        Neighbor states stay on the snapped grid (same lattice as start/goal). Passability
+        is checked at the fine cell center (aligned with MAPF ``fine_center`` policy).
         """
+        from social_path_planning.mapf_comparison.grid_traversability import (
+            fine_cell_center_world,
+        )
+
         neighbors = []
+        occ = self.occupancy
         for ii in [1, 0, -1]:
             for jj in [1, 0, -1]:
                 if ii != 0 or jj != 0:
-                    x0 = x[0]
-                    x1 = x[1]
-                    x0 += ii * self.resolution   # /(np.linalg.norm(np.array((ii, jj))))
-                    x1 += jj * self.resolution   # /(np.linalg.norm(np.array((ii, jj))))
+                    x0 = x[0] + ii * self.resolution
+                    x1 = x[1] + jj * self.resolution
                     state = self.snap_to_grid((x0, x1))
-                    if self.is_free(state):
+                    col, row = self.get_index((x0, x1))
+                    col, row = int(col), int(row)
+                    if col < 0 or row < 0 or col >= occ.width or row >= occ.height:
+                        continue
+                    center = fine_cell_center_world(occ, col, row)
+                    if self.is_free(center):
                         neighbors.append(state)
         return neighbors
 
@@ -329,7 +336,7 @@ class AStar(object):
                 print(f"Social A* found a path in {elapsed:.2f} seconds.")
                 return self._emit_solve_return(True, elapsed, "modified", return_timing, return_telemetry, log_telemetry)
 
-            if time.time() - t_start > 120:
+            if time.time() - t_start > 240:
                 elapsed = time.time() - t_start
                 self.last_solve_time = elapsed
                 print("A* took too long.")
