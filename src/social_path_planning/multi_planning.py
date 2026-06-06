@@ -195,6 +195,23 @@ def merge_collision_reports(paths, reports, threshold=0.5):
         )
     return collision_pairs, z_index
 
+def subsample_path_by_stride(path, stride):
+    """Return path vertices at indices 0, stride, 2*stride, ... always including the last point.
+
+    ``stride`` must be >= 1. ``stride=1`` returns the input unchanged (shallow copy of list).
+    """
+    if path is None:
+        return []
+    stride = int(stride)
+    if stride < 1:
+        raise ValueError(f"stride must be >= 1, got {stride}")
+    if len(path) <= 1 or stride == 1:
+        return list(path)
+    indices = list(range(0, len(path), stride))
+    if indices[-1] != len(path) - 1:
+        indices.append(len(path) - 1)
+    return [path[i] for i in indices]
+
 
 class MultiAgentPlanner:
 
