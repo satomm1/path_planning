@@ -639,11 +639,21 @@ def run_experiment(
     attempts = 0
     target_total_routes = len(records) + num_routes
     sample_pairs = []
+    print(
+        f"Collecting paired routes: {len(records)}/{target_total_routes} "
+        f"(need {num_routes} new; max_attempts={max_attempts})"
+    )
     while len(records) < target_total_routes:
         attempts += 1
         if attempts > max_attempts:
             raise RuntimeError(
                 f"Reached max attempts ({max_attempts}) before collecting {num_routes} new paired successful routes."
+            )
+
+        if attempts % 20 == 0:
+            print(
+                f"[progress] attempts={attempts}, "
+                f"collected={len(records)}/{target_total_routes} paired routes"
             )
 
         x_init = generate_random_free_point(occ_grid, rng)
@@ -667,10 +677,21 @@ def run_experiment(
                 social_graph=social_graph,
                 rrt_kwargs=rrt_kwargs,
             )
+            if mode == "rrt_vanilla":
+                if path is None:
+                    print(
+                        f"  RRT*: no path ({solve_time:.2f}s) "
+                        f"init={x_init} goal={x_goal}"
+                    )
+                else:
+                    print(
+                        f"  RRT*: found path ({solve_time:.2f}s, "
+                        f"{len(path)} waypoints) init={x_init} goal={x_goal}"
+                    )
             if path is None:
                 all_succeeded = False
-                break
-            solver_results[mode] = (path, solve_time)
+            else:
+                solver_results[mode] = (path, solve_time)
         if not all_succeeded:
             continue
 
@@ -697,6 +718,11 @@ def run_experiment(
             record[mode] = metrics_by_solver[mode]
         records.append(record)
         seen_pairs.add(pair_key)
+        if len(records) % 20 == 0:
+            print(
+                f"[progress] collected {len(records)}/{target_total_routes} "
+                f"paired routes (attempts={attempts})"
+            )
         if debug_plot_each_run:
             plot_debug_pair(
                 occ_grid=occ_grid,
@@ -824,8 +850,10 @@ def parse_args():
         help="Show an interactive per-trial overlay plot for all three planners",
     )
     rrt_group = parser.add_argument_group("RRT* parameters")
-    rrt_group.add_argument("--rrt-max-iter", type=int, default=5000, help="Max RRT* iterations per solve")
-    rrt_group.add_argument("--rrt-step-size", type=float, default=None, help="RRT* steer step size (default: map resolution)")
+    rrt_group.add_argument("--rrt-max-iter", type=int, default=10000, help="Max RRT* iterations "
+                                                                           "per solve")
+    rrt_group.add_argument("--rrt-step-size", type=float, default=1, help="RRT* steer step size ("
+                                                                          "default: map resolution)")
     rrt_group.add_argument("--rrt-goal-sample-rate", type=float, default=0.10, help="Probability of sampling the goal")
     rrt_group.add_argument("--rrt-goal-tolerance", type=float, default=None, help="Goal connection tolerance (default: resolution)")
     rrt_group.add_argument("--rrt-rewire-radius", type=float, default=None, help="RRT* rewiring radius (default: 2 * step size)")
