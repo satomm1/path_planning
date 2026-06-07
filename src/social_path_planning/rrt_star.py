@@ -66,6 +66,8 @@ class RRTStar:
 
         self.path = None
         self.last_solve_time = None
+        self.last_tree = None
+        self.last_solve_stats = None
 
     def is_free(self, x):
         x = (float(x[0]), float(x[1]))
@@ -223,6 +225,14 @@ class RRTStar:
         if not self.is_free(self.x_init) or not self.is_free(self.x_goal):
             self.path = None
             self.last_solve_time = 0.0
+            self.last_tree = []
+            self.last_solve_stats = {
+                "success": False,
+                "reason": "start_or_goal_occupied",
+                "tree_nodes": 0,
+                "min_goal_dist": float("inf"),
+                "nearest_goal_node": None,
+            }
             return (False, 0.0) if return_timing else False
 
         rng = np.random.default_rng() if rng is None else rng
@@ -231,9 +241,13 @@ class RRTStar:
 
         tree = [_RRTNode(x=self.x_init, parent=None, cost=0.0, dist_to_right=0.0)]
         goal_idx = None
+        iterations_run = 0
+        stop_reason = "max_iterations"
 
         for _ in range(self.max_iterations):
+            iterations_run += 1
             if time.time() - t_start > timeout:
+                stop_reason = "timeout"
                 break
 
             sample = self._sample_free(rng)
@@ -272,12 +286,57 @@ class RRTStar:
 
         elapsed = time.time() - t_start
         self.last_solve_time = elapsed
+        self.last_tree = list(tree)
+
+        positions = np.array([node.x for node in tree], dtype=float)
+        if len(positions) == 0:
+            min_goal_dist = float("inf")
+            nearest_idx = None
+        else:
+            dists = np.linalg.norm(positions - np.array(self.x_goal, dtype=float), axis=1)
+            nearest_idx = int(np.argmin(dists))
+            min_goal_dist = float(dists[nearest_idx])
+
         if goal_idx is None:
             self.path = None
+            self.last_solve_stats = {
+                "success": False,
+                "reason": stop_reason,
+                "tree_nodes": len(tree),
+                "iterations_run": iterations_run,
+                "min_goal_dist": min_goal_dist,
+                "goal_tolerance": float(self.goal_tolerance),
+                "nearest_goal_node": None if nearest_idx is None else tuple(tree[nearest_idx].x),
+                "nearest_segment_free": None,
+            }
+            if nearest_idx is not None:
+                nearest_xy = tree[nearest_idx].x
+                self.last_solve_stats["nearest_segment_free"] = bool(
+                    self.is_segment_free(nearest_xy, self.x_goal)
+                )
             return (False, elapsed) if return_timing else False
 
         self.path = self._shortcut_path(self._extract_path(tree, goal_idx))
+        self.last_solve_stats = {
+            "success": True,
+            "reason": "ok",
+            "tree_nodes": len(tree),
+            "iterations_run": iterations_run,
+            "min_goal_dist": min_goal_dist,
+            "goal_tolerance": float(self.goal_tolerance),
+            "nearest_goal_node": tuple(tree[nearest_idx].x) if nearest_idx is not None else None,
+        }
         return (True, elapsed) if return_timing else True
+
+    def iter_tree_edges(self):
+        """Yield (parent_xy, child_xy) for each edge in ``last_tree``."""
+        if not self.last_tree:
+            return
+        for idx, node in enumerate(self.last_tree):
+            if node.parent is None:
+                continue
+            parent = self.last_tree[node.parent]
+            yield parent.x, node.x
 
 
 class RRTStar_With_Graph(RRTStar):

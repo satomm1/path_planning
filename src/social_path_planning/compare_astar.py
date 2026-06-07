@@ -20,6 +20,14 @@ from social_path_planning.utils import snap_to_grid
 
 SOLVER_MODES = ("vanilla", "modified", "rrt_vanilla")
 FAILURE_POLICY = "resample_until_all_succeed"
+SOLVER_MODE_ALIASES = {
+    "rrt": "rrt_vanilla",
+    "rrt*": "rrt_vanilla",
+    "rrt_star": "rrt_vanilla",
+    "social": "modified",
+    "astar": "vanilla",
+    "a*": "vanilla",
+}
 SOLVER_PLOT_TITLES = {
     "vanilla": "A* vanilla",
     "modified": "A* social",
@@ -27,6 +35,30 @@ SOLVER_PLOT_TITLES = {
 }
 RIGHT_WALL_EXCLUSION_RADIUS = 5.0
 RIGHT_WALL_LARGE_RATIO = 0.7
+
+
+def parse_solver_modes(solvers_arg, *, rrt_only=False):
+    """Return ordered subset of ``SOLVER_MODES`` from CLI ``--solvers`` / ``--rrt-only``."""
+    if rrt_only:
+        return ["rrt_vanilla"]
+
+    if solvers_arg is None or str(solvers_arg).strip().lower() in ("", "all"):
+        return list(SOLVER_MODES)
+
+    modes = []
+    for part in str(solvers_arg).replace(",", " ").split():
+        key = part.strip().lower()
+        if not key:
+            continue
+        mode = SOLVER_MODE_ALIASES.get(key, key)
+        if mode not in SOLVER_MODES:
+            allowed = ", ".join(SOLVER_MODES)
+            raise ValueError(f"Unknown solver {part!r}. Choose from: {allowed} (or aliases rrt, social).")
+        if mode not in modes:
+            modes.append(mode)
+    if not modes:
+        raise ValueError("At least one solver must be selected.")
+    return modes
 
 
 def route_pair_key(x_init, x_goal):
@@ -222,6 +254,7 @@ def run_solver(
     *,
     social_graph=None,
     rrt_kwargs=None,
+    return_planner=False,
 ):
     rrt_kwargs = {} if rrt_kwargs is None else dict(rrt_kwargs)
 
@@ -261,14 +294,117 @@ def run_solver(
     else:
         raise ValueError(f"Unsupported solver mode '{mode}'")
 
-    if not solved:
+    path = planner.path if solved and planner.path is not None else None
+    if return_planner:
+        return path, solve_time, planner
+    if path is None:
         return None, solve_time
-    return planner.path, solve_time
+    return path, solve_time
 
 
-def summarize_by_solver(route_records):
+def plot_rrt_failure(
+    occ_grid,
+    planner,
+    x_init,
+    x_goal,
+    *,
+    attempt_idx,
+    solve_time_s,
+    save_path=None,
+    show=False,
+    crop=True,
+    crop_padding_m=8.0,
+    dpi=200,
+):
+    """Plot occupancy grid, RRT* tree, and goal-connection diagnostics after a failed solve."""
+    stats = getattr(planner, "last_solve_stats", None) or {}
+    fig, ax = plt.subplots(figsize=(9, 9))
+    occ_grid.plot_grid(ax=ax)
+
+    for p0, p1 in planner.iter_tree_edges():
+        ax.plot(
+            [p0[0], p1[0]],
+            [p0[1], p1[1]],
+            color="firebrick",
+            linewidth=0.6,
+            alpha=0.35,
+            zorder=3,
+        )
+
+    nearest = stats.get("nearest_goal_node")
+    if nearest is not None:
+        ax.scatter(nearest[0], nearest[1], c="magenta", s=40, zorder=6, label="nearest tree node")
+        seg_free = stats.get("nearest_segment_free")
+        ls = "-" if seg_free else "--"
+        ax.plot(
+            [nearest[0], x_goal[0]],
+            [nearest[1], x_goal[1]],
+            color="magenta",
+            linewidth=1.5,
+            linestyle=ls,
+            alpha=0.8,
+            zorder=5,
+        )
+
+    ax.scatter(x_init[0], x_init[1], c="green", s=80, zorder=7, label="start")
+    ax.scatter(x_goal[0], x_goal[1], c="gold", marker="*", s=140, zorder=7, label="goal")
+
+    tol = stats.get("goal_tolerance", getattr(planner, "goal_tolerance", None))
+    if tol is not None:
+        circle = plt.Circle(
+            (x_goal[0], x_goal[1]),
+            float(tol),
+            fill=False,
+            color="gold",
+            linewidth=1.2,
+            linestyle=":",
+            zorder=4,
+        )
+        ax.add_patch(circle)
+
+    reason = stats.get("reason", "unknown")
+    tree_nodes = stats.get("tree_nodes", 0)
+    min_dist = stats.get("min_goal_dist", float("nan"))
+    seg_note = ""
+    if stats.get("nearest_segment_free") is False:
+        seg_note = "; nearest→goal segment blocked"
+    elif stats.get("nearest_segment_free") is True and min_dist > float(tol or 0):
+        seg_note = "; within tolerance but connect failed"
+    ax.set_title(
+        f"RRT* failure (attempt {attempt_idx}) — {reason}\n"
+        f"{solve_time_s:.2f}s, nodes={tree_nodes}, min goal dist={min_dist:.2f}m{seg_note}",
+        fontsize=11,
+    )
+    ax.set_xlabel("X (m)")
+    ax.set_ylabel("Y (m)")
+    ax.legend(loc="upper right", fontsize=8)
+
+    # if crop:
+    #     xs = [x_init[0], x_goal[0]]
+    #     ys = [x_init[1], x_goal[1]]
+    #     if nearest is not None:
+    #         xs.append(nearest[0])
+    #         ys.append(nearest[1])
+    #     pad = float(crop_padding_m)
+    #     ax.set_xlim(min(xs) - pad, max(xs) + pad)
+    #     ax.set_ylim(min(ys) - pad, max(ys) + pad)
+
+    fig.tight_layout()
+    if save_path:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+        print(f"  Saved RRT* failure plot: {save_path}")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def summarize_by_solver(route_records, solver_modes=None):
+    solver_modes = list(SOLVER_MODES) if solver_modes is None else list(solver_modes)
     summary = {}
-    for mode in SOLVER_MODES:
+    for mode in solver_modes:
         lengths = np.array([r[mode]["path_length"] for r in route_records], dtype=float)
         wall_avgs = np.array([r[mode]["right_wall_avg"] for r in route_records], dtype=float)
         wall_stds = np.array([r[mode]["right_wall_std"] for r in route_records], dtype=float)
@@ -322,32 +458,41 @@ def validate_resume_compatibility(
     scenario,
     wall_dist_thresh,
     *,
+    solver_modes=None,
     heatmap_prefix=None,
     heatmap_file=None,
     sparse_graph_threshold=2.0,
     sparse_min_component_size=15,
 ):
+    solver_modes = list(SOLVER_MODES) if solver_modes is None else list(solver_modes)
     cfg = resume_payload.get("config", {})
     existing_scenario = cfg.get("scenario")
     existing_wall_thresh = cfg.get("wall_dist_thresh")
     existing_policy = cfg.get("failure_policy")
     existing_source = cfg.get("path_metric_source")
-    requested_modified = _modified_solver_config(
-        heatmap_prefix, heatmap_file, sparse_graph_threshold, sparse_min_component_size
-    )
-    existing_modified_solver = cfg.get("modified_solver", "rightness_penalty")
-    if existing_modified_solver != requested_modified["modified_solver"]:
+    existing_solver_modes = cfg.get("solver_modes", list(SOLVER_MODES))
+    if list(existing_solver_modes) != solver_modes:
         raise ValueError(
-            f"Resume modified_solver mismatch. Existing='{existing_modified_solver}', "
-            f"requested='{requested_modified['modified_solver']}'."
+            f"Resume solver_modes mismatch. Existing={existing_solver_modes!r}, "
+            f"requested={solver_modes!r}."
         )
-    if requested_modified["modified_solver"] == "heatmap_graph":
-        for key in ("heatmap_prefix", "heatmap_file", "sparse_graph_threshold", "sparse_min_component_size"):
-            if cfg.get(key) != requested_modified.get(key):
-                raise ValueError(
-                    f"Resume heatmap config mismatch for {key}. "
-                    f"Existing={cfg.get(key)!r}, requested={requested_modified.get(key)!r}."
-                )
+    if "modified" in solver_modes:
+        requested_modified = _modified_solver_config(
+            heatmap_prefix, heatmap_file, sparse_graph_threshold, sparse_min_component_size
+        )
+        existing_modified_solver = cfg.get("modified_solver", "rightness_penalty")
+        if existing_modified_solver != requested_modified["modified_solver"]:
+            raise ValueError(
+                f"Resume modified_solver mismatch. Existing='{existing_modified_solver}', "
+                f"requested='{requested_modified['modified_solver']}'."
+            )
+        if requested_modified["modified_solver"] == "heatmap_graph":
+            for key in ("heatmap_prefix", "heatmap_file", "sparse_graph_threshold", "sparse_min_component_size"):
+                if cfg.get(key) != requested_modified.get(key):
+                    raise ValueError(
+                        f"Resume heatmap config mismatch for {key}. "
+                        f"Existing={cfg.get(key)!r}, requested={requested_modified.get(key)!r}."
+                    )
 
     if existing_scenario != scenario:
         raise ValueError(
@@ -370,7 +515,7 @@ def validate_resume_compatibility(
         )
 
     for row in resume_payload.get("routes", []):
-        missing = [mode for mode in SOLVER_MODES if mode not in row]
+        missing = [mode for mode in solver_modes if mode not in row]
         if missing:
             raise ValueError(
                 "Resume file is missing planner results for: "
@@ -404,8 +549,9 @@ def save_results(output_path, payload):
                 ],
             )
             writer.writeheader()
+            active_solvers = payload.get("config", {}).get("solver_modes", list(SOLVER_MODES))
             for row in payload["routes"]:
-                for solver in SOLVER_MODES:
+                for solver in active_solvers:
                     metrics = row[solver]
                     writer.writerow(
                         {
@@ -425,11 +571,13 @@ def save_results(output_path, payload):
     raise ValueError("Unsupported output format. Use .json or .csv")
 
 
-def print_summary(summary, attempts, requested_routes):
+def print_summary(summary, attempts, requested_routes, solver_modes=None):
+    solver_modes = list(SOLVER_MODES) if solver_modes is None else list(solver_modes)
     print("\n=== Comparison Summary ===")
-    print(f"Requested paired routes: {requested_routes}")
+    print(f"Solvers: {', '.join(solver_modes)}")
+    print(f"Requested successful routes: {requested_routes}")
     print(f"Sampling attempts: {attempts}")
-    for mode in SOLVER_MODES:
+    for mode in solver_modes:
         s = summary[mode]
         print(f"\n[{mode}]")
         print(f"  routes: {s['num_routes']}")
@@ -468,7 +616,7 @@ def plot_debug_pair(
                 ax.plot([x0, x1], [y0, y1], color=base_color, linewidth=1.2, alpha=0.25, linestyle="--")
 
     handles = []
-    for solver in SOLVER_MODES:
+    for solver in paths_by_solver:
         draw_segments(
             paths_by_solver[solver],
             used_masks_by_solver[solver],
@@ -497,15 +645,25 @@ def plot_debug_pair(
     plt.close(fig)
 
 
-def plot_sample_paths(occ_grid, sample_pairs, plot_output=None, modified_title=None):
+def plot_sample_paths(
+    occ_grid,
+    sample_pairs,
+    plot_output=None,
+    modified_title=None,
+    solver_modes=None,
+):
     if not sample_pairs:
         print("No sample paths available to plot.")
         return
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    solver_modes = list(SOLVER_MODES) if solver_modes is None else list(solver_modes)
+    n = len(solver_modes)
+    fig, axes = plt.subplots(1, n, figsize=(6 * n, 6))
+    if n == 1:
+        axes = [axes]
 
     cmap = plt.get_cmap("tab10", max(len(sample_pairs), 1))
-    for j, solver in enumerate(SOLVER_MODES):
+    for j, solver in enumerate(solver_modes):
         ax = axes[j]
         occ_grid.plot_grid(ax=ax)
         for i, sample in enumerate(sample_pairs):
@@ -586,7 +744,15 @@ def run_experiment(
     rrt_goal_sample_rate=0.10,
     rrt_goal_tolerance=None,
     rrt_rewire_radius=None,
+    solver_modes=None,
+    plot_rrt_failures=False,
+    rrt_failure_plot_dir=None,
+    rrt_failure_plot_max=10,
+    rrt_failure_plot_crop=True,
+    rrt_failure_plot_padding_m=8.0,
+    rrt_failure_plot_show=False,
 ):
+    solver_modes = list(SOLVER_MODES) if solver_modes is None else list(solver_modes)
     rng = np.random.default_rng(seed)
     occ_grid, _, resolution, statespace_hi = build_occ_grid(scenario)
 
@@ -594,7 +760,7 @@ def run_experiment(
     modified_config = _modified_solver_config(
         heatmap_prefix, heatmap_file, sparse_graph_threshold, sparse_min_component_size
     )
-    if modified_config["modified_solver"] == "heatmap_graph":
+    if "modified" in solver_modes and modified_config["modified_solver"] == "heatmap_graph":
         social_graph = build_sparse_graph_from_heatmap(
             occ_grid,
             heatmap_prefix=heatmap_prefix,
@@ -606,6 +772,22 @@ def run_experiment(
     modified_plot_title = (
         "A* social (heatmap graph)" if social_graph is not None else SOLVER_PLOT_TITLES["modified"]
     )
+    print(f"Active solvers: {', '.join(solver_modes)}")
+    rrt_failure_plots_saved = 0
+    if plot_rrt_failures and "rrt_vanilla" not in solver_modes:
+        print("Warning: --plot-rrt-failures ignored (rrt_vanilla not in active solvers).")
+        plot_rrt_failures = False
+    elif plot_rrt_failures:
+        if rrt_failure_plot_dir is None:
+            if output:
+                rrt_failure_plot_dir = Path(output).parent / "rrt_failure_plots" / scenario
+            else:
+                rrt_failure_plot_dir = Path("results") / "rrt_failure_plots" / scenario
+        else:
+            rrt_failure_plot_dir = Path(rrt_failure_plot_dir)
+        rrt_failure_plot_dir.mkdir(parents=True, exist_ok=True)
+        print(f"RRT* failure plots -> {rrt_failure_plot_dir.resolve()} (max {rrt_failure_plot_max})")
+
     rrt_kwargs = _rrt_kwargs_from_config(
         rrt_max_iter=rrt_max_iter,
         rrt_step_size=rrt_step_size,
@@ -625,6 +807,7 @@ def run_experiment(
             prior_payload,
             scenario,
             wall_dist_thresh,
+            solver_modes=solver_modes,
             heatmap_prefix=heatmap_prefix,
             heatmap_file=heatmap_file,
             sparse_graph_threshold=sparse_graph_threshold,
@@ -640,7 +823,7 @@ def run_experiment(
     target_total_routes = len(records) + num_routes
     sample_pairs = []
     print(
-        f"Collecting paired routes: {len(records)}/{target_total_routes} "
+        f"Collecting routes: {len(records)}/{target_total_routes} "
         f"(need {num_routes} new; max_attempts={max_attempts})"
     )
     while len(records) < target_total_routes:
@@ -653,7 +836,7 @@ def run_experiment(
         if attempts % 20 == 0:
             print(
                 f"[progress] attempts={attempts}, "
-                f"collected={len(records)}/{target_total_routes} paired routes"
+                f"collected={len(records)}/{target_total_routes} routes"
             )
 
         x_init = generate_random_free_point(occ_grid, rng)
@@ -666,8 +849,9 @@ def run_experiment(
 
         solver_results = {}
         all_succeeded = True
-        for mode in SOLVER_MODES:
-            path, solve_time = run_solver(
+        for mode in solver_modes:
+            need_rrt_planner = plot_rrt_failures and mode == "rrt_vanilla"
+            solve_out = run_solver(
                 mode,
                 occ_grid,
                 statespace_hi,
@@ -676,13 +860,47 @@ def run_experiment(
                 resolution,
                 social_graph=social_graph,
                 rrt_kwargs=rrt_kwargs,
+                return_planner=need_rrt_planner,
             )
+            if need_rrt_planner:
+                path, solve_time, planner = solve_out
+            else:
+                path, solve_time = solve_out
+                planner = None
             if mode == "rrt_vanilla":
                 if path is None:
+                    stats = getattr(planner, "last_solve_stats", {}) if planner else {}
+                    min_gd = stats.get("min_goal_dist", float("nan"))
+                    min_gd_s = f"{min_gd:.2f}m" if np.isfinite(min_gd) else "inf"
                     print(
                         f"  RRT*: no path ({solve_time:.2f}s) "
-                        f"init={x_init} goal={x_goal}"
+                        f"init={x_init} goal={x_goal} "
+                        f"nodes={stats.get('tree_nodes', '?')} "
+                        f"min_goal_dist={min_gd_s} "
+                        f"reason={stats.get('reason', '?')}"
                     )
+                    if (
+                        plot_rrt_failures
+                        and planner is not None
+                        and rrt_failure_plots_saved < rrt_failure_plot_max
+                    ):
+                        plot_path = (
+                            rrt_failure_plot_dir
+                            / f"rrt_fail_attempt{attempts:05d}_n{rrt_failure_plots_saved + 1:03d}.png"
+                        )
+                        plot_rrt_failure(
+                            occ_grid,
+                            planner,
+                            x_init,
+                            x_goal,
+                            attempt_idx=attempts,
+                            solve_time_s=solve_time,
+                            save_path=plot_path,
+                            show=rrt_failure_plot_show,
+                            crop=rrt_failure_plot_crop,
+                            crop_padding_m=rrt_failure_plot_padding_m,
+                        )
+                        rrt_failure_plots_saved += 1
                 else:
                     print(
                         f"  RRT*: found path ({solve_time:.2f}s, "
@@ -698,7 +916,7 @@ def run_experiment(
         trial_num = len(records) + 1
         metrics_by_solver = {}
         analysis_by_solver = {}
-        for mode in SOLVER_MODES:
+        for mode in solver_modes:
             path, solve_time = solver_results[mode]
             metrics, analysis = compute_metrics(
                 path, occ_grid, dist_thresh=wall_dist_thresh, return_analysis=True
@@ -714,14 +932,14 @@ def run_experiment(
             "x_init": [float(x_init[0]), float(x_init[1])],
             "x_goal": [float(x_goal[0]), float(x_goal[1])],
         }
-        for mode in SOLVER_MODES:
+        for mode in solver_modes:
             record[mode] = metrics_by_solver[mode]
         records.append(record)
         seen_pairs.add(pair_key)
         if len(records) % 20 == 0:
             print(
                 f"[progress] collected {len(records)}/{target_total_routes} "
-                f"paired routes (attempts={attempts})"
+                f"routes (attempts={attempts})"
             )
         if debug_plot_each_run:
             plot_debug_pair(
@@ -729,10 +947,10 @@ def run_experiment(
                 trial_num=trial_num,
                 x_init=x_init,
                 x_goal=x_goal,
-                paths_by_solver={mode: solver_results[mode][0] for mode in SOLVER_MODES},
+                paths_by_solver={mode: solver_results[mode][0] for mode in solver_modes},
                 metrics_by_solver=metrics_by_solver,
                 used_masks_by_solver={
-                    mode: analysis_by_solver[mode]["used_segment_mask"] for mode in SOLVER_MODES
+                    mode: analysis_by_solver[mode]["used_segment_mask"] for mode in solver_modes
                 },
             )
         if len(sample_pairs) < plot_samples:
@@ -741,12 +959,17 @@ def run_experiment(
                 "x_init": [float(x_init[0]), float(x_init[1])],
                 "x_goal": [float(x_goal[0]), float(x_goal[1])],
             }
-            for mode in SOLVER_MODES:
+            for mode in solver_modes:
                 sample_entry[f"{mode}_path"] = solver_results[mode][0]
             sample_pairs.append(sample_entry)
 
-    summary = summarize_by_solver(records)
-    print_summary(summary, attempts=prior_attempts + attempts, requested_routes=len(records))
+    summary = summarize_by_solver(records, solver_modes=solver_modes)
+    print_summary(
+        summary,
+        attempts=prior_attempts + attempts,
+        requested_routes=len(records),
+        solver_modes=solver_modes,
+    )
     if resume_from:
         print(
             f"Resumed from {len(records) - num_routes} routes and added {num_routes} new paired successful routes "
@@ -769,6 +992,7 @@ def run_experiment(
             "rrt_goal_sample_rate": rrt_goal_sample_rate,
             "rrt_goal_tolerance": rrt_goal_tolerance,
             "rrt_rewire_radius": rrt_rewire_radius,
+            "solver_modes": solver_modes,
             **modified_config,
         },
         "sampling_attempts": prior_attempts + attempts,
@@ -788,6 +1012,7 @@ def run_experiment(
             sample_pairs,
             plot_output=plot_output,
             modified_title=modified_plot_title,
+            solver_modes=solver_modes,
         )
 
 
@@ -805,7 +1030,20 @@ def parse_args():
         "--num-routes",
         type=int,
         required=True,
-        help="Number of new paired successful routes to collect",
+        help="Number of new successful routes to collect (all active solvers must succeed per pair)",
+    )
+    parser.add_argument(
+        "--solvers",
+        default="all",
+        help=(
+            "Comma/space-separated subset to run: vanilla, modified, rrt_vanilla "
+            "(aliases: astar, social, rrt). Default: all three."
+        ),
+    )
+    parser.add_argument(
+        "--rrt-only",
+        action="store_true",
+        help="Shortcut for --solvers rrt_vanilla (faster RRT* parameter tuning).",
     )
     parser.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     parser.add_argument(
@@ -857,6 +1095,38 @@ def parse_args():
     rrt_group.add_argument("--rrt-goal-sample-rate", type=float, default=0.10, help="Probability of sampling the goal")
     rrt_group.add_argument("--rrt-goal-tolerance", type=float, default=None, help="Goal connection tolerance (default: resolution)")
     rrt_group.add_argument("--rrt-rewire-radius", type=float, default=None, help="RRT* rewiring radius (default: 2 * step size)")
+    rrt_group.add_argument(
+        "--plot-rrt-failures",
+        action="store_true",
+        help="Save diagnostic PNGs when RRT* fails (tree, start/goal, nearest-node link).",
+    )
+    rrt_group.add_argument(
+        "--rrt-failure-plot-dir",
+        default=None,
+        help="Directory for failure plots (default: <output-dir>/rrt_failure_plots/<scenario>).",
+    )
+    rrt_group.add_argument(
+        "--rrt-failure-plot-max",
+        type=int,
+        default=10,
+        help="Maximum number of RRT* failure plots to save per run.",
+    )
+    rrt_group.add_argument(
+        "--rrt-failure-plot-full-map",
+        action="store_true",
+        help="Do not crop failure plots to start/goal neighborhood.",
+    )
+    rrt_group.add_argument(
+        "--rrt-failure-plot-padding",
+        type=float,
+        default=8.0,
+        help="Padding (m) around start/goal when cropping failure plots.",
+    )
+    rrt_group.add_argument(
+        "--rrt-failure-plot-show",
+        action="store_true",
+        help="Open an interactive window for each RRT* failure plot (in addition to saving).",
+    )
     heatmap_group = parser.add_argument_group("heatmap graph (optional modified solver)")
     heatmap_group.add_argument(
         "--heatmap-prefix",
@@ -893,6 +1163,9 @@ def parse_args():
         raise ValueError("--max-attempts must be > 0")
     if args.plot_samples < 0:
         raise ValueError("--plot-samples must be >= 0")
+    if args.rrt_only and args.solvers not in ("all", ""):
+        parser.error("Use only one of --rrt-only or --solvers.")
+    args.solver_modes = parse_solver_modes(args.solvers, rrt_only=args.rrt_only)
     return args
 
 
@@ -918,4 +1191,11 @@ if __name__ == "__main__":
         rrt_goal_sample_rate=cli.rrt_goal_sample_rate,
         rrt_goal_tolerance=cli.rrt_goal_tolerance,
         rrt_rewire_radius=cli.rrt_rewire_radius,
+        solver_modes=cli.solver_modes,
+        plot_rrt_failures=cli.plot_rrt_failures,
+        rrt_failure_plot_dir=cli.rrt_failure_plot_dir,
+        rrt_failure_plot_max=cli.rrt_failure_plot_max,
+        rrt_failure_plot_crop=not cli.rrt_failure_plot_full_map,
+        rrt_failure_plot_padding_m=cli.rrt_failure_plot_padding,
+        rrt_failure_plot_show=cli.rrt_failure_plot_show,
     )
