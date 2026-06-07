@@ -5,6 +5,8 @@ import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from collections import defaultdict
+import random
+import numpy as np
 
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 from social_path_planning.a_star import AStar
@@ -16,12 +18,13 @@ from social_path_planning.mapf_comparison.motion import DEFAULT_MAX_VELOCITY_MPS
 NOMINAL_VELOCITY = 0.35  # m/s
 TIME_STEP = 5  # seconds
 MAX_VELOCITY = DEFAULT_MAX_VELOCITY_MPS
-ROBOT_DIAMETER = 0.5  # meters
+ROBOT_DIAMETER = 0.2  # meters
 M = 1e6  # Big-M constant for constraints
 DELTA = 1  # Safety margin in seconds
 # Max factor k between consecutive segment speeds v_i = d_i / (t_{i+1} - t_i):
 # v_{i+1} <= k * v_i and v_i <= k * v_{i+1} (linear in waypoint times).
 MAX_VELOCITY_CHANGE_FACTOR = 1.5
+GEOM_MATCH_TOL = 1e-3  # meters; tolerate grid / DDS float slop when matching vertices or edges
 
 
 def _scalar_times_from_solver(prob, time_var, context):
@@ -93,13 +96,263 @@ def _segment_endpoint_conflict(p0, p1, q0, q1, threshold):
     return False
 
 
-def _segment_shares_exact_vertex(p0, p1, q0, q1):
-    """True if any segment endpoint equals any endpoint of the other segment."""
+def _points_close(a, b, tol=GEOM_MATCH_TOL):
+    """True if two 2D points are within ``tol`` in Euclidean distance."""
+    return float(np.linalg.norm(np.array(a) - np.array(b))) <= tol
+
+
+def _segment_shares_exact_vertex(p0, p1, q0, q1, tol=GEOM_MATCH_TOL):
+    """True if any segment endpoint is within ``tol`` of any endpoint of the other segment."""
     for pa in (p0, p1):
         for qb in (q0, q1):
-            if pa == qb:
+            if _points_close(pa, qb, tol):
                 return True
     return False
+
+
+def _point_to_segment_distance(point, seg_a, seg_b):
+    """Perpendicular distance from ``point`` to segment ``seg_a -> seg_b``."""
+    p = np.array(point, dtype=float)
+    a = np.array(seg_a, dtype=float)
+    b = np.array(seg_b, dtype=float)
+    ab = b - a
+    n = float(np.linalg.norm(ab))
+    if n <= 1e-12:
+        return float(np.linalg.norm(p - a))
+    return float(np.abs((ab[0] * (a[1] - p[1])) - (a[0] - p[0]) * ab[1])) / n
+
+
+def _segments_colinear(p0, p1, q0, q1, tol=GEOM_MATCH_TOL):
+    """True when two segments lie on the same infinite line (within ``tol``)."""
+    v1 = np.array(p1, dtype=float) - np.array(p0, dtype=float)
+    v2 = np.array(q1, dtype=float) - np.array(q0, dtype=float)
+    n1 = float(np.linalg.norm(v1))
+    n2 = float(np.linalg.norm(v2))
+    if n1 <= tol or n2 <= tol:
+        return False
+    cross = abs(v1[0] * v2[1] - v1[1] * v2[0])
+    return cross <= tol * max(n1, n2)
+
+
+def _segments_opposite_direction(p0, p1, q0, q1, tol=GEOM_MATCH_TOL):
+    """True when segment directions differ by ~180 degrees."""
+    v1 = np.array(p1, dtype=float) - np.array(p0, dtype=float)
+    v2 = np.array(q1, dtype=float) - np.array(q0, dtype=float)
+    n1 = float(np.linalg.norm(v1))
+    n2 = float(np.linalg.norm(v2))
+    if n1 <= tol or n2 <= tol:
+        return False
+    cos_angle = float(np.dot(v1, v2) / (n1 * n2))
+    return cos_angle < -1.0 + tol
+
+
+def _segments_overlap_on_axis(p0, p1, q0, q1, tol=GEOM_MATCH_TOL):
+    """True when segment interiors overlap after projection onto the first segment axis."""
+    v1 = np.array(p1, dtype=float) - np.array(p0, dtype=float)
+    n1 = float(np.linalg.norm(v1))
+    if n1 <= tol:
+        return False
+    u = v1 / n1
+    origin = np.array(p0, dtype=float)
+
+    def _proj(point):
+        return float(np.dot(np.array(point, dtype=float) - origin, u))
+
+    a0, a1 = _proj(p0), _proj(p1)
+    b0, b1 = _proj(q0), _proj(q1)
+    lo_a, hi_a = min(a0, a1), max(a0, a1)
+    lo_b, hi_b = min(b0, b1), max(b0, b1)
+    return min(hi_a, hi_b) - max(lo_a, lo_b) > tol
+
+
+def _segments_opposite_same_edge(p0, p1, q0, q1, tol=GEOM_MATCH_TOL):
+    """True when two segments share the same physical edge with opposite orientation."""
+    return _points_close(p0, q1, tol) and _points_close(p1, q0, tol)
+
+
+def _segments_opposite_for_coupling(p0, p1, q0, q1, tol=GEOM_MATCH_TOL):
+    """True for opposite travel on the same corridor, including mismatched segment lengths."""
+    if _segments_opposite_same_edge(p0, p1, q0, q1, tol=tol):
+        return True
+    if not (
+        _segments_colinear(p0, p1, q0, q1, tol=tol)
+        and _segments_opposite_direction(p0, p1, q0, q1, tol=tol)
+        and _segments_overlap_on_axis(p0, p1, q0, q1, tol=tol)
+    ):
+        return False
+    for qpt in (q0, q1):
+        if _point_to_segment_distance(qpt, p0, p1) > tol:
+            return False
+    return True
+
+
+def _segment_travel_direction(path, i):
+    """Unit direction of segment ``path[i] -> path[i+1]``; zero vector if degenerate."""
+    d = np.array(path[i + 1]) - np.array(path[i])
+    n = float(np.linalg.norm(d))
+    if n <= 1e-12:
+        return np.array([0.0, 0.0])
+    return d / n
+
+
+def _opposite_overlap_window_valid(path_a, path_b, pair_set, i_start, i_end, j_start, j_end, tol=GEOM_MATCH_TOL):
+    """True if every opposite corridor pair in the index box is present in ``pair_set``."""
+    for i in range(int(i_start), int(i_end) + 1):
+        for j in range(int(j_start), int(j_end) + 1):
+            if _segments_opposite_for_coupling(
+                path_a[i], path_a[i + 1], path_b[j], path_b[j + 1], tol=tol
+            ):
+                if (i, j) not in pair_set:
+                    return False
+    return True
+
+
+def _cluster_opposite_segment_pairs(opposite_pairs):
+    """Group ``(i,j)`` pairs connected by 8-neighbor steps in index space."""
+    pair_set = set(opposite_pairs)
+    if not pair_set:
+        return []
+    visited = set()
+    clusters = []
+    for seed in sorted(pair_set):
+        if seed in visited:
+            continue
+        stack = [seed]
+        cluster = set()
+        while stack:
+            i, j = stack.pop()
+            if (i, j) in visited:
+                continue
+            visited.add((i, j))
+            cluster.add((i, j))
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    if di == 0 and dj == 0:
+                        continue
+                    nb = (i + di, j + dj)
+                    if nb in pair_set and nb not in visited:
+                        stack.append(nb)
+        clusters.append(cluster)
+    return clusters
+
+
+def _find_opposite_overlap_ranges(path_a, path_b, pair_set, tol=GEOM_MATCH_TOL):
+    """Return validated opposite-direction overlap windows as ``(i_start, i_end, j_start, j_end)``."""
+    opposite_pairs = [
+        (i, j)
+        for (i, j) in pair_set
+        if _segments_opposite_for_coupling(
+            path_a[i], path_a[i + 1], path_b[j], path_b[j + 1], tol=tol
+        )
+    ]
+    windows = []
+    for cluster in _cluster_opposite_segment_pairs(opposite_pairs):
+        i_start = min(i for i, _ in cluster)
+        i_end = max(i for i, _ in cluster)
+        j_start = min(j for _, j in cluster)
+        j_end = max(j for _, j in cluster)
+        if _opposite_overlap_window_valid(
+            path_a, path_b, pair_set, i_start, i_end, j_start, j_end, tol=tol
+        ):
+            windows.append((i_start, i_end, j_start, j_end))
+    return windows
+
+
+def _maximal_consecutive_runs(values):
+    """Return maximal inclusive integer runs from ``values`` (gaps split runs)."""
+    values = sorted({int(v) for v in values})
+    if not values:
+        return []
+    runs = []
+    run_start = values[0]
+    prev = values[0]
+    for value in values[1:]:
+        if value == prev + 1:
+            prev = value
+            continue
+        runs.append((run_start, prev))
+        run_start = value
+        prev = value
+    runs.append((run_start, prev))
+    return runs
+
+
+def _assign_fixed_index_streak_z(pair_to_z, pair_set, z_index, fixed_axis):
+    """Bundle pairs sharing one segment index with consecutive indices on the other robot."""
+    grouped = defaultdict(list)
+    for i, j in pair_set:
+        if (i, j) in pair_to_z:
+            continue
+        if fixed_axis == "i":
+            grouped[i].append(j)
+        else:
+            grouped[j].append(i)
+
+    for fixed_val, varying_vals in grouped.items():
+        for run_start, run_end in _maximal_consecutive_runs(varying_vals):
+            streak_pairs = []
+            for v in range(run_start, run_end + 1):
+                pair = (fixed_val, v) if fixed_axis == "i" else (v, fixed_val)
+                if pair in pair_set and pair not in pair_to_z:
+                    streak_pairs.append(pair)
+            if len(streak_pairs) < 2:
+                continue
+            if len(streak_pairs) != run_end - run_start + 1:
+                continue
+            z = z_index
+            for pair in streak_pairs:
+                pair_to_z[pair] = z
+            z_index += 1
+    return z_index
+
+
+def _assign_z_to_segment_pairs(path_a, path_b, segment_pairs, start_z_index=0, tol=GEOM_MATCH_TOL):
+    """Assign ``z_index`` to ``(i,j)`` pairs with overlap-region coupling."""
+    segment_pairs = sorted({(int(i), int(j)) for i, j in segment_pairs})
+    if not segment_pairs:
+        return [], start_z_index
+
+    pair_set = set(segment_pairs)
+    pair_to_z = {}
+    z_index = int(start_z_index)
+
+    for i_start, i_end, j_start, j_end in _find_opposite_overlap_ranges(
+        path_a, path_b, pair_set, tol=tol
+    ):
+        z = z_index
+        for i, j in segment_pairs:
+            if (
+                i_start <= i <= i_end
+                and j_start <= j <= j_end
+                and _segments_opposite_for_coupling(
+                    path_a[i], path_a[i + 1], path_b[j], path_b[j + 1], tol=tol
+                )
+            ):
+                pair_to_z[(i, j)] = z
+        z_index += 1
+
+    z_index = _assign_fixed_index_streak_z(pair_to_z, pair_set, z_index, fixed_axis="i")
+    z_index = _assign_fixed_index_streak_z(pair_to_z, pair_set, z_index, fixed_axis="j")
+
+    remaining = [(i, j) for (i, j) in segment_pairs if (i, j) not in pair_to_z]
+    prev_i = None
+    prev_z = None
+    prev_shared = False
+    for i, j in remaining:
+        p0, p1 = path_a[i], path_a[i + 1]
+        q0, q1 = path_b[j], path_b[j + 1]
+        shared = _segment_shares_exact_vertex(p0, p1, q0, q1)
+        if shared and prev_i is not None and i == prev_i + 1 and prev_shared and prev_z is not None:
+            pair_to_z[(i, j)] = prev_z
+        else:
+            pair_to_z[(i, j)] = z_index
+            prev_z = z_index
+            z_index += 1
+        prev_i = i
+        prev_shared = shared
+
+    assigned = [(i, j, pair_to_z[(i, j)]) for (i, j) in segment_pairs]
+    return assigned, z_index
 
 
 def _iter_conflicting_segment_pairs(path_a, path_b, threshold):
@@ -118,44 +371,25 @@ def _collect_segment_collision_pairs(
     collision_pairs, path_a, path_b, threshold, prefix=(), start_z_index=0
 ):
     """
-    Append segment collision tuples with z_index, reusing z for consecutive shared-vertex segments.
+    Append segment collision tuples with z_index (opposite-window + same-direction coupling).
 
     Returns:
         num_z: total number of binary z variables required after this batch
     """
-    z_index = start_z_index
-    prev_reuse = False
-    prev_i = None
-    for i, j in _iter_conflicting_segment_pairs(path_a, path_b, threshold):
-        p0, p1 = path_a[i], path_a[i + 1]
-        q0, q1 = path_b[j], path_b[j + 1]
-        current_reuse = _segment_shares_exact_vertex(p0, p1, q0, q1)
-        if current_reuse and prev_reuse and prev_i is not None and i == prev_i + 1:
-            z_index -= 1
-        collision_pairs.append(prefix + (i, j, z_index))
-        z_index += 1
-        prev_reuse = current_reuse
-        prev_i = i
+    segment_pairs = list(_iter_conflicting_segment_pairs(path_a, path_b, threshold))
+    assigned, z_index = _assign_z_to_segment_pairs(path_a, path_b, segment_pairs, start_z_index)
+    for i, j, z in assigned:
+        collision_pairs.append(prefix + (i, j, z))
     return z_index
 
 
 def _append_segment_pairs_with_z(
     collision_pairs, path_a, path_b, segment_pairs, prefix=(), start_z_index=0
 ):
-    """Append pre-detected ``(seg_i, seg_j)`` tuples with shared-vertex z reuse."""
-    z_index = start_z_index
-    prev_reuse = False
-    prev_i = None
-    for i, j in segment_pairs:
-        p0, p1 = path_a[i], path_a[i + 1]
-        q0, q1 = path_b[j], path_b[j + 1]
-        current_reuse = _segment_shares_exact_vertex(p0, p1, q0, q1)
-        if current_reuse and prev_reuse and prev_i is not None and i == prev_i + 1:
-            z_index -= 1
-        collision_pairs.append(prefix + (i, j, z_index))
-        z_index += 1
-        prev_reuse = current_reuse
-        prev_i = i
+    """Append pre-detected ``(seg_i, seg_j)`` tuples with coupled z assignment."""
+    assigned, z_index = _assign_z_to_segment_pairs(path_a, path_b, segment_pairs, start_z_index)
+    for i, j, z in assigned:
+        collision_pairs.append(prefix + (i, j, z))
     return z_index
 
 
@@ -387,7 +621,7 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
                     collision_pairs,
                     self.paths[a1],
                     self.paths[a2],
-                    0.5,
+                    ROBOT_DIAMETER,
                     prefix=(a1, a2),
                     start_z_index=z_index,
                 )
