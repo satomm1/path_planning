@@ -214,6 +214,8 @@ environments/*.png
 # Large precomputed wall-distance caches (generate with precompute_wall_distances)
 **/environments/*_wall_dist.npz
 benchmarks/
+outputs_temp_obstacles/
+outputs_timeline_test/
 
 distributed*.json
 distributed*csv
