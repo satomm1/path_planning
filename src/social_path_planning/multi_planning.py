@@ -19,7 +19,7 @@ NOMINAL_VELOCITY = 0.35  # m/s
 TIME_STEP = 5  # seconds
 MAX_VELOCITY = DEFAULT_MAX_VELOCITY_MPS
 ROBOT_DIAMETER = 0.2  # meters
-M = 1e6  # Big-M constant for constraints
+M = 60  # Big-M constant for constraints
 DELTA = 1  # Safety margin in seconds
 # Max factor k between consecutive segment speeds v_i = d_i / (t_{i+1} - t_i):
 # v_{i+1} <= k * v_i and v_i <= k * v_{i+1} (linear in waypoint times).
@@ -561,7 +561,7 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         objective = cp.Minimize(t[-1])  # Minimize time to reach final point
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=verbose, solver=cp.ECOS_BB)
+        prob.solve(verbose=verbose, solver=cp.GLPK_MI)
         return _scalar_times_from_solver(prob, t, "MultiAgentSequentialPlanner")
 
 
@@ -694,7 +694,7 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=verbose, solver=cp.ECOS_BB)
+        prob.solve(verbose=verbose, solver=cp.GLPK_MI)
         return _multi_agent_times_from_solver(prob, agent_times, "MultiAgentSimultaneousPlanner")
 
     def plan_from_collision_pairs(self, collision_pairs, max_z, verbose=False):
@@ -810,7 +810,7 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
         objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=verbose, solver=cp.ECOS_BB)
+        prob.solve(verbose=verbose, solver=cp.GLPK_MI)
         return _multi_agent_times_from_solver(prob, agent_times, "MultiAgentCombinedPlanner")
 
 def get_position_at_time(t, path, time_points):
