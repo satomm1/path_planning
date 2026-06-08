@@ -16,6 +16,7 @@ import numpy as np
 
 from social_path_planning.benchmark_sparse_snapshots import (
     build_occ_grid,
+    get_or_compute_astar_paths,
     load_or_generate_path_bank,
 )
 from social_path_planning.mapf_comparison import MotionConfig
@@ -78,6 +79,10 @@ def run_mapf_comparison(
     mapf_downsample: int | None = None,
     crop_padding_cells: int = 40,
     coarse_block_policy: str = "fine_center",
+    milp_astar_mode: str = "modified",
+    heatmap_prefix: str | None = None,
+    heatmap_file: str | None = None,
+    refresh_social_bank: bool = False,
 ):
     motion = (
         MotionConfig(max_velocity_mps=max_velocity_mps)
@@ -97,6 +102,7 @@ def run_mapf_comparison(
     if path_bank_path is None:
         path_bank_path = output_prefix_path.parent / f"{output_prefix_path.name}_path_bank.json"
 
+    path_bank_path = Path(path_bank_path)
     path_bank, path_bank_meta = load_or_generate_path_bank(
         occ_grid=occ_grid,
         statespace_hi=statespace_hi,
@@ -107,6 +113,21 @@ def run_mapf_comparison(
         max_attempts=max_attempts,
         path_bank_path=path_bank_path,
     )
+
+    social_graph = None
+    if milp_astar_mode == "modified" and (heatmap_prefix or heatmap_file):
+        from social_path_planning.compare_astar import build_sparse_graph_from_heatmap
+
+        social_graph = build_sparse_graph_from_heatmap(
+            occ_grid,
+            heatmap_prefix=heatmap_prefix,
+            heatmap_path=heatmap_file,
+        )
+        print("MILP geometry: modified A* on heatmap sparse graph")
+    elif milp_astar_mode == "modified":
+        print("MILP geometry: modified A* (rightness penalty)")
+    else:
+        print(f"MILP geometry: path-bank polylines ({milp_astar_mode})")
 
     run_id = f"mapf_seed_{benchmark_seed}_stages_{'-'.join(str(s) for s in stage_sizes)}"
 
@@ -130,7 +151,20 @@ def run_mapf_comparison(
     for stage_size in stage_sizes:
         print(f"Stage size {stage_size}")
         stage_records = path_bank[:stage_size]
-        stage_paths = [record["path"] for record in stage_records]
+        bank_paths = [record["path"] for record in stage_records]
+        milp_routes = get_or_compute_astar_paths(
+            occ_grid,
+            statespace_hi,
+            map_resolution,
+            stage_records,
+            milp_astar_mode,
+            path_bank_path,
+            social_graph=social_graph,
+            heatmap_prefix=heatmap_prefix,
+            heatmap_file=heatmap_file,
+            refresh=refresh_social_bank,
+        )
+        milp_paths = [route["path"] for route in milp_routes]
         grid_config, starts, goals, budget = prepare_mapf_problem(
             occ_grid, stage_records, mapf_cfg
         )
@@ -171,8 +205,8 @@ def run_mapf_comparison(
         cbs_paths = (solver_results.get("cbs") or {}).get("grid_paths")
         pp_paths = (solver_results.get("pp") or {}).get("grid_paths")
 
-        # MILP sum of costs
-        milp_soc_metrics, milp_times = _run_milp(occ_grid, stage_paths, norm=1, motion=motion)
+        # MILP sum of costs (geometry from milp_astar_mode; timing only)
+        milp_soc_metrics, milp_times = _run_milp(occ_grid, milp_paths, norm=1, motion=motion)
         _append_rows(
             detailed_rows,
             run_id,
@@ -184,7 +218,7 @@ def run_mapf_comparison(
         )
 
         # MILP makespan objective
-        milp_ms_metrics, _ = _run_milp(occ_grid, stage_paths, norm=np.inf, motion=motion)
+        milp_ms_metrics, _ = _run_milp(occ_grid, milp_paths, norm=np.inf, motion=motion)
         _append_rows(
             detailed_rows,
             run_id,
@@ -198,7 +232,8 @@ def run_mapf_comparison(
         if save_example_maps and stage_size == example_stage_size and example_payload is None:
             example_payload = {
                 "stage_size": stage_size,
-                "fixed_paths": stage_paths,
+                "fixed_paths": bank_paths,
+                "milp_paths": milp_paths,
                 "milp_times": milp_times,
                 "cbs_paths_world": (solver_results.get("cbs") or {}).get("world_polylines") or [],
                 "pp_paths_world": (solver_results.get("pp") or {}).get("world_polylines") or [],
@@ -235,6 +270,9 @@ def run_mapf_comparison(
             "map_resolution": float(map_resolution),
             "robot_radius_cells": int(grid_config.robot_radius),
             "motion": motion.to_manifest_dict(),
+            "milp_astar_mode": milp_astar_mode,
+            "heatmap_prefix": heatmap_prefix,
+            "heatmap_file": heatmap_file,
         },
         "path_bank": path_bank_meta,
         "path_bank_sha256": _file_sha256(Path(path_bank_path)) if Path(path_bank_path).exists() else None,
@@ -402,7 +440,30 @@ def main(argv=None):
         choices=["any", "all", "majority", "center", "fine_center"],
         help="How fine occupancy merges into coarse cells (fine_center matches A*; any=strictest)",
     )
+    milp_group = parser.add_argument_group("MILP geometry")
+    milp_group.add_argument(
+        "--milp-astar-mode",
+        default="modified",
+        choices=["vanilla", "modified"],
+        help="A* mode for MILP fixed polylines (default: modified social paths).",
+    )
+    milp_group.add_argument(
+        "--milp-astar-vanilla",
+        action="store_true",
+        help="Shortcut for --milp-astar-mode vanilla (path-bank polylines).",
+    )
+    milp_group.add_argument("--heatmap-prefix", default=None)
+    milp_group.add_argument("--heatmap-file", default=None)
+    milp_group.add_argument(
+        "--refresh-social-bank",
+        action="store_true",
+        help="Re-run social/modified A* and overwrite cached paths in the path bank.",
+    )
     cli = parser.parse_args(argv)
+    if cli.milp_astar_vanilla:
+        cli.milp_astar_mode = "vanilla"
+    if cli.heatmap_prefix and cli.heatmap_file:
+        parser.error("Use only one of --heatmap-prefix or --heatmap-file.")
 
     stage_sizes = [int(s.strip()) for s in cli.stage_sizes.split(",") if s.strip()]
     run_mapf_comparison(
@@ -422,6 +483,10 @@ def main(argv=None):
         mapf_downsample=cli.mapf_downsample,
         crop_padding_cells=cli.crop_padding,
         coarse_block_policy=cli.mapf_coarse_block_policy,
+        milp_astar_mode=cli.milp_astar_mode,
+        heatmap_prefix=cli.heatmap_prefix,
+        heatmap_file=cli.heatmap_file,
+        refresh_social_bank=cli.refresh_social_bank,
     )
     return 0
 

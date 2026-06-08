@@ -160,10 +160,16 @@ def aggregate_milp_metrics(
         total_path_length_m = sol["total_path_length_m"]
         per_agent_path_length_m = sol["per_agent_path_length_m"]
 
+    norm_value: int | str
+    if norm == np.inf or norm == float("inf"):
+        norm_value = "inf"
+    else:
+        norm_value = int(norm)
+
     return {
         "success": bool(success),
         "status": status,
-        "norm": int(norm),
+        "norm": norm_value,
         "soc_seconds": soc,
         "makespan_seconds": makespan,
         "per_agent_completion_s": finals if success else [],

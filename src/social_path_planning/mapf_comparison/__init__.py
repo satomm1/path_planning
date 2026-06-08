@@ -27,6 +27,12 @@ from social_path_planning.mapf_comparison.metrics import (
     mapf_path_timesteps,
     path_bank_soc_meters,
 )
+from social_path_planning.mapf_comparison.ensemble import (
+    aggregate_ensemble_metrics,
+    ensure_modified_path_pool,
+    run_ensemble_trial,
+    sample_route_subset,
+)
 
 __all__ = [
     "DEFAULT_COARSE_BLOCK_POLICY",
@@ -46,4 +52,8 @@ __all__ = [
     "aggregate_milp_metrics",
     "mapf_path_timesteps",
     "path_bank_soc_meters",
+    "aggregate_ensemble_metrics",
+    "ensure_modified_path_pool",
+    "run_ensemble_trial",
+    "sample_route_subset",
 ]
