@@ -275,7 +275,7 @@ def run_milp_solver(
             "robot_radius_cells": validation_robot_radius_cells(occ_grid.resolution),
             "conflict_threshold_m": float(ROBOT_DIAMETER_M),
             "success": False,
-            "norm": int(norm),
+            "norm": "inf" if norm == np.inf else int(norm),
         }
 
     if verbose:
@@ -316,7 +316,7 @@ def run_milp_solver(
         "robot_radius_cells": validation_robot_radius_cells(occ_grid.resolution),
         "conflict_threshold_m": float(ROBOT_DIAMETER_M),
         "success": bool(metrics["success"]),
-        "norm": int(norm),
+        "norm": metrics.get("norm"),
         "max_velocity_mps": float(motion_cfg.max_velocity_mps),
     }
 

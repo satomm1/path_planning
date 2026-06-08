@@ -11,6 +11,7 @@ ROS 1 Noetic **catkin** package (Python 3) providing occupancy-grid-based path p
   - `results/distributed_constraint_timing/` — outputs from `benchmark_sparse_snapshots.py` in distributed-constraints mode (pair timings, manifest, path bank).
   - `results/distributed_eval/` — CSV/JSON/plot from `evaluate_distributed_constraint_timing.py`.
   - `results/mapf_comparison/` — MILP vs CBS vs path-length prioritized planning (`benchmark_mapf_comparison.py`).
+  - `results/mapf_ensemble/` — multi-trial averaged MAPF metrics (`benchmark_mapf_ensemble.py`).
   - `results/media/` — example animation GIFs.
 
 ## Build (catkin)
@@ -59,6 +60,27 @@ CBS/PP and MILP each use **native path geometry**; travel times are comparable b
 | `soc_timesteps` | MAPF-only: discrete STA* steps |
 | `static_valid` | MAPF: no waypoint in occupied space (via `TraversabilityModel`) |
 | `dynamic_valid` | MAPF: no agent–agent conflicts at scheduled timesteps |
+
+**Multi-trial ensemble benchmark** (reportable averages over many random agent subsets):
+
+```bash
+export PYTHONPATH=/path/to/path_planning/src:$PYTHONPATH
+python3 -m social_path_planning.benchmark_mapf_ensemble \
+  --scenario sample2_default \
+  --pool-size 32 --num-agents 4 --num-trials 50 \
+  --output-prefix results/mapf_ensemble/sample2_n4_t50
+```
+
+1. **Pool prep (once, cached):** generates `pool_size` random start/goal routes and caches modified A* polylines in `{prefix}_path_pool.json`. Use `--pregen-only` to build the pool without running trials.
+2. **Each trial:** samples `num_agents` routes without replacement; CBS, PP, MILP SOC, and MILP makespan all use the same endpoints. MILP uses cached polylines (no per-trial social A*).
+3. **Outputs:** `{prefix}_trials.csv` (per trial × method), `{prefix}_summary.csv` (aggregated), `{prefix}_manifest.json`.
+
+| Summary field | Meaning |
+|---------------|---------|
+| `success_rate` / `failure_count` | Fraction and count of trials with no valid solution |
+| `avg_solver_runtime_s` | Mean planning time over **successful** trials only |
+| `avg_makespan_seconds` | Mean task makespan over **successful** trials only |
+| `pool_astar_build_s` (manifest) | One-time social/modified A* cost during pool prep; **excluded** from MILP trial averages |
 
 Outputs go under `results/mapf_comparison/` (detailed/summary CSV, manifest JSON, metrics bar chart, example map overlay). Re-plot from a prior run:
 
