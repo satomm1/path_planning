@@ -124,6 +124,85 @@ def _path_from_serializable(path_data):
     return [tuple(float(v) for v in point) for point in path_data]
 
 
+def _route_endpoint_key(x_init, x_goal):
+    return (
+        float(x_init[0]),
+        float(x_init[1]),
+        float(x_goal[0]),
+        float(x_goal[1]),
+    )
+
+
+def _collect_endpoint_keys(routes, *, exclude_route_id=None):
+    keys = set()
+    for route in routes:
+        if exclude_route_id is not None and int(route["route_id"]) == int(exclude_route_id):
+            continue
+        keys.add(_route_endpoint_key(route["x_init"], route["x_goal"]))
+    return keys
+
+
+def _sample_vanilla_solvable_route(
+    occ_grid,
+    statespace_hi,
+    map_resolution,
+    rng,
+    seen,
+    max_attempts,
+):
+    """Sample a random start/goal pair solvable by vanilla A*."""
+    attempts = 0
+    while attempts < max_attempts:
+        attempts += 1
+        x_init = generate_random_free_point(occ_grid, rng)
+        x_goal = generate_random_free_point(occ_grid, rng)
+        if x_init == x_goal:
+            continue
+        route_key = _route_endpoint_key(x_init, x_goal)
+        if route_key in seen:
+            continue
+
+        planner = AStar([0, 0], statespace_hi, x_init, x_goal, occ_grid, resolution=map_resolution)
+        solved = planner.solve(mode="vanilla")
+        if not solved or planner.path is None or len(planner.path) < 2:
+            continue
+
+        seen.add(route_key)
+        return x_init, x_goal, planner.path, attempts
+
+    raise RuntimeError(
+        f"Reached max attempts ({max_attempts}) while resampling a vanilla-solvable route."
+    )
+
+
+def update_path_bank_vanilla_route(path_bank_path, route_id, x_init, x_goal, vanilla_path):
+    """Replace one pool route's endpoints and vanilla polyline; clear cached mode paths."""
+    path_bank_path = Path(path_bank_path)
+    if not path_bank_path.exists():
+        raise FileNotFoundError(f"Path bank not found for update: {path_bank_path}")
+
+    with path_bank_path.open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+
+    bank_routes = payload.get("routes") or []
+    updated = False
+    for bank_route in bank_routes:
+        if int(bank_route["route_id"]) != int(route_id):
+            continue
+        bank_route["x_init"] = [float(x_init[0]), float(x_init[1])]
+        bank_route["x_goal"] = [float(x_goal[0]), float(x_goal[1])]
+        bank_route["path"] = _path_to_serializable(vanilla_path)
+        bank_route.pop("paths_by_mode", None)
+        updated = True
+        break
+
+    if not updated:
+        raise ValueError(f"Route id {route_id} missing from path bank {path_bank_path}")
+
+    with path_bank_path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
 def _save_path_bank(
     path_bank_path,
     scenario_name,
@@ -153,35 +232,102 @@ def enrich_routes_with_astar_paths(
     routes,
     mode="modified",
     social_graph=None,
+    *,
+    path_bank_path=None,
+    cache_meta=None,
+    max_resample_attempts=500,
+    resample_seed=None,
 ):
     """
     Re-plan each route's geometry with A* (vanilla or modified/social) at fixed start/goal.
+
+    When ``max_resample_attempts > 0`` and ``path_bank_path`` is set, a failed modified/social
+    solve resamples a new vanilla-solvable start/goal for that ``route_id``, updates the path
+    bank, and retries until success or the attempt budget is exhausted.
     """
     from social_path_planning.compare_astar import run_solver
 
     enriched = []
-    for route in routes:
-        path, _solve_time = run_solver(
-            mode,
-            occ_grid,
-            statespace_hi,
-            route["x_init"],
-            route["x_goal"],
-            map_resolution,
-            social_graph=social_graph,
-        )
-        if path is None or len(path) < 2:
-            raise RuntimeError(
-                f"A* mode={mode!r} failed for route {route.get('route_id')}: "
-                f"{route['x_init']} -> {route['x_goal']}"
+    total = len(routes)
+    working_routes = [dict(route) for route in routes]
+    resample_rng = np.random.default_rng(resample_seed)
+
+    for idx, route in enumerate(working_routes, start=1):
+        route_id = int(route["route_id"])
+        resample_count = 0
+
+        while True:
+            print(
+                f"MILP geometry ({mode} A*): {idx}/{total} "
+                f"(route_id={route_id})",
+                flush=True,
             )
-        enriched.append(
-            {
-                **route,
-                "path": [(float(p[0]), float(p[1])) for p in path],
-                "astar_mode": mode,
+            path, _solve_time = run_solver(
+                mode,
+                occ_grid,
+                statespace_hi,
+                route["x_init"],
+                route["x_goal"],
+                map_resolution,
+                social_graph=social_graph,
+            )
+            if path is not None and len(path) >= 2:
+                enriched_route = {
+                    **route,
+                    "path": [(float(p[0]), float(p[1])) for p in path],
+                    "astar_mode": mode,
+                }
+                enriched.append(enriched_route)
+                working_routes[idx - 1] = {
+                    "route_id": route_id,
+                    "x_init": tuple(route["x_init"]),
+                    "x_goal": tuple(route["x_goal"]),
+                    "path": enriched_route["path"],
+                }
+                if path_bank_path is not None and cache_meta is not None:
+                    merge_astar_paths_into_path_bank(
+                        path_bank_path, [enriched_route], mode, cache_meta
+                    )
+                break
+
+            if max_resample_attempts <= 0 or path_bank_path is None:
+                raise RuntimeError(
+                    f"A* mode={mode!r} failed for route {route_id}: "
+                    f"{route['x_init']} -> {route['x_goal']}"
+                )
+
+            resample_count += 1
+            if resample_count > max_resample_attempts:
+                raise RuntimeError(
+                    f"A* mode={mode!r} failed for route {route_id} after "
+                    f"{max_resample_attempts} resample attempts."
+                )
+
+            print(
+                f"  {mode} A* failed for route_id={route_id}; resampling start/goal "
+                f"({resample_count}/{max_resample_attempts})",
+                flush=True,
+            )
+            seen = _collect_endpoint_keys(working_routes, exclude_route_id=route_id)
+            x_init, x_goal, vanilla_path, _ = _sample_vanilla_solvable_route(
+                occ_grid,
+                statespace_hi,
+                map_resolution,
+                resample_rng,
+                seen,
+                max_resample_attempts,
+            )
+            route = {
+                "route_id": route_id,
+                "x_init": tuple(x_init),
+                "x_goal": tuple(x_goal),
+                "path": [tuple(float(v) for v in p) for p in vanilla_path],
             }
-        )
+            working_routes[idx - 1] = route
+            update_path_bank_vanilla_route(
+                path_bank_path, route_id, x_init, x_goal, vanilla_path
+            )
+
     return enriched
 
 
@@ -296,6 +442,8 @@ def get_or_compute_astar_paths(
     heatmap_prefix=None,
     heatmap_file=None,
     refresh=False,
+    max_resample_attempts=500,
+    resample_seed=None,
 ):
     """
     Use path-bank polylines for ``vanilla``; load or compute other modes and cache them
@@ -329,8 +477,11 @@ def get_or_compute_astar_paths(
         routes,
         mode=mode,
         social_graph=social_graph,
+        path_bank_path=path_bank_path,
+        cache_meta=cache_meta,
+        max_resample_attempts=max_resample_attempts,
+        resample_seed=resample_seed,
     )
-    merge_astar_paths_into_path_bank(path_bank_path, computed, mode, cache_meta)
     print(f"Cached {mode!r} paths in {path_bank_path.resolve()}")
     return computed
 
@@ -365,8 +516,16 @@ def load_or_generate_path_bank(
                     "path": _path_from_serializable(route["path"]),
                 }
             )
+        print(
+            f"Loaded {num_robots} pool routes from {path_bank_path.resolve()}",
+            flush=True,
+        )
         return parsed, {"source": "loaded", "path_bank_path": str(path_bank_path.resolve()), "payload": payload}
 
+    print(
+        f"Generating {num_robots} pool routes (vanilla A*)...",
+        flush=True,
+    )
     rng = np.random.default_rng(benchmark_seed)
     routes = []
     attempts = 0
@@ -398,6 +557,10 @@ def load_or_generate_path_bank(
                 "x_goal": [float(x_goal[0]), float(x_goal[1])],
                 "path": _path_to_serializable(planner.path),
             }
+        )
+        print(
+            f"Pool routes (vanilla A*): {len(routes)}/{num_robots}",
+            flush=True,
         )
 
     _save_path_bank(

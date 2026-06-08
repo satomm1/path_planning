@@ -107,6 +107,10 @@ def ensure_modified_path_pool(
 
     t0 = time.perf_counter()
     if milp_astar_mode != "vanilla":
+        print(
+            f"Caching MILP geometry for {len(pool)} routes (mode={milp_astar_mode!r})...",
+            flush=True,
+        )
         get_or_compute_astar_paths(
             occ_grid,
             statespace_hi,
@@ -118,6 +122,19 @@ def ensure_modified_path_pool(
             heatmap_prefix=heatmap_prefix,
             heatmap_file=heatmap_file,
             refresh=refresh,
+            max_resample_attempts=max_attempts,
+            resample_seed=int(benchmark_seed) + 1_000_003,
+        )
+        # Reload so resampled endpoints and vanilla bank paths stay in sync for trials.
+        pool, bank_meta = load_or_generate_path_bank(
+            occ_grid=occ_grid,
+            statespace_hi=statespace_hi,
+            map_resolution=map_resolution,
+            scenario_name=scenario_name,
+            num_robots=pool_size,
+            benchmark_seed=benchmark_seed,
+            max_attempts=max_attempts,
+            path_bank_path=path_bank_path,
         )
     pool_astar_build_s = float(time.perf_counter() - t0)
 
