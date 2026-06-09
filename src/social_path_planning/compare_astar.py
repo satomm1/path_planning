@@ -18,7 +18,7 @@ from social_path_planning.rrt_star import RRTStar
 from social_path_planning.utils import snap_to_grid
 
 
-SOLVER_MODES = ("vanilla", "modified", "rrt_vanilla")
+SOLVER_MODES = ("vanilla", "rrt_vanilla", "modified")
 FAILURE_POLICY = "resample_until_all_succeed"
 SOLVER_MODE_ALIASES = {
     "rrt": "rrt_vanilla",
@@ -29,9 +29,9 @@ SOLVER_MODE_ALIASES = {
     "a*": "vanilla",
 }
 SOLVER_PLOT_TITLES = {
-    "vanilla": "A* vanilla",
-    "modified": "A* social",
-    "rrt_vanilla": "RRT* vanilla",
+    "vanilla": "A*",
+    "rrt_vanilla": "RRT*",
+    "modified": "Social A*",
 }
 RIGHT_WALL_EXCLUSION_RADIUS = 5.0
 RIGHT_WALL_LARGE_RATIO = 0.7
@@ -58,7 +58,8 @@ def parse_solver_modes(solvers_arg, *, rrt_only=False):
             modes.append(mode)
     if not modes:
         raise ValueError("At least one solver must be selected.")
-    return modes
+    canonical = {m: i for i, m in enumerate(SOLVER_MODES)}
+    return sorted(modes, key=lambda m: canonical[m])
 
 
 def route_pair_key(x_init, x_goal):
@@ -637,8 +638,7 @@ def plot_debug_pair(
     ax.scatter(x_init[0], x_init[1], c="green", s=40, zorder=5, label="start")
     ax.scatter(x_goal[0], x_goal[1], c="gold", marker="*", s=70, zorder=5, label="goal")
     ax.set_title(f"Trial {trial_num}: Three-planner overlay")
-    ax.set_xlabel("X (m)")
-    ax.set_ylabel("Y (m)")
+    ax.set_axis_off()
     ax.legend(handles=handles, loc="upper right", fontsize=8)
     fig.tight_layout()
     plt.show()
@@ -677,9 +677,8 @@ def plot_sample_paths(
         title = SOLVER_PLOT_TITLES[solver]
         if solver == "modified" and modified_title:
             title = modified_title
-        ax.set_title(title, fontsize=16)
-        ax.set_xlabel("X (m)")
-        ax.set_ylabel("Y (m)")
+        ax.set_title(title, fontsize=22)
+        ax.set_axis_off()
 
         handles = [
             Line2D([0], [0], marker="o", color="k", markerfacecolor="green", markersize=6, label="start"),
@@ -770,7 +769,7 @@ def run_experiment(
         )
 
     modified_plot_title = (
-        "A* social (heatmap graph)" if social_graph is not None else SOLVER_PLOT_TITLES["modified"]
+        "Social A* (heatmap graph)" if social_graph is not None else SOLVER_PLOT_TITLES["modified"]
     )
     print(f"Active solvers: {', '.join(solver_modes)}")
     rrt_failure_plots_saved = 0
@@ -1036,8 +1035,8 @@ def parse_args():
         "--solvers",
         default="all",
         help=(
-            "Comma/space-separated subset to run: vanilla, modified, rrt_vanilla "
-            "(aliases: astar, social, rrt). Default: all three."
+            "Comma/space-separated subset to run: vanilla, rrt_vanilla, modified "
+            "(aliases: astar, rrt, social). Default: all three."
         ),
     )
     parser.add_argument(
