@@ -7,7 +7,10 @@ import csv
 import json
 from pathlib import Path
 
+import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.lines import Line2D
+from scipy.spatial.distance import cdist
 
 from social_path_planning.benchmark_sparse_snapshots import (
     _path_from_serializable,
@@ -17,6 +20,7 @@ from social_path_planning.benchmark_sparse_snapshots import (
 )
 from social_path_planning.compare_astar import (
     SOLVER_MODES,
+    SOLVER_PLOT_TITLES,
     build_occ_grid,
     build_sparse_graph_from_heatmap,
     generate_random_free_point,
@@ -26,44 +30,265 @@ from social_path_planning.compare_astar import (
 from social_path_planning.compare_astar import _rrt_kwargs_from_config as rrt_kwargs_from_config
 from social_path_planning.mapf_comparison.ensemble import sample_route_subset
 from social_path_planning.mapf_comparison.solution_metrics import dedupe_world_path
-from social_path_planning.multi_planning import (
-    ROBOT_DIAMETER,
-    detect_collision_pairs_for_agent_pair,
-)
 
 FAILURE_POLICY = "all_solvers_same_endpoints"
 BANK_PLANNING_MODES = SOLVER_MODES
 NON_VANILLA_MODES = ("modified", "rrt_vanilla")
+ROBOT_DIAMETER = 0.5
+DEFAULT_SAME_DIRECTION_ANGLE_TOL_DEG = 1.0
 
 
-def normalize_path_for_metrics(path, occ_grid):
-    snapped = []
-    for point in path:
-        x, y = occ_grid.snap_to_grid(point)
-        snapped.append((float(x), float(y)))
-    return dedupe_world_path(snapped)
+def _same_direction_cos_min(angle_tol_deg):
+    return float(np.cos(np.radians(float(angle_tol_deg))))
 
 
-def spatial_overlap_metrics(paths, threshold=ROBOT_DIAMETER):
+def resample_polyline_by_spacing(path, spacing_m):
+    """Insert points along arc length every ``spacing_m`` meters; always keeps endpoints."""
+    if spacing_m is None or spacing_m <= 0:
+        return dedupe_world_path([(float(p[0]), float(p[1])) for p in path])
+    if not path:
+        return []
+    if len(path) == 1:
+        return [(float(path[0][0]), float(path[0][1]))]
+
+    spacing_m = float(spacing_m)
+    result = [(float(path[0][0]), float(path[0][1]))]
+    dist_along = 0.0
+    next_sample = spacing_m
+
+    for i in range(len(path) - 1):
+        p0 = np.array(path[i], dtype=float)
+        p1 = np.array(path[i + 1], dtype=float)
+        seg = p1 - p0
+        seg_len = float(np.linalg.norm(seg))
+        if seg_len < 1e-12:
+            continue
+        u = seg / seg_len
+        seg_start = dist_along
+        dist_along += seg_len
+        while next_sample <= dist_along + 1e-9:
+            local = next_sample - seg_start
+            pt = p0 + u * local
+            result.append((float(pt[0]), float(pt[1])))
+            next_sample += spacing_m
+
+    end = (float(path[-1][0]), float(path[-1][1]))
+    if result[-1] != end:
+        result.append(end)
+    return dedupe_world_path(result)
+
+
+def normalize_path_for_overlap(path, spacing_m):
+    """Arc-length resample all polylines before overlap scoring (no grid snap)."""
+    return resample_polyline_by_spacing(path, spacing_m)
+
+
+def _unique_overlap_segments_for_pair(path_idx_a, path_idx_b, seg_i, seg_j):
+    """Each (path, segment index) counts at most once per agent pair."""
+    unique = set()
+    for si, sj in zip(seg_i, seg_j):
+        unique.add((path_idx_a, int(si)))
+        unique.add((path_idx_b, int(sj)))
+    return unique
+
+
+def _conflicting_segment_indices(
+    path_a,
+    path_b,
+    threshold=ROBOT_DIAMETER,
+    *,
+    same_direction_cos_min=None,
+):
+    """Vectorized segment-endpoint conflict detection (same rule as multi_planning)."""
+    empty = {"seg_i": [], "seg_j": [], "seg_i_excl_same_dir": [], "seg_j_excl_same_dir": []}
+    if len(path_a) < 2 or len(path_b) < 2:
+        return empty
+
+    a0 = np.asarray(path_a[:-1], dtype=float)
+    a1 = np.asarray(path_a[1:], dtype=float)
+    b0 = np.asarray(path_b[:-1], dtype=float)
+    b1 = np.asarray(path_b[1:], dtype=float)
+    t = float(threshold)
+
+    conflict = (
+        (cdist(a0, b0) <= t)
+        | (cdist(a0, b1) <= t)
+        | (cdist(a1, b0) <= t)
+        | (cdist(a1, b1) <= t)
+    )
+    seg_i, seg_j = np.nonzero(conflict)
+
+    if same_direction_cos_min is None:
+        excl_i, excl_j = seg_i, seg_j
+    else:
+        v_a = a1 - a0
+        v_b = b1 - b0
+        na = np.maximum(np.linalg.norm(v_a, axis=1, keepdims=True), 1e-12)
+        nb = np.maximum(np.linalg.norm(v_b, axis=1, keepdims=True), 1e-12)
+        dot = (v_a / na) @ (v_b / nb).T
+        conflict_excl = conflict & (dot < float(same_direction_cos_min))
+        excl_i, excl_j = np.nonzero(conflict_excl)
+
+    return {
+        "seg_i": seg_i.astype(int).tolist(),
+        "seg_j": seg_j.astype(int).tolist(),
+        "seg_i_excl_same_dir": excl_i.astype(int).tolist(),
+        "seg_j_excl_same_dir": excl_j.astype(int).tolist(),
+    }
+
+
+def _overlap_for_agent_pair(
+    path_a,
+    path_b,
+    path_idx_a,
+    path_idx_b,
+    threshold=ROBOT_DIAMETER,
+    *,
+    same_direction_cos_min=None,
+):
+    """Return deduped overlap counts for one agent pair."""
+    conflicts = _conflicting_segment_indices(
+        path_a,
+        path_b,
+        threshold,
+        same_direction_cos_min=same_direction_cos_min,
+    )
+    seg_i = conflicts["seg_i"]
+    seg_j = conflicts["seg_j"]
+    seg_i_excl = conflicts["seg_i_excl_same_dir"]
+    seg_j_excl = conflicts["seg_j_excl_same_dir"]
+    unique = _unique_overlap_segments_for_pair(path_idx_a, path_idx_b, seg_i, seg_j)
+    unique_excl = _unique_overlap_segments_for_pair(
+        path_idx_a, path_idx_b, seg_i_excl, seg_j_excl
+    )
+    return {
+        "overlap_segment_count": len(unique),
+        "overlap_segment_count_excl_same_dir": len(unique_excl),
+        "overlap_segment_pair_count": len(seg_i),
+        "overlap_segment_pair_count_excl_same_dir": len(seg_i_excl),
+        "unique_segments": unique,
+        "unique_segments_excl_same_dir": unique_excl,
+        "seg_i": seg_i,
+        "seg_j": seg_j,
+    }
+
+
+def _aggregate_overlap(
+    paths,
+    threshold=ROBOT_DIAMETER,
+    *,
+    same_direction_cos_min=None,
+    collect_segments=False,
+):
     n = len(paths)
     num_pairs = n * (n - 1) // 2
     total_segments = 0
+    total_segments_excl = 0
+    total_segment_pairs = 0
     overlap_pairs = 0
+    overlap_pairs_excl = 0
+    by_path = [set() for _ in range(n)] if collect_segments else None
+    by_path_excl_same_dir = [set() for _ in range(n)] if collect_segments else None
+
     for i in range(n):
         for j in range(i + 1, n):
-            _, _, seg_i, _ = detect_collision_pairs_for_agent_pair(
-                paths[i], paths[j], i, j, threshold
+            pair = _overlap_for_agent_pair(
+                paths[i],
+                paths[j],
+                i,
+                j,
+                threshold,
+                same_direction_cos_min=same_direction_cos_min,
             )
-            count = len(seg_i)
-            total_segments += count
-            if count > 0:
+            total_segment_pairs += pair["overlap_segment_pair_count"]
+            total_segments += pair["overlap_segment_count"]
+            total_segments_excl += pair["overlap_segment_count_excl_same_dir"]
+            if pair["overlap_segment_count"] > 0:
                 overlap_pairs += 1
+            if pair["overlap_segment_count_excl_same_dir"] > 0:
+                overlap_pairs_excl += 1
+            if collect_segments:
+                for path_idx, seg_idx in pair["unique_segments"]:
+                    by_path[path_idx].add(seg_idx)
+                for path_idx, seg_idx in pair["unique_segments_excl_same_dir"]:
+                    by_path_excl_same_dir[path_idx].add(seg_idx)
+
     mean_per_pair = float(total_segments) / num_pairs if num_pairs else 0.0
-    return {
+    mean_per_pair_excl = float(total_segments_excl) / num_pairs if num_pairs else 0.0
+    metrics = {
         "overlap_segment_count": int(total_segments),
+        "overlap_segment_count_excl_same_dir": int(total_segments_excl),
+        "overlap_segment_pair_count": int(total_segment_pairs),
         "overlap_pairs": int(overlap_pairs),
+        "overlap_pairs_excl_same_dir": int(overlap_pairs_excl),
         "mean_per_pair": float(mean_per_pair),
+        "mean_per_pair_excl_same_dir": float(mean_per_pair_excl),
     }
+    if collect_segments:
+        return metrics, by_path, by_path_excl_same_dir
+    return metrics
+
+
+def spatial_overlap_metrics(paths, threshold=ROBOT_DIAMETER, *, same_direction_cos_min=None):
+    return _aggregate_overlap(
+        paths,
+        threshold,
+        same_direction_cos_min=same_direction_cos_min,
+        collect_segments=False,
+    )
+
+
+def conflicting_segments_by_path(paths, threshold=ROBOT_DIAMETER, *, same_direction_cos_min=None):
+    """For each path index, return segment indices that participate in any overlap."""
+    _, by_path, _ = _aggregate_overlap(
+        paths,
+        threshold,
+        same_direction_cos_min=same_direction_cos_min,
+        collect_segments=True,
+    )
+    return by_path
+
+
+def _plot_path_with_overlap_highlights(
+    ax,
+    path,
+    base_color,
+    overlap_seg_indices,
+    overlap_excl_same_dir_indices=None,
+):
+    excl = overlap_excl_same_dir_indices or set()
+    for k in range(len(path) - 1):
+        x0, y0 = path[k]
+        x1, y1 = path[k + 1]
+        if k in overlap_seg_indices:
+            ax.plot(
+                [x0, x1],
+                [y0, y1],
+                color="crimson",
+                linewidth=4.5,
+                alpha=0.95,
+                solid_capstyle="round",
+                zorder=8,
+            )
+        if k in excl:
+            ax.plot(
+                [x0, x1],
+                [y0, y1],
+                color="royalblue",
+                linewidth=4.5,
+                alpha=0.95,
+                solid_capstyle="round",
+                zorder=9,
+            )
+        if k not in overlap_seg_indices:
+            ax.plot(
+                [x0, x1],
+                [y0, y1],
+                color=base_color,
+                linewidth=2.5,
+                alpha=0.85,
+                zorder=5,
+            )
 
 
 def _modified_solver_config(heatmap_prefix, heatmap_file, sparse_graph_threshold, sparse_min_component_size):
@@ -447,6 +672,82 @@ def build_path_bank(
     return routes, {"path_bank_path": str(path_bank_path.resolve()), "num_routes": len(routes)}
 
 
+def plot_trial_debug(
+    occ_grid,
+    trial_id,
+    route_ids,
+    subset_routes,
+    paths_by_mode,
+    metrics_by_mode,
+    overlap_highlight_by_mode,
+    overlap_excl_highlight_by_mode,
+    solver_modes,
+):
+    """Show one figure per trial; block until the user presses Enter."""
+    n = len(solver_modes)
+    fig, axes = plt.subplots(1, n, figsize=(6 * n, 6))
+    if n == 1:
+        axes = [axes]
+
+    cmap = plt.get_cmap("tab10", max(len(subset_routes), 1))
+    for j, mode in enumerate(solver_modes):
+        ax = axes[j]
+        occ_grid.plot_grid(ax=ax)
+        paths = paths_by_mode[mode]
+        overlap_by_path = overlap_highlight_by_mode[mode]
+        overlap_excl_by_path = overlap_excl_highlight_by_mode[mode]
+        for i, (route, path) in enumerate(zip(subset_routes, paths)):
+            color = cmap(i % cmap.N)
+            _plot_path_with_overlap_highlights(
+                ax,
+                path,
+                color,
+                overlap_by_path[i],
+                overlap_excl_by_path[i],
+            )
+            x_init = route["x_init"]
+            x_goal = route["x_goal"]
+            ax.scatter(x_init[0], x_init[1], c=[color], s=40, zorder=9, marker="o")
+            ax.scatter(x_goal[0], x_goal[1], c=[color], marker="*", s=80, zorder=9)
+
+        overlap = metrics_by_mode[mode]["overlap_segment_count"]
+        overlap_excl = metrics_by_mode[mode]["overlap_segment_count_excl_same_dir"]
+        ax.set_title(
+            f"{SOLVER_PLOT_TITLES.get(mode, mode)}\n"
+            f"{overlap} overlapping segments\n"
+            f"({overlap_excl} excl. same direction)",
+            fontsize=16,
+        )
+        ax.set_axis_off()
+        handles = [
+            Line2D([0], [0], color="crimson", linewidth=4.5, label="all overlapping segments"),
+            Line2D(
+                [0],
+                [0],
+                color="royalblue",
+                linewidth=4.5,
+                label="overlap (excl. same direction)",
+            ),
+            Line2D([0], [0], marker="o", color="k", markerfacecolor="green", markersize=6, label="start"),
+            Line2D([0], [0], marker="*", color="k", markerfacecolor="gold", markersize=10, label="goal"),
+        ]
+        ax.legend(handles=handles, loc="best", fontsize=10)
+
+    fig.suptitle(
+        f"Trial {trial_id} — routes {route_ids}",
+        fontsize=20,
+        y=1.02,
+    )
+    fig.tight_layout()
+    plt.show(block=False)
+    fig.canvas.draw_idle()
+    try:
+        input(f"Trial {trial_id}: press Enter for next trial...")
+    except EOFError:
+        pass
+    plt.close(fig)
+
+
 def run_overlap_trials(
     *,
     path_bank_path,
@@ -457,6 +758,10 @@ def run_overlap_trials(
     occ_grid,
     solver_modes,
     output,
+    debug_plot_trials=False,
+    overlap_sample_spacing=None,
+    same_direction_cos_min=None,
+    same_direction_angle_tol_deg=DEFAULT_SAME_DIRECTION_ANGLE_TOL_DEG,
 ):
     with Path(path_bank_path).open("r", encoding="utf-8") as f:
         payload = json.load(f)
@@ -466,10 +771,31 @@ def run_overlap_trials(
     trial_rows = []
     for trial_id in range(1, num_trials + 1):
         subset_routes, route_ids = sample_route_subset(bank_routes, num_agents, rng)
+        paths_by_mode = {}
+        metrics_by_mode = {}
+        overlap_highlight_by_mode = {}
+        overlap_excl_highlight_by_mode = {}
         for mode in solver_modes:
             raw_paths = [_path_for_mode(r, mode) for r in subset_routes]
-            paths = [normalize_path_for_metrics(p, occ_grid) for p in raw_paths]
-            metrics = spatial_overlap_metrics(paths)
+            paths = [normalize_path_for_overlap(p, overlap_sample_spacing) for p in raw_paths]
+            if debug_plot_trials:
+                metrics, by_path, by_path_excl = _aggregate_overlap(
+                    paths,
+                    same_direction_cos_min=same_direction_cos_min,
+                    collect_segments=True,
+                )
+            else:
+                metrics = spatial_overlap_metrics(
+                    paths,
+                    same_direction_cos_min=same_direction_cos_min,
+                )
+                by_path = None
+                by_path_excl = None
+            paths_by_mode[mode] = paths
+            metrics_by_mode[mode] = metrics
+            if by_path is not None:
+                overlap_highlight_by_mode[mode] = by_path
+                overlap_excl_highlight_by_mode[mode] = by_path_excl
             trial_rows.append(
                 {
                     "trial": trial_id,
@@ -479,6 +805,18 @@ def run_overlap_trials(
                     **metrics,
                 }
             )
+        if debug_plot_trials:
+            plot_trial_debug(
+                occ_grid,
+                trial_id,
+                route_ids,
+                subset_routes,
+                paths_by_mode,
+                metrics_by_mode,
+                overlap_highlight_by_mode,
+                overlap_excl_highlight_by_mode,
+                solver_modes,
+            )
 
     summary = {}
     for mode in solver_modes:
@@ -486,28 +824,71 @@ def run_overlap_trials(
             [r["overlap_segment_count"] for r in trial_rows if r["solver"] == mode],
             dtype=float,
         )
+        values_excl = np.array(
+            [
+                r["overlap_segment_count_excl_same_dir"]
+                for r in trial_rows
+                if r["solver"] == mode
+            ],
+            dtype=float,
+        )
         summary[mode] = {
             "num_trials": int(len(values)),
             "overlap_segment_count_mean": float(np.mean(values)) if len(values) else float("nan"),
             "overlap_segment_count_std": float(np.std(values)) if len(values) else float("nan"),
+            "overlap_segment_count_excl_same_dir_mean": (
+                float(np.mean(values_excl)) if len(values_excl) else float("nan")
+            ),
+            "overlap_segment_count_excl_same_dir_std": (
+                float(np.std(values_excl)) if len(values_excl) else float("nan")
+            ),
         }
 
-    print("\n=== Spatial overlap (segment conflicts, robot_d={:.2f}m) ===".format(ROBOT_DIAMETER))
-    print(f"Trials: {num_trials}, agents/trial: {num_agents}, pool: {pool_size}")
+    spacing_label = (
+        "disabled" if overlap_sample_spacing is None or overlap_sample_spacing <= 0
+        else f"{overlap_sample_spacing:.4g}m"
+    )
+    print("\n=== Spatial overlap (unique segments, robot_d={:.2f}m) ===".format(ROBOT_DIAMETER))
+    print(f"Trials: {num_trials}, agents/trial: {num_agents}, pool: {pool_size}, sample spacing: {spacing_label}")
+    print("Secondary metric omits co-directional overlaps (same travel direction within angle tolerance).")
     for mode in solver_modes:
         s = summary[mode]
         print(
-            f"{mode:12s}  mean={s['overlap_segment_count_mean']:.1f}  "
-            f"std={s['overlap_segment_count_std']:.1f}"
+            f"{mode:12s}  total mean={s['overlap_segment_count_mean']:.1f}  "
+            f"std={s['overlap_segment_count_std']:.1f}  |  "
+            f"excl same-dir mean={s['overlap_segment_count_excl_same_dir_mean']:.1f}  "
+            f"std={s['overlap_segment_count_excl_same_dir_std']:.1f}"
         )
 
     if output:
-        save_results(output, payload, trial_rows, summary, solver_modes, num_agents, pool_size, trial_seed)
+        save_results(
+            output,
+            payload,
+            trial_rows,
+            summary,
+            solver_modes,
+            num_agents,
+            pool_size,
+            trial_seed,
+            overlap_sample_spacing=overlap_sample_spacing,
+            same_direction_angle_tol_deg=same_direction_angle_tol_deg,
+        )
 
     return trial_rows, summary
 
 
-def save_results(output_path, bank_payload, trial_rows, summary, solver_modes, num_agents, pool_size, trial_seed):
+def save_results(
+    output_path,
+    bank_payload,
+    trial_rows,
+    summary,
+    solver_modes,
+    num_agents,
+    pool_size,
+    trial_seed,
+    overlap_sample_spacing=None,
+    same_direction_angle_tol_deg=DEFAULT_SAME_DIRECTION_ANGLE_TOL_DEG,
+):
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -521,6 +902,8 @@ def save_results(output_path, bank_payload, trial_rows, summary, solver_modes, n
                 "trial_seed": trial_seed,
                 "solver_modes": list(solver_modes),
                 "robot_diameter_m": ROBOT_DIAMETER,
+                "overlap_sample_spacing_m": overlap_sample_spacing,
+                "same_direction_angle_tol_deg": same_direction_angle_tol_deg,
             },
             "summary": summary,
             "trials": trial_rows,
@@ -537,8 +920,12 @@ def save_results(output_path, bank_payload, trial_rows, summary, solver_modes, n
             "sampled_route_ids",
             "num_agents",
             "overlap_segment_count",
+            "overlap_segment_count_excl_same_dir",
+            "overlap_segment_pair_count",
             "overlap_pairs",
+            "overlap_pairs_excl_same_dir",
             "mean_per_pair",
+            "mean_per_pair_excl_same_dir",
         ]
         with output_path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -568,6 +955,29 @@ def parse_args():
     parser.add_argument("--num-trials", type=int, default=50)
     parser.add_argument("--trial-seed", type=int, default=0)
     parser.add_argument("--output", type=str, default=None)
+    parser.add_argument(
+        "--debug-plot-trials",
+        action="store_true",
+        help="Show an interactive 1x3 figure per trial; press Enter to advance.",
+    )
+    parser.add_argument(
+        "--overlap-sample-spacing",
+        type=float,
+        default=None,
+        help=(
+            "Arc-length spacing (m) for overlap polylines before scoring. "
+            "Default: map resolution. Use 0 to disable resampling."
+        ),
+    )
+    parser.add_argument(
+        "--same-direction-angle-tol-deg",
+        type=float,
+        default=DEFAULT_SAME_DIRECTION_ANGLE_TOL_DEG,
+        help=(
+            "Segment pairs with travel directions within this angle (degrees) "
+            "are treated as same-direction and omitted from the secondary overlap metric."
+        ),
+    )
     parser.add_argument(
         "--refresh-mode",
         action="append",
@@ -599,6 +1009,10 @@ def parse_args():
         raise ValueError("--num-agents must be > 0")
     if args.num_trials < 0:
         raise ValueError("--num-trials must be >= 0")
+    if args.overlap_sample_spacing is not None and args.overlap_sample_spacing < 0:
+        raise ValueError("--overlap-sample-spacing must be >= 0")
+    if args.same_direction_angle_tol_deg < 0 or args.same_direction_angle_tol_deg > 180:
+        raise ValueError("--same-direction-angle-tol-deg must be in [0, 180]")
     if args.max_attempts is None:
         args.max_attempts = max(100, 50 * args.pool_size)
     if args.path_bank is None:
@@ -611,6 +1025,10 @@ def main():
     args = parse_args()
     path_bank_path = Path(args.path_bank)
     occ_grid, _, resolution, statespace_hi = build_occ_grid(args.scenario)
+    overlap_sample_spacing = resolution if args.overlap_sample_spacing is None else args.overlap_sample_spacing
+    if overlap_sample_spacing == 0:
+        overlap_sample_spacing = None
+    same_direction_cos_min = _same_direction_cos_min(args.same_direction_angle_tol_deg)
 
     modified_config = _modified_solver_config(
         args.heatmap_prefix,
@@ -717,6 +1135,10 @@ def main():
         occ_grid=occ_grid,
         solver_modes=args.solver_modes,
         output=args.output,
+        debug_plot_trials=args.debug_plot_trials,
+        overlap_sample_spacing=overlap_sample_spacing,
+        same_direction_cos_min=same_direction_cos_min,
+        same_direction_angle_tol_deg=args.same_direction_angle_tol_deg,
     )
 
 
