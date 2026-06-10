@@ -237,6 +237,7 @@ def enrich_routes_with_astar_paths(
     cache_meta=None,
     max_resample_attempts=500,
     resample_seed=None,
+    rrt_kwargs=None,
 ):
     """
     Re-plan each route's geometry with A* (vanilla or modified/social) at fixed start/goal.
@@ -256,9 +257,27 @@ def enrich_routes_with_astar_paths(
         route_id = int(route["route_id"])
         resample_count = 0
 
+        if path_bank_path is not None and cache_meta is not None:
+            cached_one = _try_load_cached_astar_paths(
+                [route], path_bank_path, mode, cache_meta
+            )
+            if cached_one is not None:
+                enriched.append(cached_one[0])
+                working_routes[idx - 1] = {
+                    "route_id": route_id,
+                    "x_init": tuple(cached_one[0]["x_init"]),
+                    "x_goal": tuple(cached_one[0]["x_goal"]),
+                    "path": cached_one[0]["path"],
+                }
+                print(
+                    f"Cached {mode!r} route {idx}/{total} (route_id={route_id})",
+                    flush=True,
+                )
+                continue
+
         while True:
             print(
-                f"MILP geometry ({mode} A*): {idx}/{total} "
+                f"Planning geometry ({mode!r}): {idx}/{total} "
                 f"(route_id={route_id})",
                 flush=True,
             )
@@ -270,6 +289,7 @@ def enrich_routes_with_astar_paths(
                 route["x_goal"],
                 map_resolution,
                 social_graph=social_graph,
+                rrt_kwargs=rrt_kwargs,
             )
             if path is not None and len(path) >= 2:
                 enriched_route = {
@@ -337,10 +357,16 @@ def astar_path_cache_meta(
     *,
     heatmap_prefix=None,
     heatmap_file=None,
+    rrt_config=None,
 ):
     """Metadata describing how cached ``paths_by_mode`` polylines were produced."""
     if mode == "vanilla":
         return {"mode": "vanilla", "solver": "vanilla"}
+    if mode == "rrt_vanilla":
+        cfg = {"mode": mode, "solver": "rrt_vanilla"}
+        if rrt_config:
+            cfg["rrt_config"] = dict(rrt_config)
+        return cfg
     if social_graph is not None:
         return {
             "mode": mode,
@@ -444,6 +470,7 @@ def get_or_compute_astar_paths(
     refresh=False,
     max_resample_attempts=500,
     resample_seed=None,
+    rrt_kwargs=None,
 ):
     """
     Use path-bank polylines for ``vanilla``; load or compute other modes and cache them
@@ -453,11 +480,15 @@ def get_or_compute_astar_paths(
         return routes
 
     path_bank_path = Path(path_bank_path)
+    rrt_config = None
+    if mode == "rrt_vanilla" and rrt_kwargs:
+        rrt_config = {k: v for k, v in rrt_kwargs.items()}
     cache_meta = astar_path_cache_meta(
         mode,
         social_graph,
         heatmap_prefix=heatmap_prefix,
         heatmap_file=heatmap_file,
+        rrt_config=rrt_config,
     )
 
     if not refresh:
@@ -469,7 +500,7 @@ def get_or_compute_astar_paths(
             )
             return cached
 
-    print(f"Planning A* mode={mode!r} (will cache in path bank)...")
+    print(f"Planning mode={mode!r} (will cache in path bank)...")
     computed = enrich_routes_with_astar_paths(
         occ_grid,
         statespace_hi,
@@ -481,6 +512,7 @@ def get_or_compute_astar_paths(
         cache_meta=cache_meta,
         max_resample_attempts=max_resample_attempts,
         resample_seed=resample_seed,
+        rrt_kwargs=rrt_kwargs,
     )
     print(f"Cached {mode!r} paths in {path_bank_path.resolve()}")
     return computed
@@ -498,38 +530,43 @@ def load_or_generate_path_bank(
     astar_mode="vanilla",
 ):
     path_bank_path = Path(path_bank_path)
-    if path_bank_path.exists():
-        with path_bank_path.open("r", encoding="utf-8") as f:
-            payload = json.load(f)
-        routes = payload.get("routes", [])
-        if len(routes) < num_robots:
-            raise ValueError(
-                f"Existing path bank has {len(routes)} robots but {num_robots} are required: {path_bank_path}"
-            )
-        parsed = []
-        for route in routes[:num_robots]:
-            parsed.append(
-                {
-                    "route_id": int(route["route_id"]),
-                    "x_init": tuple(float(v) for v in route["x_init"]),
-                    "x_goal": tuple(float(v) for v in route["x_goal"]),
-                    "path": _path_from_serializable(route["path"]),
-                }
-            )
-        print(
-            f"Loaded {num_robots} pool routes from {path_bank_path.resolve()}",
-            flush=True,
-        )
-        return parsed, {"source": "loaded", "path_bank_path": str(path_bank_path.resolve()), "payload": payload}
-
-    print(
-        f"Generating {num_robots} pool routes (vanilla A*)...",
-        flush=True,
-    )
-    rng = np.random.default_rng(benchmark_seed)
     routes = []
     attempts = 0
     seen = set()
+    if path_bank_path.exists():
+        with path_bank_path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        routes = list(payload.get("routes", []))
+        attempts = int(payload.get("sampling_attempts", 0))
+        if len(routes) >= num_robots:
+            parsed = []
+            for route in routes[:num_robots]:
+                parsed.append(
+                    {
+                        "route_id": int(route["route_id"]),
+                        "x_init": tuple(float(v) for v in route["x_init"]),
+                        "x_goal": tuple(float(v) for v in route["x_goal"]),
+                        "path": _path_from_serializable(route["path"]),
+                    }
+                )
+            print(
+                f"Loaded {num_robots} pool routes from {path_bank_path.resolve()}",
+                flush=True,
+            )
+            return parsed, {"source": "loaded", "path_bank_path": str(path_bank_path.resolve()), "payload": payload}
+        for route in routes:
+            seen.add(_route_endpoint_key(route["x_init"], route["x_goal"]))
+        print(
+            f"Resuming path bank ({len(routes)}/{num_robots} routes) from {path_bank_path.resolve()}",
+            flush=True,
+        )
+
+    if not routes:
+        print(
+            f"Generating {num_robots} pool routes (vanilla A*)...",
+            flush=True,
+        )
+    rng = np.random.default_rng(int(benchmark_seed) + len(routes) * 1009)
     while len(routes) < num_robots:
         attempts += 1
         if attempts > max_attempts:
@@ -558,14 +595,14 @@ def load_or_generate_path_bank(
                 "path": _path_to_serializable(planner.path),
             }
         )
+        _save_path_bank(
+            path_bank_path, scenario_name, benchmark_seed, num_robots, attempts, routes, astar_mode=astar_mode
+        )
         print(
             f"Pool routes (vanilla A*): {len(routes)}/{num_robots}",
             flush=True,
         )
 
-    _save_path_bank(
-        path_bank_path, scenario_name, benchmark_seed, num_robots, attempts, routes, astar_mode=astar_mode
-    )
     parsed = [
         {
             "route_id": int(route["route_id"]),
