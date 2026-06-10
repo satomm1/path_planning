@@ -21,24 +21,24 @@ hallway_data = np.array([6.386896010005148,
 ])
 
 if __name__ == "__main__":
-    plt.figure(figsize=(8, 6))
+    plt.figure(figsize=(8, 5))
 
     # Plot horizontal line at y = 1
-    plt.axhline(y=1, color='gray', linestyle='--', label='A*')
+    plt.axhline(y=1, color='black', linestyle='--', label='Vanilla A*', linewidth=2)
 
     grid2_speedups = grid2_data[1:] / grid2_data[0]
     hallway_speedups = hallway_data[1:] / hallway_data[0]
 
     # Plot speedups
-    plt.plot(range(50, 50*len(grid2_data), 50), grid2_speedups, marker='o', label='Grid2 Scenario')
-    plt.plot(range(50, 50*len(hallway_data), 50), hallway_speedups, marker='o', label='Hallway '
-                                                                                  'Scenario')
-    plt.xlabel("Number of Planned Paths in Social Graph", fontsize=16)
-    plt.ylabel("Relative Path Planning Time", fontsize=16)
-    plt.xticks(fontsize=14)
-    plt.yticks(fontsize=14)
-    plt.legend(fontsize=12, loc='upper right', )
-    plt.title("Computation Time for Social Graphs", fontsize=16)
+    plt.plot(range(50, 50*len(grid2_data), 50), grid2_speedups, marker='o', label='Environment 1')
+    plt.plot(range(50, 50*len(hallway_data), 50), hallway_speedups, marker='o',
+             label='Environment 2')
+    plt.xlabel("Number of Planned Paths in Social Graph", fontsize=18)
+    plt.ylabel("Relative Path Planning Time", fontsize=18)
+    plt.xticks(fontsize=16)
+    plt.yticks(fontsize=16)
+    plt.legend(fontsize=14, loc='upper right', )
+    plt.title("Computation Time Reduction With Social Graphs", fontsize=18)
     plt.tight_layout()
     plt.savefig("benchmarks/benchmark_plot.png", dpi=600)
     plt.show()
