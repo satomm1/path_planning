@@ -36,6 +36,31 @@ BANK_PLANNING_MODES = SOLVER_MODES
 NON_VANILLA_MODES = ("modified", "rrt_vanilla")
 ROBOT_DIAMETER = 0.5
 DEFAULT_SAME_DIRECTION_ANGLE_TOL_DEG = 1.0
+DEFAULT_MIN_AGENTS = 2
+DEFAULT_MAX_AGENTS = 20
+DEFAULT_NUM_TRIALS = 100
+OVERLAP_METRIC_PLOT_SPECS = (
+    ("overlap_segment_count", "-", "total"),
+    ("overlap_segment_count_excl_same_dir", "--", "excl. same direction"),
+)
+TRIAL_CSV_FIELDNAMES = [
+    "trial",
+    "solver",
+    "sampled_route_ids",
+    "num_agents",
+    "overlap_segment_count",
+    "overlap_segment_count_excl_same_dir",
+    "overlap_segment_pair_count",
+    "overlap_pairs",
+    "overlap_pairs_excl_same_dir",
+    "mean_per_pair",
+    "mean_per_pair_excl_same_dir",
+]
+SOLVER_PLOT_COLORS = {
+    "vanilla": "#1f77b4",
+    "rrt_vanilla": "#ff7f0e",
+    "modified": "#2ca02c",
+}
 
 
 def _same_direction_cos_min(angle_tol_deg):
@@ -748,25 +773,46 @@ def plot_trial_debug(
     plt.close(fig)
 
 
-def run_overlap_trials(
+def _summarize_trial_rows(trial_rows, solver_modes, *, num_agents=None):
+    summary = {}
+    for mode in solver_modes:
+        rows = [r for r in trial_rows if r["solver"] == mode]
+        if num_agents is not None:
+            rows = [r for r in rows if int(r["num_agents"]) == int(num_agents)]
+        values = np.array(
+            [r["overlap_segment_count"] for r in rows],
+            dtype=float,
+        )
+        values_excl = np.array(
+            [r["overlap_segment_count_excl_same_dir"] for r in rows],
+            dtype=float,
+        )
+        summary[mode] = {
+            "num_trials": int(len(values)),
+            "overlap_segment_count_mean": float(np.mean(values)) if len(values) else float("nan"),
+            "overlap_segment_count_std": float(np.std(values)) if len(values) else float("nan"),
+            "overlap_segment_count_excl_same_dir_mean": (
+                float(np.mean(values_excl)) if len(values_excl) else float("nan")
+            ),
+            "overlap_segment_count_excl_same_dir_std": (
+                float(np.std(values_excl)) if len(values_excl) else float("nan")
+            ),
+        }
+    return summary
+
+
+def _collect_overlap_trials(
     *,
-    path_bank_path,
-    pool_size,
+    bank_routes,
     num_agents,
     num_trials,
     trial_seed,
     occ_grid,
     solver_modes,
-    output,
     debug_plot_trials=False,
     overlap_sample_spacing=None,
     same_direction_cos_min=None,
-    same_direction_angle_tol_deg=DEFAULT_SAME_DIRECTION_ANGLE_TOL_DEG,
 ):
-    with Path(path_bank_path).open("r", encoding="utf-8") as f:
-        payload = json.load(f)
-    bank_routes = (payload.get("routes") or [])[:pool_size]
-
     rng = np.random.default_rng(trial_seed)
     trial_rows = []
     for trial_id in range(1, num_trials + 1):
@@ -817,218 +863,281 @@ def run_overlap_trials(
                 overlap_excl_highlight_by_mode,
                 solver_modes,
             )
+    return trial_rows
 
-    summary = {}
+
+def _agent_counts_for_run(*, min_agents, max_agents, num_agents=None):
+    if num_agents is not None:
+        return [int(num_agents)]
+    return list(range(int(min_agents), int(max_agents) + 1))
+
+
+def load_trial_rows_csv(csv_path):
+    csv_path = Path(csv_path)
+    rows = []
+    with csv_path.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            parsed = dict(row)
+            parsed["trial"] = int(parsed["trial"])
+            parsed["num_agents"] = int(parsed["num_agents"])
+            for key in (
+                "overlap_segment_count",
+                "overlap_segment_count_excl_same_dir",
+                "overlap_segment_pair_count",
+                "overlap_pairs",
+                "overlap_pairs_excl_same_dir",
+                "mean_per_pair",
+                "mean_per_pair_excl_same_dir",
+            ):
+                parsed[key] = float(parsed[key])
+            rows.append(parsed)
+    return rows
+
+
+def save_trial_rows_csv(output_path, trial_rows):
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f, fieldnames=TRIAL_CSV_FIELDNAMES, extrasaction="ignore"
+        )
+        writer.writeheader()
+        for row in trial_rows:
+            writer.writerow(row)
+    print(f"\nSaved trial results to: {output_path.resolve()}")
+
+
+def plot_overlap_agent_sweep(
+    trial_rows,
+    solver_modes,
+    *,
+    plot_output=None,
+    show_plot=True,
+):
+    agent_counts = sorted({int(r["num_agents"]) for r in trial_rows})
+    if not agent_counts:
+        raise ValueError("No trial rows to plot.")
+
+    fig, ax = plt.subplots(figsize=(8, 5.5))
+    x = np.asarray(agent_counts, dtype=float)
+
     for mode in solver_modes:
-        values = np.array(
-            [r["overlap_segment_count"] for r in trial_rows if r["solver"] == mode],
-            dtype=float,
+        color = SOLVER_PLOT_COLORS.get(mode, None)
+        for metric_key, linestyle, metric_suffix in OVERLAP_METRIC_PLOT_SPECS:
+            means = []
+            for n in agent_counts:
+                values = np.array(
+                    [
+                        r[metric_key]
+                        for r in trial_rows
+                        if r["solver"] == mode and int(r["num_agents"]) == n
+                    ],
+                    dtype=float,
+                )
+                means.append(float(np.mean(values)) if len(values) else float("nan"))
+            means = np.asarray(means, dtype=float)
+            ax.plot(
+                x,
+                means,
+                marker="o",
+                linewidth=2.2,
+                linestyle=linestyle,
+                color=color,
+            )
+
+    legend_handles = []
+    for mode in solver_modes:
+        color = SOLVER_PLOT_COLORS.get(mode, None)
+        solver_label = SOLVER_PLOT_TITLES.get(mode, mode)
+        for _metric_key, linestyle, metric_suffix in OVERLAP_METRIC_PLOT_SPECS:
+            legend_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    color=color,
+                    linewidth=2.2,
+                    linestyle=linestyle,
+                    label=f"{solver_label} ({metric_suffix})",
+                )
+            )
+
+    ax.set_xlabel("Number of Agents", fontsize=18)
+    ax.set_ylabel("Unique Overlapping Path Segments", fontsize=18)
+    ax.set_title("Path Overlap vs. Number of Agents", fontsize=20)
+    ax.set_xticks(agent_counts)
+    ax.grid(True, alpha=0.25)
+    ax.legend(handles=legend_handles, loc="best", fontsize=9)
+    fig.tight_layout()
+
+    if plot_output:
+        plot_output = Path(plot_output)
+        plot_output.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(plot_output, dpi=150, bbox_inches="tight")
+        print(f"Saved plot to: {plot_output.resolve()}")
+
+    if show_plot:
+        plt.show()
+    else:
+        plt.close(fig)
+
+    return fig
+
+
+def run_agent_overlap_sweep(
+    *,
+    path_bank_path,
+    pool_size,
+    min_agents,
+    max_agents,
+    num_agents=None,
+    num_trials,
+    trial_seed,
+    occ_grid,
+    solver_modes,
+    output,
+    plot_output=None,
+    show_plot=True,
+    plot=True,
+    debug_plot_trials=False,
+    overlap_sample_spacing=None,
+    same_direction_cos_min=None,
+    same_direction_angle_tol_deg=DEFAULT_SAME_DIRECTION_ANGLE_TOL_DEG,
+):
+    with Path(path_bank_path).open("r", encoding="utf-8") as f:
+        payload = json.load(f)
+    bank_routes = (payload.get("routes") or [])[:pool_size]
+
+    agent_counts = _agent_counts_for_run(
+        min_agents=min_agents,
+        max_agents=max_agents,
+        num_agents=num_agents,
+    )
+    if debug_plot_trials and len(agent_counts) != 1:
+        raise ValueError("--debug-plot-trials requires a single agent count.")
+
+    all_trial_rows = []
+    for num_agents_i in agent_counts:
+        if num_agents_i > pool_size:
+            raise ValueError(
+                f"num_agents ({num_agents_i}) exceeds pool_size ({pool_size})"
+            )
+        print(f"\n=== Agents: {num_agents_i} ({num_trials} trials) ===")
+        rows = _collect_overlap_trials(
+            bank_routes=bank_routes,
+            num_agents=num_agents_i,
+            num_trials=num_trials,
+            trial_seed=trial_seed + num_agents_i * 100_000,
+            occ_grid=occ_grid,
+            solver_modes=solver_modes,
+            debug_plot_trials=debug_plot_trials,
+            overlap_sample_spacing=overlap_sample_spacing,
+            same_direction_cos_min=same_direction_cos_min,
         )
-        values_excl = np.array(
-            [
-                r["overlap_segment_count_excl_same_dir"]
-                for r in trial_rows
-                if r["solver"] == mode
-            ],
-            dtype=float,
-        )
-        summary[mode] = {
-            "num_trials": int(len(values)),
-            "overlap_segment_count_mean": float(np.mean(values)) if len(values) else float("nan"),
-            "overlap_segment_count_std": float(np.std(values)) if len(values) else float("nan"),
-            "overlap_segment_count_excl_same_dir_mean": (
-                float(np.mean(values_excl)) if len(values_excl) else float("nan")
-            ),
-            "overlap_segment_count_excl_same_dir_std": (
-                float(np.std(values_excl)) if len(values_excl) else float("nan")
-            ),
-        }
+        all_trial_rows.extend(rows)
+        summary = _summarize_trial_rows(rows, solver_modes, num_agents=num_agents_i)
+        for mode in solver_modes:
+            s = summary[mode]
+            print(
+                f"  {mode:12s}  total mean={s['overlap_segment_count_mean']:.1f}  "
+                f"std={s['overlap_segment_count_std']:.1f}  |  "
+                f"excl same-dir mean={s['overlap_segment_count_excl_same_dir_mean']:.1f}  "
+                f"std={s['overlap_segment_count_excl_same_dir_std']:.1f}"
+            )
 
     spacing_label = (
         "disabled" if overlap_sample_spacing is None or overlap_sample_spacing <= 0
         else f"{overlap_sample_spacing:.4g}m"
     )
-    print("\n=== Spatial overlap (unique segments, robot_d={:.2f}m) ===".format(ROBOT_DIAMETER))
-    print(f"Trials: {num_trials}, agents/trial: {num_agents}, pool: {pool_size}, sample spacing: {spacing_label}")
-    print("Secondary metric omits co-directional overlaps (same travel direction within angle tolerance).")
-    for mode in solver_modes:
-        s = summary[mode]
-        print(
-            f"{mode:12s}  total mean={s['overlap_segment_count_mean']:.1f}  "
-            f"std={s['overlap_segment_count_std']:.1f}  |  "
-            f"excl same-dir mean={s['overlap_segment_count_excl_same_dir_mean']:.1f}  "
-            f"std={s['overlap_segment_count_excl_same_dir_std']:.1f}"
-        )
+    print("\n=== Spatial overlap sweep (unique segments, robot_d={:.2f}m) ===".format(ROBOT_DIAMETER))
+    print(
+        f"Agents: {agent_counts[0]}..{agent_counts[-1]}, "
+        f"trials/agent: {num_trials}, pool: {pool_size}, sample spacing: {spacing_label}"
+    )
 
     if output:
-        save_results(
-            output,
-            payload,
-            trial_rows,
-            summary,
+        save_trial_rows_csv(output, all_trial_rows)
+        config_path = Path(output).with_suffix(".config.json")
+        config_payload = {
+            "scenario": payload.get("scenario_name"),
+            "pool_size": pool_size,
+            "min_agents": agent_counts[0],
+            "max_agents": agent_counts[-1],
+            "agent_counts": agent_counts,
+            "num_trials": num_trials,
+            "trial_seed": trial_seed,
+            "solver_modes": list(solver_modes),
+            "robot_diameter_m": ROBOT_DIAMETER,
+            "overlap_sample_spacing_m": overlap_sample_spacing,
+            "same_direction_angle_tol_deg": same_direction_angle_tol_deg,
+        }
+        with config_path.open("w", encoding="utf-8") as f:
+            json.dump(config_payload, f, indent=2)
+
+    plot_title = (
+        f"Path overlap vs. number of agents "
+        f"({num_trials} trials/agent, robot d={ROBOT_DIAMETER:.2f} m)"
+    )
+    if plot or plot_output:
+        plot_overlap_agent_sweep(
+            all_trial_rows,
             solver_modes,
-            num_agents,
-            pool_size,
-            trial_seed,
-            overlap_sample_spacing=overlap_sample_spacing,
-            same_direction_angle_tol_deg=same_direction_angle_tol_deg,
+            plot_output=plot_output,
+            show_plot=show_plot,
+            title=plot_title,
         )
 
-    return trial_rows, summary
+    return all_trial_rows
 
 
-def save_results(
-    output_path,
-    bank_payload,
-    trial_rows,
-    summary,
-    solver_modes,
-    num_agents,
+def run_overlap_trials(
+    *,
+    path_bank_path,
     pool_size,
+    num_agents,
+    num_trials,
     trial_seed,
+    occ_grid,
+    solver_modes,
+    output,
+    debug_plot_trials=False,
     overlap_sample_spacing=None,
+    same_direction_cos_min=None,
     same_direction_angle_tol_deg=DEFAULT_SAME_DIRECTION_ANGLE_TOL_DEG,
 ):
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if output_path.suffix.lower() == ".json":
-        payload = {
-            "config": {
-                "scenario": bank_payload.get("scenario_name"),
-                "pool_size": pool_size,
-                "num_agents": num_agents,
-                "num_trials": len(trial_rows) // len(solver_modes) if solver_modes else 0,
-                "trial_seed": trial_seed,
-                "solver_modes": list(solver_modes),
-                "robot_diameter_m": ROBOT_DIAMETER,
-                "overlap_sample_spacing_m": overlap_sample_spacing,
-                "same_direction_angle_tol_deg": same_direction_angle_tol_deg,
-            },
-            "summary": summary,
-            "trials": trial_rows,
-        }
-        with output_path.open("w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        print(f"\nSaved results to: {output_path}")
-        return
-
-    if output_path.suffix.lower() == ".csv":
-        fieldnames = [
-            "trial",
-            "solver",
-            "sampled_route_ids",
-            "num_agents",
-            "overlap_segment_count",
-            "overlap_segment_count_excl_same_dir",
-            "overlap_segment_pair_count",
-            "overlap_pairs",
-            "overlap_pairs_excl_same_dir",
-            "mean_per_pair",
-            "mean_per_pair_excl_same_dir",
-        ]
-        with output_path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            for row in trial_rows:
-                writer.writerow(row)
-        print(f"\nSaved results to: {output_path}")
-        return
-
-    raise ValueError("Unsupported output format. Use .json or .csv")
-
-
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description=(
-            "Build a cached path bank (A*, RRT*, Social A*) and compare spatial "
-            "path overlap across random multi-robot subsets."
-        )
+    """Run overlap trials for a single agent count (no sweep plot)."""
+    return run_agent_overlap_sweep(
+        path_bank_path=path_bank_path,
+        pool_size=pool_size,
+        min_agents=num_agents,
+        max_agents=num_agents,
+        num_agents=num_agents,
+        num_trials=num_trials,
+        trial_seed=trial_seed,
+        occ_grid=occ_grid,
+        solver_modes=solver_modes,
+        output=output,
+        plot=False,
+        debug_plot_trials=debug_plot_trials,
+        overlap_sample_spacing=overlap_sample_spacing,
+        same_direction_cos_min=same_direction_cos_min,
+        same_direction_angle_tol_deg=same_direction_angle_tol_deg,
     )
-    parser.add_argument("--scenario", default="sample2_default")
-    parser.add_argument("--pool-size", type=int, default=100)
-    parser.add_argument("--path-bank", type=str, default=None)
-    parser.add_argument("--seed", type=int, default=42, help="RNG seed for path bank generation")
-    parser.add_argument("--max-attempts", type=int, default=None)
-    parser.add_argument("--build-bank-only", action="store_true")
-    parser.add_argument("--num-agents", type=int, default=4)
-    parser.add_argument("--num-trials", type=int, default=50)
-    parser.add_argument("--trial-seed", type=int, default=0)
-    parser.add_argument("--output", type=str, default=None)
-    parser.add_argument(
-        "--debug-plot-trials",
-        action="store_true",
-        help="Show an interactive 1x3 figure per trial; press Enter to advance.",
-    )
-    parser.add_argument(
-        "--overlap-sample-spacing",
-        type=float,
-        default=None,
-        help=(
-            "Arc-length spacing (m) for overlap polylines before scoring. "
-            "Default: map resolution. Use 0 to disable resampling."
-        ),
-    )
-    parser.add_argument(
-        "--same-direction-angle-tol-deg",
-        type=float,
-        default=DEFAULT_SAME_DIRECTION_ANGLE_TOL_DEG,
-        help=(
-            "Segment pairs with travel directions within this angle (degrees) "
-            "are treated as same-direction and omitted from the secondary overlap metric."
-        ),
-    )
-    parser.add_argument(
-        "--refresh-mode",
-        action="append",
-        default=[],
-        choices=list(SOLVER_MODES),
-        help="Force replan cached paths for a solver mode (repeatable).",
-    )
-    parser.add_argument(
-        "--solvers",
-        default="all",
-        help="Solvers for overlap trials: vanilla, rrt_vanilla, modified (default: all).",
-    )
-    rrt_group = parser.add_argument_group("RRT* parameters")
-    rrt_group.add_argument("--rrt-max-iter", type=int, default=10000)
-    rrt_group.add_argument("--rrt-step-size", type=float, default=1)
-    rrt_group.add_argument("--rrt-goal-sample-rate", type=float, default=0.10)
-    rrt_group.add_argument("--rrt-goal-tolerance", type=float, default=None)
-    rrt_group.add_argument("--rrt-rewire-radius", type=float, default=None)
-    heatmap_group = parser.add_argument_group("heatmap graph (optional modified solver)")
-    heatmap_group.add_argument("--heatmap-prefix", type=str, default=None)
-    heatmap_group.add_argument("--heatmap-file", type=str, default=None)
-    heatmap_group.add_argument("--sparse-graph-threshold", type=float, default=2.0)
-    heatmap_group.add_argument("--sparse-min-component-size", type=int, default=15)
-    args = parser.parse_args()
-
-    if args.pool_size <= 0:
-        raise ValueError("--pool-size must be > 0")
-    if args.num_agents <= 0:
-        raise ValueError("--num-agents must be > 0")
-    if args.num_trials < 0:
-        raise ValueError("--num-trials must be >= 0")
-    if args.overlap_sample_spacing is not None and args.overlap_sample_spacing < 0:
-        raise ValueError("--overlap-sample-spacing must be >= 0")
-    if args.same_direction_angle_tol_deg < 0 or args.same_direction_angle_tol_deg > 180:
-        raise ValueError("--same-direction-angle-tol-deg must be in [0, 180]")
-    if args.max_attempts is None:
-        args.max_attempts = max(100, 50 * args.pool_size)
-    if args.path_bank is None:
-        args.path_bank = f"results/overlap_banks/{args.scenario}_seed{args.seed}.json"
-    args.solver_modes = parse_solver_modes(args.solvers)
-    return args
 
 
-def main():
-    args = parse_args()
-    path_bank_path = Path(args.path_bank)
-    occ_grid, _, resolution, statespace_hi = build_occ_grid(args.scenario)
-    overlap_sample_spacing = resolution if args.overlap_sample_spacing is None else args.overlap_sample_spacing
+def _ensure_scenario_path_bank(
+    *,
+    scenario_name,
+    path_bank_path,
+    args,
+):
+    path_bank_path = Path(path_bank_path)
+    occ_grid, _, resolution, statespace_hi = build_occ_grid(scenario_name)
+    overlap_sample_spacing = (
+        resolution if args.overlap_sample_spacing is None else args.overlap_sample_spacing
+    )
     if overlap_sample_spacing == 0:
         overlap_sample_spacing = None
-    same_direction_cos_min = _same_direction_cos_min(args.same_direction_angle_tol_deg)
 
     modified_config = _modified_solver_config(
         args.heatmap_prefix,
@@ -1088,7 +1197,7 @@ def main():
 
     if missing or args.refresh_mode or not path_bank_path.exists():
         build_path_bank(
-            scenario=args.scenario,
+            scenario=scenario_name,
             pool_size=args.pool_size,
             seed=args.seed,
             max_attempts=args.max_attempts,
@@ -1110,34 +1219,217 @@ def main():
             path_bank_path, args.pool_size, args.solver_modes, trial_cache_meta_by_mode
         )
         if missing:
-            raise RuntimeError(f"Path bank still missing modes after build: {missing}")
+            raise RuntimeError(
+                f"Path bank for {scenario_name} still missing modes after build: {missing}"
+            )
 
     print("\n=== Path bank ===")
+    print(f"Scenario: {scenario_name}")
     print(f"Loaded {args.pool_size} routes from {path_bank_path.resolve()}")
     print(f"Modes cached: {', '.join(args.solver_modes)}")
 
+    return {
+        "path_bank_path": path_bank_path,
+        "occ_grid": occ_grid,
+        "overlap_sample_spacing": overlap_sample_spacing,
+        "same_direction_cos_min": _same_direction_cos_min(args.same_direction_angle_tol_deg),
+    }
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description=(
+            "Build a cached path bank (A*, RRT*, Social A*) and compare spatial "
+            "path overlap across random multi-robot subsets."
+        )
+    )
+    parser.add_argument("--scenario", default="sample2_default")
+    parser.add_argument("--pool-size", type=int, default=100)
+    parser.add_argument("--path-bank", type=str, default=None)
+    parser.add_argument("--seed", type=int, default=42, help="RNG seed for path bank generation")
+    parser.add_argument("--max-attempts", type=int, default=None)
+    parser.add_argument("--build-bank-only", action="store_true")
+    parser.add_argument(
+        "--num-agents",
+        type=int,
+        default=None,
+        help="Run a single agent count instead of sweeping min..max agents.",
+    )
+    parser.add_argument("--min-agents", type=int, default=DEFAULT_MIN_AGENTS)
+    parser.add_argument("--max-agents", type=int, default=DEFAULT_MAX_AGENTS)
+    parser.add_argument("--num-trials", type=int, default=DEFAULT_NUM_TRIALS)
+    parser.add_argument("--trial-seed", type=int, default=0)
+    parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Trial-level CSV path (used for --plot-only replotting).",
+    )
+    parser.add_argument(
+        "--plot-output",
+        type=str,
+        default=None,
+        help="PNG path for the agent-count sweep plot.",
+    )
+    parser.add_argument(
+        "--plot-only",
+        action="store_true",
+        help="Replot from an existing --output CSV without rerunning overlap trials.",
+    )
+    parser.add_argument(
+        "--no-plot",
+        action="store_true",
+        help="Skip generating the sweep plot after trials.",
+    )
+    parser.add_argument(
+        "--no-show",
+        action="store_true",
+        help="Save the plot without opening an interactive window.",
+    )
+    parser.add_argument(
+        "--debug-plot-trials",
+        action="store_true",
+        help="Show an interactive 1x3 figure per trial; press Enter to advance.",
+    )
+    parser.add_argument(
+        "--overlap-sample-spacing",
+        type=float,
+        default=None,
+        help=(
+            "Arc-length spacing (m) for overlap polylines before scoring. "
+            "Default: map resolution. Use 0 to disable resampling."
+        ),
+    )
+    parser.add_argument(
+        "--same-direction-angle-tol-deg",
+        type=float,
+        default=DEFAULT_SAME_DIRECTION_ANGLE_TOL_DEG,
+        help=(
+            "Segment pairs with travel directions within this angle (degrees) "
+            "are treated as same-direction and omitted from the secondary overlap metric."
+        ),
+    )
+    parser.add_argument(
+        "--refresh-mode",
+        action="append",
+        default=[],
+        choices=list(SOLVER_MODES),
+        help="Force replan cached paths for a solver mode (repeatable).",
+    )
+    parser.add_argument(
+        "--solvers",
+        default="all",
+        help="Solvers for overlap trials: vanilla, rrt_vanilla, modified (default: all).",
+    )
+    rrt_group = parser.add_argument_group("RRT* parameters")
+    rrt_group.add_argument("--rrt-max-iter", type=int, default=10000)
+    rrt_group.add_argument("--rrt-step-size", type=float, default=1)
+    rrt_group.add_argument("--rrt-goal-sample-rate", type=float, default=0.10)
+    rrt_group.add_argument("--rrt-goal-tolerance", type=float, default=None)
+    rrt_group.add_argument("--rrt-rewire-radius", type=float, default=None)
+    heatmap_group = parser.add_argument_group("heatmap graph (optional modified solver)")
+    heatmap_group.add_argument("--heatmap-prefix", type=str, default=None)
+    heatmap_group.add_argument("--heatmap-file", type=str, default=None)
+    heatmap_group.add_argument("--sparse-graph-threshold", type=float, default=2.0)
+    heatmap_group.add_argument("--sparse-min-component-size", type=int, default=15)
+    args = parser.parse_args()
+
+    if args.pool_size <= 0:
+        raise ValueError("--pool-size must be > 0")
+    if args.num_trials < 0:
+        raise ValueError("--num-trials must be >= 0")
+    if args.num_agents is not None:
+        if args.num_agents <= 0:
+            raise ValueError("--num-agents must be > 0")
+        if args.num_agents > args.pool_size:
+            raise ValueError(
+                f"--num-agents ({args.num_agents}) exceeds --pool-size ({args.pool_size})"
+            )
+    else:
+        if args.min_agents <= 0:
+            raise ValueError("--min-agents must be > 0")
+        if args.max_agents < args.min_agents:
+            raise ValueError("--max-agents must be >= --min-agents")
+        if args.max_agents > args.pool_size:
+            raise ValueError(
+                f"--max-agents ({args.max_agents}) exceeds --pool-size ({args.pool_size})"
+            )
+    if args.plot_only and not args.output:
+        raise ValueError("--plot-only requires --output pointing to a trial CSV")
+    if args.overlap_sample_spacing is not None and args.overlap_sample_spacing < 0:
+        raise ValueError("--overlap-sample-spacing must be >= 0")
+    if args.same_direction_angle_tol_deg < 0 or args.same_direction_angle_tol_deg > 180:
+        raise ValueError("--same-direction-angle-tol-deg must be in [0, 180]")
+    if args.max_attempts is None:
+        args.max_attempts = max(100, 50 * args.pool_size)
+    if args.path_bank is None:
+        args.path_bank = f"results/overlap_banks/{args.scenario}_seed{args.seed}.json"
+    if args.output is None and not args.plot_only:
+        if args.num_agents is not None:
+            args.output = (
+                f"results/path_overlap/{args.scenario}_n{args.num_agents}_t{args.num_trials}.csv"
+            )
+        else:
+            args.output = (
+                f"results/path_overlap/{args.scenario}_"
+                f"n{args.min_agents}-{args.max_agents}_t{args.num_trials}.csv"
+            )
+    if args.plot_output is None and args.output and not args.plot_only and not args.no_plot:
+        args.plot_output = str(Path(args.output).with_suffix(".png"))
+    args.solver_modes = parse_solver_modes(args.solvers)
+    return args
+
+
+def main():
+    args = parse_args()
+    if args.plot_only:
+        trial_rows = load_trial_rows_csv(args.output)
+        plot_output = args.plot_output or str(Path(args.output).with_suffix(".png"))
+        plot_overlap_agent_sweep(
+            trial_rows,
+            args.solver_modes,
+            plot_output=plot_output,
+            show_plot=not args.no_show
+        )
+        return
+
+    path_bank_path = Path(args.path_bank)
+
     if args.build_bank_only:
+        ctx = _ensure_scenario_path_bank(
+            scenario_name=args.scenario,
+            path_bank_path=path_bank_path,
+            args=args,
+        )
+        _ = ctx
         return
 
     if args.num_trials == 0:
         print("Skipping overlap trials (--num-trials 0).")
         return
 
-    if args.num_agents > args.pool_size:
-        raise ValueError(f"--num-agents ({args.num_agents}) exceeds --pool-size ({args.pool_size})")
-
-    run_overlap_trials(
+    ctx = _ensure_scenario_path_bank(
+        scenario_name=args.scenario,
         path_bank_path=path_bank_path,
+        args=args,
+    )
+    run_agent_overlap_sweep(
+        path_bank_path=ctx["path_bank_path"],
         pool_size=args.pool_size,
+        min_agents=args.min_agents,
+        max_agents=args.max_agents,
         num_agents=args.num_agents,
         num_trials=args.num_trials,
         trial_seed=args.trial_seed,
-        occ_grid=occ_grid,
+        occ_grid=ctx["occ_grid"],
         solver_modes=args.solver_modes,
         output=args.output,
+        plot_output=args.plot_output,
+        show_plot=not args.no_show,
+        plot=not args.no_plot,
         debug_plot_trials=args.debug_plot_trials,
-        overlap_sample_spacing=overlap_sample_spacing,
-        same_direction_cos_min=same_direction_cos_min,
+        overlap_sample_spacing=ctx["overlap_sample_spacing"],
+        same_direction_cos_min=ctx["same_direction_cos_min"],
         same_direction_angle_tol_deg=args.same_direction_angle_tol_deg,
     )
 
