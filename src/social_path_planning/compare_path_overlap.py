@@ -919,7 +919,7 @@ def plot_overlap_agent_sweep(
     if not agent_counts:
         raise ValueError("No trial rows to plot.")
 
-    fig, ax = plt.subplots(figsize=(8, 5.5))
+    fig, ax = plt.subplots(figsize=(8, 5))
     x = np.asarray(agent_counts, dtype=float)
 
     for mode in solver_modes:
@@ -967,13 +967,13 @@ def plot_overlap_agent_sweep(
                 )
             )
 
-    ax.set_xlabel("Number of Agents", fontsize=20)
-    ax.set_ylabel("Unique Overlapping Path Segments", fontsize=20)
+    ax.set_xlabel("Number of Robots", fontsize=16)
+    ax.set_ylabel("Unique Overlapping Path Segments", fontsize=16)
     # ax.set_title("Path Overlap vs. Number of Agents", fontsize=20)
-    ax.set_title("Environment 1 Path Overlap Comparison", fontsize=24)
+    ax.set_title("Environment 1 Path Overlap Comparison", fontsize=18)
     ax.set_xticks(np.arange(min(agent_counts), max(agent_counts) + 1, step=2))
-    ax.tick_params(axis='both', labelsize=18)
-    ax.legend(handles=legend_handles, loc="best", fontsize=20)
+    ax.tick_params(axis='both', labelsize=14)
+    ax.legend(handles=legend_handles, loc="best", fontsize=16)
     fig.tight_layout()
 
     if plot_output:
