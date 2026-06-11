@@ -925,6 +925,8 @@ def plot_overlap_agent_sweep(
     for mode in solver_modes:
         color = SOLVER_PLOT_COLORS.get(mode, None)
         for metric_key, linestyle, metric_suffix in OVERLAP_METRIC_PLOT_SPECS:
+            if metric_key == "overlap_segment_count":
+                continue
             means = []
             for n in agent_counts:
                 values = np.array(
@@ -942,7 +944,7 @@ def plot_overlap_agent_sweep(
                 means,
                 marker="o",
                 linewidth=2.2,
-                linestyle=linestyle,
+                # linestyle=linestyle,
                 color=color,
             )
 
@@ -951,29 +953,33 @@ def plot_overlap_agent_sweep(
         color = SOLVER_PLOT_COLORS.get(mode, None)
         solver_label = SOLVER_PLOT_TITLES.get(mode, mode)
         for _metric_key, linestyle, metric_suffix in OVERLAP_METRIC_PLOT_SPECS:
+            if _metric_key == "overlap_segment_count":
+                continue
             legend_handles.append(
                 Line2D(
                     [0],
                     [0],
                     color=color,
                     linewidth=2.2,
-                    linestyle=linestyle,
-                    label=f"{solver_label} ({metric_suffix})",
+                    # linestyle=linestyle,
+                    label=f"{solver_label}",
+                    # label=f"{solver_label} ({metric_suffix})",
                 )
             )
 
-    ax.set_xlabel("Number of Agents", fontsize=18)
-    ax.set_ylabel("Unique Overlapping Path Segments", fontsize=18)
-    ax.set_title("Path Overlap vs. Number of Agents", fontsize=20)
-    ax.set_xticks(agent_counts)
-    ax.grid(True, alpha=0.25)
-    ax.legend(handles=legend_handles, loc="best", fontsize=9)
+    ax.set_xlabel("Number of Agents", fontsize=20)
+    ax.set_ylabel("Unique Overlapping Path Segments", fontsize=20)
+    # ax.set_title("Path Overlap vs. Number of Agents", fontsize=20)
+    ax.set_title("Environment 1 Path Overlap Comparison", fontsize=24)
+    ax.set_xticks(np.arange(min(agent_counts), max(agent_counts) + 1, step=2))
+    ax.tick_params(axis='both', labelsize=18)
+    ax.legend(handles=legend_handles, loc="best", fontsize=20)
     fig.tight_layout()
 
     if plot_output:
         plot_output = Path(plot_output)
         plot_output.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(plot_output, dpi=150, bbox_inches="tight")
+        fig.savefig(plot_output, dpi=450, bbox_inches="tight")
         print(f"Saved plot to: {plot_output.resolve()}")
 
     if show_plot:
