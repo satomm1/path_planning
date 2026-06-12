@@ -26,6 +26,10 @@ DELTA = 1  # Safety margin in seconds
 MAX_VELOCITY_CHANGE_FACTOR = 1.5
 GEOM_MATCH_TOL = 1e-3  # meters; tolerate grid / DDS float slop when matching vertices or edges
 
+# Set True to save per-pair MILP z-assignment maps when MultiAgentSimultaneousPlanner.plan() runs.
+VIZ_MILP_Z_ASSIGNMENT = True
+VIZ_MILP_Z_OUTPUT_DIR = "results/milp_z_viz"
+
 
 def _scalar_times_from_solver(prob, time_var, context):
     """Read one cvxpy time vector after ``prob.solve()``; raise if infeasible / no primal."""
@@ -99,15 +103,6 @@ def _segment_endpoint_conflict(p0, p1, q0, q1, threshold):
 def _points_close(a, b, tol=GEOM_MATCH_TOL):
     """True if two 2D points are within ``tol`` in Euclidean distance."""
     return float(np.linalg.norm(np.array(a) - np.array(b))) <= tol
-
-
-def _segment_shares_exact_vertex(p0, p1, q0, q1, tol=GEOM_MATCH_TOL):
-    """True if any segment endpoint is within ``tol`` of any endpoint of the other segment."""
-    for pa in (p0, p1):
-        for qb in (q0, q1):
-            if _points_close(pa, qb, tol):
-                return True
-    return False
 
 
 def _point_to_segment_distance(point, seg_a, seg_b):
@@ -186,30 +181,49 @@ def _segments_opposite_for_coupling(p0, p1, q0, q1, tol=GEOM_MATCH_TOL):
     return True
 
 
-def _segment_travel_direction(path, i):
-    """Unit direction of segment ``path[i] -> path[i+1]``; zero vector if degenerate."""
-    d = np.array(path[i + 1]) - np.array(path[i])
-    n = float(np.linalg.norm(d))
-    if n <= 1e-12:
-        return np.array([0.0, 0.0])
-    return d / n
+def _tag_opposite_segment_pairs(path_a, path_b, segment_pairs, tol=GEOM_MATCH_TOL):
+    """Return the subset of ``segment_pairs`` that are opposite-direction corridor conflicts."""
+    return {
+        (int(i), int(j))
+        for (i, j) in segment_pairs
+        if _segments_opposite_for_coupling(
+            path_a[int(i)], path_a[int(i) + 1], path_b[int(j)], path_b[int(j) + 1], tol=tol
+        )
+    }
 
 
-def _opposite_overlap_window_valid(path_a, path_b, pair_set, i_start, i_end, j_start, j_end, tol=GEOM_MATCH_TOL):
-    """True if every opposite corridor pair in the index box is present in ``pair_set``."""
-    for i in range(int(i_start), int(i_end) + 1):
-        for j in range(int(j_start), int(j_end) + 1):
-            if _segments_opposite_for_coupling(
-                path_a[i], path_a[i + 1], path_b[j], path_b[j + 1], tol=tol
-            ):
-                if (i, j) not in pair_set:
-                    return False
-    return True
+def _maximal_consecutive_runs(values):
+    """Return maximal inclusive integer runs from ``values`` (gaps split runs)."""
+    values = sorted({int(v) for v in values})
+    if not values:
+        return []
+    runs = []
+    run_start = values[0]
+    prev = values[0]
+    for value in values[1:]:
+        if value == prev + 1:
+            prev = value
+            continue
+        runs.append((run_start, prev))
+        run_start = value
+        prev = value
+    runs.append((run_start, prev))
+    return runs
 
 
-def _cluster_opposite_segment_pairs(opposite_pairs):
+def _consecutive_interval(values):
+    """Return inclusive ``(lo, hi)`` when ``values`` is a consecutive integer set, else ``None``."""
+    if not values:
+        return None
+    lo, hi = min(values), max(values)
+    if hi - lo + 1 != len(values):
+        return None
+    return lo, hi
+
+
+def _cluster_pairs_8conn(pair_set):
     """Group ``(i,j)`` pairs connected by 8-neighbor steps in index space."""
-    pair_set = set(opposite_pairs)
+    pair_set = set(pair_set)
     if not pair_set:
         return []
     visited = set()
@@ -236,122 +250,166 @@ def _cluster_opposite_segment_pairs(opposite_pairs):
     return clusters
 
 
-def _find_opposite_overlap_ranges(path_a, path_b, pair_set, tol=GEOM_MATCH_TOL):
-    """Return validated opposite-direction overlap windows as ``(i_start, i_end, j_start, j_end)``."""
-    opposite_pairs = [
-        (i, j)
-        for (i, j) in pair_set
-        if _segments_opposite_for_coupling(
-            path_a[i], path_a[i + 1], path_b[j], path_b[j + 1], tol=tol
-        )
-    ]
-    windows = []
-    for cluster in _cluster_opposite_segment_pairs(opposite_pairs):
-        i_start = min(i for i, _ in cluster)
-        i_end = max(i for i, _ in cluster)
-        j_start = min(j for _, j in cluster)
-        j_end = max(j for _, j in cluster)
-        if _opposite_overlap_window_valid(
-            path_a, path_b, pair_set, i_start, i_end, j_start, j_end, tol=tol
-        ):
-            windows.append((i_start, i_end, j_start, j_end))
-    return windows
+def _opposite_window_from_cluster(cluster):
+    """
+    Return ``(i_start, i_end, j_start, j_end)`` when anti-diagonal corners are present.
+
+    Opposite encounters have low-i/high-j and high-i/low-j corners in index space.
+    """
+    if len(cluster) < 2:
+        return None
+    i_start = min(i for i, _ in cluster)
+    i_end = max(i for i, _ in cluster)
+    j_start = min(j for _, j in cluster)
+    j_end = max(j for _, j in cluster)
+    if (i_start, j_end) not in cluster or (i_end, j_start) not in cluster:
+        return None
+    return i_start, i_end, j_start, j_end
 
 
-def _maximal_consecutive_runs(values):
-    """Return maximal inclusive integer runs from ``values`` (gaps split runs)."""
-    values = sorted({int(v) for v in values})
-    if not values:
-        return []
-    runs = []
-    run_start = values[0]
-    prev = values[0]
-    for value in values[1:]:
-        if value == prev + 1:
-            prev = value
+def _same_direction_bands(pair_set):
+    """
+    Partition ``pair_set`` into compressible same-direction bands.
+
+    Each band is a set of ``(i,j)`` pairs sharing one z: multi-row marching bands,
+    then single-row or single-column consecutive streaks.
+    """
+    bands = []
+    remaining = set(pair_set)
+
+    row_to_js = defaultdict(set)
+    for i, j in remaining:
+        row_to_js[i].add(j)
+    rows = sorted(row_to_js)
+    start = 0
+    while start < len(rows):
+        end = start
+        while end + 1 < len(rows):
+            row_i = rows[end]
+            row_ip1 = rows[end + 1]
+            if row_ip1 != row_i + 1:
+                break
+            linked = any(
+                (row_i, j) in remaining and (row_ip1, j + 1) in remaining for _i, j in remaining if _i == row_i
+            )
+            if not linked:
+                break
+            end += 1
+
+        band_rows = rows[start : end + 1]
+        if len(band_rows) >= 2:
+            intervals = [_consecutive_interval(row_to_js[row]) for row in band_rows]
+            if all(interval is not None for interval in intervals):
+                band = set()
+                for row, (j_lo, j_hi) in zip(band_rows, intervals):
+                    for j in range(j_lo, j_hi + 1):
+                        pair = (row, j)
+                        if pair in remaining:
+                            band.add(pair)
+                if len(band) >= 2:
+                    bands.append(band)
+                    remaining -= band
+                    start = end + 1
+                    continue
+        start = end + 1
+
+    by_i = defaultdict(set)
+    for i, j in remaining:
+        by_i[i].add(j)
+    for i in sorted(by_i):
+        interval = _consecutive_interval(by_i[i])
+        if interval is None or interval[1] == interval[0]:
             continue
-        runs.append((run_start, prev))
-        run_start = value
-        prev = value
-    runs.append((run_start, prev))
-    return runs
+        j_lo, j_hi = interval
+        band = {(i, j) for j in range(j_lo, j_hi + 1) if (i, j) in remaining}
+        if len(band) >= 2:
+            bands.append(band)
+            remaining -= band
 
-
-def _assign_fixed_index_streak_z(pair_to_z, pair_set, z_index, fixed_axis):
-    """Bundle pairs sharing one segment index with consecutive indices on the other robot."""
-    grouped = defaultdict(list)
-    for i, j in pair_set:
-        if (i, j) in pair_to_z:
+    by_j = defaultdict(set)
+    for i, j in remaining:
+        by_j[j].add(i)
+    for j in sorted(by_j):
+        interval = _consecutive_interval(by_j[j])
+        if interval is None or interval[1] == interval[0]:
             continue
-        if fixed_axis == "i":
-            grouped[i].append(j)
+        i_lo, i_hi = interval
+        band = {(i, j) for i in range(i_lo, i_hi + 1) if (i, j) in remaining}
+        if len(band) >= 2:
+            bands.append(band)
+            remaining -= band
+
+    return bands
+
+
+_ORDERING_MODES = frozenset({"both", "a_first", "b_first"})
+
+
+def _add_ordering_constraints(constraints, times_a, times_b, i, j, z_var, z_index, mode):
+    """Append Big-M segment-ordering constraints; ``mode`` selects which disjunct(s) to add."""
+    if z_var is None:
+        return
+    if mode in ("both", "a_first"):
+        constraints.append(times_a[i + 1] <= times_b[j] - DELTA + M * z_var[z_index])
+    if mode in ("both", "b_first"):
+        constraints.append(times_b[j + 1] <= times_a[i] - DELTA - M * (1 - z_var[z_index]))
+
+
+def _parse_collision_entry(entry):
+    """Return ``(leading, i, j, z_index, mode)`` for a collision-pair tuple."""
+    if len(entry) >= 2 and entry[-1] in _ORDERING_MODES:
+        return entry[:-4], int(entry[-4]), int(entry[-3]), int(entry[-2]), entry[-1]
+    return entry[:-3], int(entry[-3]), int(entry[-2]), int(entry[-1]), "both"
+
+
+def _append_assigned_collision_pairs(collision_pairs, prefix, assigned):
+    """Expand z-assignment output into collision-pair tuples (with optional half-disjunct modes)."""
+    for entry in assigned:
+        if entry[0] == "opp_win":
+            _, i_start, i_end, j_start, j_end, z = entry
+            collision_pairs.append(prefix + (int(i_end), int(j_start), int(z), "a_first"))
+            collision_pairs.append(prefix + (int(i_start), int(j_end), int(z), "b_first"))
         else:
-            grouped[j].append(i)
-
-    for fixed_val, varying_vals in grouped.items():
-        for run_start, run_end in _maximal_consecutive_runs(varying_vals):
-            streak_pairs = []
-            for v in range(run_start, run_end + 1):
-                pair = (fixed_val, v) if fixed_axis == "i" else (v, fixed_val)
-                if pair in pair_set and pair not in pair_to_z:
-                    streak_pairs.append(pair)
-            if len(streak_pairs) < 2:
-                continue
-            if len(streak_pairs) != run_end - run_start + 1:
-                continue
-            z = z_index
-            for pair in streak_pairs:
-                pair_to_z[pair] = z
-            z_index += 1
-    return z_index
+            i, j, z = entry
+            collision_pairs.append(prefix + (int(i), int(j), int(z), "both"))
 
 
-def _assign_z_to_segment_pairs(path_a, path_b, segment_pairs, start_z_index=0, tol=GEOM_MATCH_TOL):
-    """Assign ``z_index`` to ``(i,j)`` pairs with overlap-region coupling."""
+def _assign_z_to_segment_pairs(segment_pairs, opposite_pairs=None, start_z_index=0):
+    """Assign ``z_index`` to ``(i,j)`` pairs using index-only region compression."""
     segment_pairs = sorted({(int(i), int(j)) for i, j in segment_pairs})
     if not segment_pairs:
         return [], start_z_index
 
     pair_set = set(segment_pairs)
+    opposite_pairs = {(int(i), int(j)) for (i, j) in (opposite_pairs or ())}
     pair_to_z = {}
+    opposite_covered = set()
+    window_entries = []
     z_index = int(start_z_index)
 
-    for i_start, i_end, j_start, j_end in _find_opposite_overlap_ranges(
-        path_a, path_b, pair_set, tol=tol
-    ):
-        z = z_index
-        for i, j in segment_pairs:
-            if (
-                i_start <= i <= i_end
-                and j_start <= j <= j_end
-                and _segments_opposite_for_coupling(
-                    path_a[i], path_a[i + 1], path_b[j], path_b[j + 1], tol=tol
-                )
-            ):
-                pair_to_z[(i, j)] = z
+    for cluster in _cluster_pairs_8conn(opposite_pairs):
+        window = _opposite_window_from_cluster(cluster)
+        if window is None:
+            continue
+        i_start, i_end, j_start, j_end = window
+        opposite_covered |= cluster
+        window_entries.append(("opp_win", i_start, i_end, j_start, j_end, z_index))
         z_index += 1
 
-    z_index = _assign_fixed_index_streak_z(pair_to_z, pair_set, z_index, fixed_axis="i")
-    z_index = _assign_fixed_index_streak_z(pair_to_z, pair_set, z_index, fixed_axis="j")
+    same_pairs = pair_set - opposite_covered
+    for band in _same_direction_bands(same_pairs):
+        for pair in band:
+            pair_to_z[pair] = z_index
+        z_index += 1
 
-    remaining = [(i, j) for (i, j) in segment_pairs if (i, j) not in pair_to_z]
-    prev_i = None
-    prev_z = None
-    prev_shared = False
-    for i, j in remaining:
-        p0, p1 = path_a[i], path_a[i + 1]
-        q0, q1 = path_b[j], path_b[j + 1]
-        shared = _segment_shares_exact_vertex(p0, p1, q0, q1)
-        if shared and prev_i is not None and i == prev_i + 1 and prev_shared and prev_z is not None:
-            pair_to_z[(i, j)] = prev_z
-        else:
-            pair_to_z[(i, j)] = z_index
-            prev_z = z_index
-            z_index += 1
-        prev_i = i
-        prev_shared = shared
+    for i, j in segment_pairs:
+        if (i, j) in opposite_covered or (i, j) in pair_to_z:
+            continue
+        pair_to_z[(i, j)] = z_index
+        z_index += 1
 
-    assigned = [(i, j, pair_to_z[(i, j)]) for (i, j) in segment_pairs]
+    assigned = list(window_entries)
+    assigned.extend((i, j, pair_to_z[(i, j)]) for (i, j) in segment_pairs if (i, j) in pair_to_z)
     return assigned, z_index
 
 
@@ -377,19 +435,106 @@ def _collect_segment_collision_pairs(
         num_z: total number of binary z variables required after this batch
     """
     segment_pairs = list(_iter_conflicting_segment_pairs(path_a, path_b, threshold))
-    assigned, z_index = _assign_z_to_segment_pairs(path_a, path_b, segment_pairs, start_z_index)
-    for i, j, z in assigned:
-        collision_pairs.append(prefix + (i, j, z))
+    opposite_pairs = _tag_opposite_segment_pairs(path_a, path_b, segment_pairs)
+    assigned, z_index = _assign_z_to_segment_pairs(segment_pairs, opposite_pairs, start_z_index)
+    _append_assigned_collision_pairs(collision_pairs, prefix, assigned)
     return z_index
+
+
+def _print_compressed_z_pair_summary(collision_pairs, num_agents, total_z):
+    """Print distinct ordering z variables per robot-robot pair (after compression)."""
+    z_by_pair = defaultdict(set)
+    for entry in collision_pairs:
+        leading, _i, _j, z_idx, _mode = _parse_collision_entry(entry)
+        if len(leading) == 2:
+            z_by_pair[(int(leading[0]), int(leading[1]))].add(int(z_idx))
+
+    parts = []
+    for a1 in range(num_agents):
+        for a2 in range(a1 + 1, num_agents):
+            parts.append(f"({a1},{a2})={len(z_by_pair.get((a1, a2), set()))}")
+    summary = ", ".join(parts) if parts else "no agent pairs"
+    print(f"MILP z per pair (compressed): {summary}; total z={int(total_z)}")
+
+
+def _group_collision_pairs_by_agent_pair(collision_pairs):
+    grouped = defaultdict(list)
+    for entry in collision_pairs:
+        leading, i, j, z_idx, mode = _parse_collision_entry(entry)
+        if len(leading) == 2:
+            grouped[(int(leading[0]), int(leading[1]))].append((i, j, z_idx, mode))
+    return dict(grouped)
+
+
+def _viz_milp_z_assignments(paths, collision_pairs, occ_grid=None, output_dir=VIZ_MILP_Z_OUTPUT_DIR):
+    """Save one PNG per agent pair showing conflict chords colored by z index."""
+    from pathlib import Path
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    grouped = _group_collision_pairs_by_agent_pair(collision_pairs)
+
+    for (a1, a2), constraints in sorted(grouped.items()):
+        if not constraints:
+            continue
+        path_a, path_b = paths[a1], paths[a2]
+        unique_z = sorted({z for _, _, z, _ in constraints})
+        cmap = plt.colormaps["tab10"].resampled(max(1, len(unique_z)))
+        z_colors = {z: cmap(idx % 10) for idx, z in enumerate(unique_z)}
+
+        fig, ax = plt.subplots(figsize=(10, 8))
+        if occ_grid is not None:
+            occ_grid.plot_grid(ax=ax)
+        ax.plot(*zip(*path_a), color="steelblue", linewidth=2.5, label=f"agent {a1}")
+        ax.plot(*zip(*path_b), color="darkorange", linewidth=2.5, label=f"agent {a2}")
+
+        opp_partial = defaultdict(dict)
+        for i, j, z, mode in constraints:
+            if mode == "a_first":
+                opp_partial[z].update(i_end=i, j_start=j)
+            elif mode == "b_first":
+                opp_partial[z].update(i_start=i, j_end=j)
+        for z, row in opp_partial.items():
+            if len(row) != 4:
+                continue
+            i0, i1, j0, j1 = row["i_start"], row["i_end"], row["j_start"], row["j_end"]
+            for seg in range(i0, i1 + 1):
+                ax.plot(*zip(path_a[seg], path_a[seg + 1]), color=z_colors[z], linewidth=5, alpha=0.35)
+            for seg in range(j0, j1 + 1):
+                ax.plot(*zip(path_b[seg], path_b[seg + 1]), color=z_colors[z], linewidth=5, alpha=0.35)
+
+        drawn = set()
+        for i, j, z, mode in constraints:
+            ma = (np.array(path_a[i]) + np.array(path_a[i + 1])) / 2.0
+            mb = (np.array(path_b[j]) + np.array(path_b[j + 1])) / 2.0
+            ax.plot(
+                [ma[0], mb[0]],
+                [ma[1], mb[1]],
+                color=z_colors[z],
+                linestyle="--" if mode in ("a_first", "b_first") else "-",
+                linewidth=1.8,
+                label=f"z{z}" if z not in drawn else None,
+            )
+            drawn.add(z)
+
+        ax.set_title(
+            f"MILP z agents ({a1},{a2}): {len(unique_z)} z, {len(constraints)} constraints"
+        )
+        ax.set_aspect("equal", adjustable="box")
+        ax.legend(loc="upper right", fontsize=8)
+        out = output_dir / f"z_pair_{a1}_{a2}.png"
+        fig.savefig(out, dpi=150)
+        plt.close(fig)
+        print(f"Saved MILP z visualization: {out.resolve()}")
 
 
 def _append_segment_pairs_with_z(
     collision_pairs, path_a, path_b, segment_pairs, prefix=(), start_z_index=0
 ):
     """Append pre-detected ``(seg_i, seg_j)`` tuples with coupled z assignment."""
-    assigned, z_index = _assign_z_to_segment_pairs(path_a, path_b, segment_pairs, start_z_index)
-    for i, j, z in assigned:
-        collision_pairs.append(prefix + (i, j, z))
+    opposite_pairs = _tag_opposite_segment_pairs(path_a, path_b, segment_pairs)
+    assigned, z_index = _assign_z_to_segment_pairs(segment_pairs, opposite_pairs, start_z_index)
+    _append_assigned_collision_pairs(collision_pairs, prefix, assigned)
     return z_index
 
 
@@ -551,12 +696,12 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         # Collision Avoiding Constraints using Big-M method (segment occupancy intervals)
         collision_pairs, max_z = self.find_collision_pairs()
         z = cp.Variable(max_z, boolean=True) if max_z > 0 else None
-        for (other_idx, i, j, z_index) in collision_pairs:
-            if z is None:
+        for entry in collision_pairs:
+            leading, i, j, z_index, mode = _parse_collision_entry(entry)
+            if z is None or len(leading) != 1:
                 continue
-            other_times = self.other_agent_times[other_idx]
-            constraints += [t[i + 1] <= other_times[j] - DELTA + M * z[z_index]]
-            constraints += [other_times[j + 1] <= t[i] - DELTA - M * (1 - z[z_index])]
+            other_times = self.other_agent_times[leading[0]]
+            _add_ordering_constraints(constraints, t, other_times, i, j, z, z_index, mode)
 
         objective = cp.Minimize(t[-1])  # Minimize time to reach final point
         prob = cp.Problem(objective, constraints)
@@ -640,6 +785,15 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         if len(self.v) == 1:
             self.v = [self.v[0] for _ in range(len(self.paths))]
 
+        _print_compressed_z_pair_summary(collision_pairs, len(self.paths), max_z)
+        if VIZ_MILP_Z_ASSIGNMENT:
+            _viz_milp_z_assignments(
+                self.paths,
+                collision_pairs,
+                occ_grid=self.occupancy_grid,
+                output_dir=VIZ_MILP_Z_OUTPUT_DIR,
+            )
+
         agent_times = [cp.Variable(len(path)) for path in self.paths]
         constraints = []
         for agent_time in agent_times:
@@ -661,15 +815,18 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         z = cp.Variable(max_z, boolean=True) if max_z > 0 else None
         pair_constraint_build_time = defaultdict(float)
         pair_constraint_count = defaultdict(int)
-        for (a1, a2, i, j, z_index) in collision_pairs:
-            if z is None:
+        for entry in collision_pairs:
+            leading, i, j, z_index, mode = _parse_collision_entry(entry)
+            if z is None or len(leading) != 2:
                 continue
+            a1, a2 = int(leading[0]), int(leading[1])
             build_t0 = time.perf_counter()
-            constraints += [agent_times[a1][i + 1] <= agent_times[a2][j] - DELTA + M * z[z_index]]
-            constraints += [agent_times[a2][j + 1] <= agent_times[a1][i] - DELTA - M * (1 - z[z_index])]
+            _add_ordering_constraints(
+                constraints, agent_times[a1], agent_times[a2], i, j, z, z_index, mode
+            )
             pair_key = (a1, a2)
             pair_constraint_build_time[pair_key] += float(time.perf_counter() - build_t0)
-            pair_constraint_count[pair_key] += 2
+            pair_constraint_count[pair_key] += 2 if mode == "both" else 1
 
         detection_stats = getattr(self, "_pair_detection_stats", {})
         all_pair_keys = sorted(
@@ -794,17 +951,23 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
         collision_pairs, max_z = self.find_collision_pairs()  # Get all the collision pairs
         sequential_pairs, simultaneous_pairs = collision_pairs
         z = cp.Variable(max_z, boolean=True) if max_z > 0 else None
-        for (other_idx, a, i, j, z_index) in sequential_pairs:
-            if z is None:
+        for entry in sequential_pairs:
+            leading, i, j, z_index, mode = _parse_collision_entry(entry)
+            if z is None or len(leading) != 2:
                 continue
+            other_idx, a = int(leading[0]), int(leading[1])
             other_times = self.other_agent_times[other_idx]
-            constraints += [agent_times[a][i + 1] <= other_times[j] - DELTA + M * z[z_index]]
-            constraints += [other_times[j + 1] <= agent_times[a][i] - DELTA - M * (1 - z[z_index])]
-        for (a1, a2, i, j, z_index) in simultaneous_pairs:
-            if z is None:
+            _add_ordering_constraints(
+                constraints, agent_times[a], other_times, i, j, z, z_index, mode
+            )
+        for entry in simultaneous_pairs:
+            leading, i, j, z_index, mode = _parse_collision_entry(entry)
+            if z is None or len(leading) != 2:
                 continue
-            constraints += [agent_times[a1][i + 1] <= agent_times[a2][j] - DELTA + M * z[z_index]]
-            constraints += [agent_times[a2][j + 1] <= agent_times[a1][i] - DELTA - M * (1 - z[z_index])]
+            a1, a2 = int(leading[0]), int(leading[1])
+            _add_ordering_constraints(
+                constraints, agent_times[a1], agent_times[a2], i, j, z, z_index, mode
+            )
 
         final_time_vars = cp.hstack([agent_time[-1] for agent_time in agent_times])
         objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
