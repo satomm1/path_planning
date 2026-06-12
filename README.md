@@ -81,6 +81,7 @@ python3 -m social_path_planning.benchmark_mapf_ensemble \
 | `avg_solver_runtime_s` | Mean planning time over **successful** trials only |
 | `avg_makespan_seconds` | Mean task makespan over **successful** trials only |
 | `pool_astar_build_s` (manifest) | One-time social/modified A* cost during pool prep; **excluded** from MILP trial averages |
+| `--milp-stride` | Subsample MILP waypoints every N vertices (`1` = full cached path, default) |
 
 Outputs go under `results/mapf_comparison/` (detailed/summary CSV, manifest JSON, metrics bar chart, example map overlay). Re-plot from a prior run:
 

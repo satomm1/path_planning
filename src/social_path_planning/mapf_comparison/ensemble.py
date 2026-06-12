@@ -186,6 +186,7 @@ def run_ensemble_trial(
     motion: MotionConfig,
     path_bank_path,
     milp_astar_mode: str = "modified",
+    milp_stride: int = 1,
     *,
     social_graph=None,
     heatmap_prefix=None,
@@ -257,7 +258,12 @@ def run_ensemble_trial(
     )
 
     milp_ms = run_milp_solver(
-        occ_grid, milp_routes, norm=np.inf, motion=motion, verbose=False
+        occ_grid,
+        milp_routes,
+        norm=np.inf,
+        motion=motion,
+        stride=milp_stride,
+        verbose=False,
     )
     rows.append(
         _trial_row(

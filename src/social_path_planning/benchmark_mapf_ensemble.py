@@ -12,6 +12,8 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
+
 from social_path_planning.grid_loader import load_grid_scenario
 from social_path_planning.mapf_comparison import MapfRunConfig, MotionConfig
 from social_path_planning.mapf_comparison.grid_traversability import ROBOT_DIAMETER_M
@@ -22,8 +24,10 @@ _MODULE_DIR = Path(__file__).resolve().parent
 from social_path_planning.mapf_comparison.ensemble import (
     aggregate_ensemble_metrics,
     ensure_modified_path_pool,
+    load_cached_milp_routes,
     print_ensemble_summary,
     run_ensemble_trial,
+    sample_route_subset,
 )
 
 
@@ -104,6 +108,60 @@ def _summary_fieldnames():
     ]
 
 
+def _event_viz_output_dir(output_prefix: str, trial_id: int) -> Path:
+    return (
+        Path(output_prefix).parent
+        / "event_planning_viz"
+        / Path(output_prefix).name
+        / f"trial{trial_id:04d}"
+    )
+
+
+def _viz_event_waypoints_for_trial(
+    *,
+    trial_id: int,
+    trial_seed: int,
+    occ_grid,
+    pool,
+    num_agents: int,
+    path_bank_path: Path,
+    milp_astar_mode: str,
+    milp_stride: int,
+    output_prefix: str,
+    social_graph=None,
+    heatmap_prefix=None,
+    heatmap_file=None,
+):
+    """Analyze and plot event interest waypoints for one trial's sampled MILP paths."""
+    from social_path_planning.event_multi_planning import analyze_event_paths, viz_event_waypoints
+    from social_path_planning.multi_planning import subsample_path_by_stride
+
+    rng = np.random.default_rng(int(trial_seed))
+    stage_records, route_ids = sample_route_subset(pool, num_agents, rng)
+    milp_routes = load_cached_milp_routes(
+        stage_records,
+        milp_astar_mode,
+        path_bank_path,
+        social_graph=social_graph,
+        heatmap_prefix=heatmap_prefix,
+        heatmap_file=heatmap_file,
+    )
+    paths = [
+        subsample_path_by_stride(list(route["path"]), milp_stride) for route in milp_routes
+    ]
+    analysis = analyze_event_paths(paths)
+    out_dir = _event_viz_output_dir(output_prefix, trial_id)
+    viz_event_waypoints(
+        analysis,
+        occ_grid=occ_grid,
+        output_path=out_dir / "waypoints.png",
+    )
+    print(
+        f"Event waypoint viz: trial {trial_id} (seed={trial_seed}) "
+        f"route_ids={route_ids} -> {out_dir.resolve()}"
+    )
+
+
 def _write_csv(path: Path, rows, fieldnames):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -137,6 +195,8 @@ def run_mapf_ensemble(
     refresh_social_bank: bool = False,
     pregen_only: bool = False,
     milp_stride: int = 1,
+    viz_event_waypoints: bool = False,
+    viz_event_every: int = 1,
 ):
     if pool_size < num_agents:
         raise ValueError(f"pool_size ({pool_size}) must be >= num_agents ({num_agents})")
@@ -218,6 +278,21 @@ def run_mapf_ensemble(
         this_trial_seed = int(trial_seed + trial_id)
         if (trial_id + 1) % 10 == 0 or trial_id == 0:
             print(f"Trial {trial_id + 1}/{num_trials} (seed={this_trial_seed})")
+        if viz_event_waypoints and trial_id % int(viz_event_every) == 0:
+            _viz_event_waypoints_for_trial(
+                trial_id=trial_id,
+                trial_seed=this_trial_seed,
+                occ_grid=occ_grid,
+                pool=pool,
+                num_agents=num_agents,
+                path_bank_path=path_bank_path,
+                milp_astar_mode=milp_astar_mode,
+                milp_stride=milp_stride,
+                output_prefix=output_prefix,
+                social_graph=social_graph,
+                heatmap_prefix=heatmap_prefix,
+                heatmap_file=heatmap_file,
+            )
         rows = run_ensemble_trial(
             trial_id,
             this_trial_seed,
@@ -358,6 +433,17 @@ def main(argv=None):
         default=1,
         help="Subsample MILP path waypoints every N vertices (1=full path, default).",
     )
+    milp_group.add_argument(
+        "--viz-event-waypoints",
+        action="store_true",
+        help="Save event interest-waypoint PNGs for each trial's MILP paths.",
+    )
+    milp_group.add_argument(
+        "--viz-event-every",
+        type=int,
+        default=1,
+        help="With --viz-event-waypoints, visualize every N trials (default 1 = all).",
+    )
     cli = parser.parse_args(argv)
     if cli.milp_astar_vanilla:
         cli.milp_astar_mode = "vanilla"
@@ -365,6 +451,8 @@ def main(argv=None):
         parser.error("Use only one of --heatmap-prefix or --heatmap-file.")
     if cli.milp_stride < 1:
         parser.error("--milp-stride must be >= 1.")
+    if cli.viz_event_every < 1:
+        parser.error("--viz-event-every must be >= 1.")
 
     run_mapf_ensemble(
         scenario_name=cli.scenario,
@@ -390,6 +478,8 @@ def main(argv=None):
         refresh_social_bank=cli.refresh_social_bank,
         pregen_only=cli.pregen_only,
         milp_stride=cli.milp_stride,
+        viz_event_waypoints=True,
+        viz_event_every=1,
     )
     return 0
 

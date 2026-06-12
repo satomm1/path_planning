@@ -253,17 +253,24 @@ def run_milp_solver(
     *,
     norm: int = 1,
     motion: MotionConfig | None = None,
+    stride: int = 1,
     verbose: bool = True,
 ) -> dict:
     """Time-optimal coordination on fixed path-bank polylines."""
     motion_cfg = motion if motion is not None else MotionConfig()
-    stage_paths = [list(route["path"]) for route in routes]
-    starts_world = [tuple(route["x_init"]) for route in routes]
-    goals_world = [tuple(route["x_goal"]) for route in routes]
+    stride = int(stride)
+    if stride < 1:
+        raise ValueError(f"stride must be >= 1, got {stride}")
 
     try:
-        from social_path_planning.multi_planning import MultiAgentSimultaneousPlanner
+        from social_path_planning.multi_planning import (
+            MultiAgentSimultaneousPlanner,
+            subsample_path_by_stride,
+        )
     except ImportError as exc:
+        stage_paths = [list(route["path"]) for route in routes]
+        starts_world = [tuple(route["x_init"]) for route in routes]
+        goals_world = [tuple(route["x_goal"]) for route in routes]
         return {
             "grid_paths": None,
             "world_paths": stage_paths,
@@ -276,7 +283,14 @@ def run_milp_solver(
             "conflict_threshold_m": float(ROBOT_DIAMETER_M),
             "success": False,
             "norm": "inf" if norm == np.inf else int(norm),
+            "milp_stride": stride,
         }
+
+    stage_paths = [
+        subsample_path_by_stride(list(route["path"]), stride) for route in routes
+    ]
+    starts_world = [tuple(route["x_init"]) for route in routes]
+    goals_world = [tuple(route["x_goal"]) for route in routes]
 
     if verbose:
         print(f"Solving MILP simultaneous planner (norm={norm})...")
@@ -318,6 +332,121 @@ def run_milp_solver(
         "success": bool(metrics["success"]),
         "norm": metrics.get("norm"),
         "max_velocity_mps": float(motion_cfg.max_velocity_mps),
+        "milp_stride": stride,
+    }
+
+
+def run_event_milp_solver(
+    occ_grid,
+    routes: Sequence[dict],
+    *,
+    norm: int = 1,
+    motion: MotionConfig | None = None,
+    stride: int = 1,
+    verbose: bool = True,
+) -> dict:
+    """Time-optimal coordination on event interest waypoints (reduced MILP)."""
+    motion_cfg = motion if motion is not None else MotionConfig()
+    stride = int(stride)
+    if stride < 1:
+        raise ValueError(f"stride must be >= 1, got {stride}")
+
+    try:
+        from social_path_planning.event_multi_planning import (
+            EventMultiAgentSimultaneousPlanner,
+            expand_event_times_to_original_path,
+        )
+        from social_path_planning.multi_planning import subsample_path_by_stride
+    except ImportError as exc:
+        stage_paths = [list(route["path"]) for route in routes]
+        starts_world = [tuple(route["x_init"]) for route in routes]
+        goals_world = [tuple(route["x_goal"]) for route in routes]
+        return {
+            "grid_paths": None,
+            "world_paths": stage_paths,
+            "time_lists": [[] for _ in routes],
+            "world_polylines": stage_paths,
+            "metrics": aggregate_milp_metrics(None, 0.0, f"import_error:{exc}"),
+            "starts_world": starts_world,
+            "goals_world": goals_world,
+            "robot_radius_cells": validation_robot_radius_cells(occ_grid.resolution),
+            "conflict_threshold_m": float(ROBOT_DIAMETER_M),
+            "success": False,
+            "norm": "inf" if norm == np.inf else int(norm),
+            "milp_stride": stride,
+            "planner_mode": "event",
+        }
+
+    stage_paths = [
+        subsample_path_by_stride(list(route["path"]), stride) for route in routes
+    ]
+    starts_world = [tuple(route["x_init"]) for route in routes]
+    goals_world = [tuple(route["x_goal"]) for route in routes]
+
+    if verbose:
+        print(f"Solving event MILP simultaneous planner (norm={norm})...")
+    t0 = time.perf_counter()
+    status = "ok"
+    agent_times = None
+    analysis = None
+    planner = None
+    try:
+        planner = EventMultiAgentSimultaneousPlanner(occ_grid, paths=stage_paths, norm=norm)
+        planner.assign_velocities([motion_cfg.max_velocity_mps] * len(stage_paths))
+        agent_times = planner.plan(verbose=False)
+        analysis = planner.analysis
+    except Exception as exc:
+        status = f"error:{type(exc).__name__}"
+    runtime_s = float(time.perf_counter() - t0)
+
+    if agent_times is not None and analysis is not None:
+        time_lists = [
+            expand_event_times_to_original_path(agent_path, event_times)
+            for agent_path, event_times in zip(analysis.agents, agent_times)
+        ]
+    else:
+        time_lists = [[] for _ in routes]
+
+    metrics = aggregate_milp_metrics(
+        time_lists,
+        runtime_s,
+        status,
+        norm=norm,
+        world_paths=stage_paths,
+        motion=motion_cfg,
+    )
+    if verbose:
+        print(
+            f"Event MILP done: status={metrics.get('status')} success={metrics.get('success')} "
+            f"({runtime_s:.2f}s)"
+        )
+
+    interest_waypoint_count = (
+        sum(len(agent.interest_waypoints) for agent in analysis.agents)
+        if analysis is not None
+        else 0
+    )
+    encounter_count = len(analysis.encounters) if analysis is not None else 0
+    binary_z_count = int(planner.num_z) if planner is not None else 0
+
+    return {
+        "grid_paths": None,
+        "world_paths": stage_paths,
+        "time_lists": time_lists,
+        "world_polylines": stage_paths,
+        "metrics": metrics,
+        "starts_world": starts_world,
+        "goals_world": goals_world,
+        "robot_radius_cells": validation_robot_radius_cells(occ_grid.resolution),
+        "conflict_threshold_m": float(ROBOT_DIAMETER_M),
+        "success": bool(metrics["success"]),
+        "norm": metrics.get("norm"),
+        "max_velocity_mps": float(motion_cfg.max_velocity_mps),
+        "milp_stride": stride,
+        "planner_mode": "event",
+        "interest_waypoint_count": int(interest_waypoint_count),
+        "encounter_count": int(encounter_count),
+        "binary_z_count": binary_z_count,
     }
 
 
