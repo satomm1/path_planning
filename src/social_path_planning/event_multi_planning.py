@@ -30,6 +30,12 @@ from social_path_planning.multi_planning import (
 )
 
 MAX_VELOCITY = DEFAULT_MAX_VELOCITY_MPS
+INTERSECT_CONFLICT_LENGTH_MAX = 2.0
+
+
+def _conflict_interval_length(interval):
+    """Return planned-path arc-length spanned by a conflict interval."""
+    return max(0.0, float(interval.s_exit) - float(interval.s_enter))
 
 
 def _encounter_kind_from_index_corners(segment_pairs):
@@ -49,6 +55,28 @@ def _encounter_kind_from_index_corners(segment_pairs):
     if (i_start, j_end) in pair_set and (i_end, j_start) in pair_set:
         return "opposite"
     return "same"
+
+
+def _classify_encounter_kind(segment_pairs, interval_a, interval_b):
+    """
+    Classify a pairwise encounter window.
+
+    Short conflicts on both agents are treated as intersections. Otherwise fall
+    back to index-corner same/opposite detection.
+    """
+    len_a = _conflict_interval_length(interval_a)
+    len_b = _conflict_interval_length(interval_b)
+    if (
+        len_a < INTERSECT_CONFLICT_LENGTH_MAX
+        and len_b < INTERSECT_CONFLICT_LENGTH_MAX
+    ):
+        return "intersect"
+    return _encounter_kind_from_index_corners(segment_pairs)
+
+
+def _encounter_uses_opposite_mutex(kind):
+    """Return whether an encounter uses clear-before-enter mutex constraints."""
+    return kind in ("opposite", "intersect")
 
 
 VIZ_EVENT_WAYPOINTS = False
@@ -78,7 +106,7 @@ class EncounterWindow:
     agent_b: int
     interval_a: ConflictInterval
     interval_b: ConflictInterval
-    kind: str  # "opposite" | "same"
+    kind: str  # "opposite" | "same" | "intersect"
 
 
 @dataclass(frozen=True)
@@ -262,7 +290,6 @@ def analyze_event_paths(paths, threshold=ROBOT_DIAMETER):
                 continue
             pair_conflicts[(a1, a2)] = {
                 "pairs": segment_pairs,
-                "kind": _encounter_kind_from_index_corners(segment_pairs),
             }
             for i, _j in segment_pairs:
                 segment_indices_by_agent[a1].add(int(i))
@@ -275,9 +302,9 @@ def analyze_event_paths(paths, threshold=ROBOT_DIAMETER):
     for (a1, a2), row in sorted(pair_conflicts.items()):
         seg_i = {int(i) for i, _j in row["pairs"]}
         seg_j = {int(j) for _i, j in row["pairs"]}
-        kind = row["kind"]
         interval_a = _encounter_interval(a1, paths[a1], seg_i)
         interval_b = _encounter_interval(a2, paths[a2], seg_j)
+        kind = _classify_encounter_kind(row["pairs"], interval_a, interval_b)
         encounters.append(
             EncounterWindow(
                 agent_a=a1,
@@ -569,7 +596,7 @@ def _add_encounter_mutex_constraints(
     """Append mutex constraints for one encounter window."""
     i_enter, i_exit = _refined_indices_for_interval(agent_a, encounter.interval_a)
     j_enter, j_exit = _refined_indices_for_interval(agent_b, encounter.interval_b)
-    if encounter.kind == "opposite":
+    if _encounter_uses_opposite_mutex(encounter.kind):
         uses_z = _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit)
         added = _add_opposite_encounter_mutex_constraints(
             constraints,
@@ -621,7 +648,7 @@ def _mutex_constraint_count_for_encounters(analysis):
         i_enter, i_exit = _refined_indices_for_interval(agent_a, encounter.interval_a)
         j_enter, j_exit = _refined_indices_for_interval(agent_b, encounter.interval_b)
         uses_z = _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit)
-        if encounter.kind == "opposite":
+        if _encounter_uses_opposite_mutex(encounter.kind):
             total += 2
             continue
         pairs = _same_direction_pairs_for_mutex(
@@ -644,14 +671,22 @@ def _encounter_uses_z(analysis, encounter):
     return _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit)
 
 
+def _encounter_kind_counts(encounters):
+    """Return counts of opposite, same, and intersect encounters."""
+    opposite = sum(1 for enc in encounters if enc.kind == "opposite")
+    same = sum(1 for enc in encounters if enc.kind == "same")
+    intersect = sum(1 for enc in encounters if enc.kind == "intersect")
+    return opposite, same, intersect
+
+
 def _print_event_milp_summary(analysis, num_z, mutex_constraint_count):
     interest_total = sum(len(agent.interest_waypoints) for agent in analysis.agents)
-    opposite_count = sum(1 for enc in analysis.encounters if enc.kind == "opposite")
-    same_count = len(analysis.encounters) - opposite_count
+    opposite_count, same_count, intersect_count = _encounter_kind_counts(analysis.encounters)
     print(
         "Event MILP: "
         f"{len(analysis.agents)} agents, {interest_total} interest waypoints, "
-        f"{len(analysis.encounters)} encounters ({opposite_count} opposite, {same_count} same), "
+        f"{len(analysis.encounters)} encounters "
+        f"({opposite_count} opposite, {same_count} same, {intersect_count} intersect), "
         f"{mutex_constraint_count} mutex constraints, {int(num_z)} binaries"
     )
 
@@ -725,7 +760,7 @@ def _print_event_milp_constraints(
                 f" -> indices enter={j_enter} ({_waypoint_label(agent_b, j_enter)}),"
                 f" exit={j_exit} ({_waypoint_label(agent_b, j_exit)})"
             )
-            if enc.kind == "opposite":
+            if _encounter_uses_opposite_mutex(enc.kind):
                 if uses_z:
                     print(
                         f"    (1) t_{a}[{i_exit}] <= t_{b}[{j_enter}] - {float(DELTA):.4f}"
@@ -1061,14 +1096,13 @@ def viz_event_waypoints(
         for waypoint in agent_path.interest_waypoints:
             _plot_interest_waypoint(ax, waypoint, color)
 
-    opposite_count = sum(1 for enc in analysis.encounters if enc.kind == "opposite")
-    same_count = len(analysis.encounters) - opposite_count
+    opposite_count, same_count, intersect_count = _encounter_kind_counts(analysis.encounters)
     interest_total = sum(len(agent.interest_waypoints) for agent in analysis.agents)
     ax.set_title(
         "Event interest waypoints: "
         f"{len(analysis.agents)} agents, {interest_total} waypoints, "
         f"{len(analysis.encounters)} encounters "
-        f"({opposite_count} opposite, {same_count} same)"
+        f"({opposite_count} opposite, {same_count} same, {intersect_count} intersect)"
     )
     ax.set_aspect("equal", adjustable="box")
     ax.legend(loc="upper right", fontsize=8)
@@ -1222,7 +1256,7 @@ if __name__ == "__main__":
 
     planner = EventMultiAgentSimultaneousPlanner(occ_grid, paths=stage_paths, norm=1)
     planner.assign_velocities(
-        [MAX_VELOCITY, MAX_VELOCITY / 1.2, MAX_VELOCITY / 1.5, MAX_VELOCITY / 1.65]
+        [MAX_VELOCITY, MAX_VELOCITY / 1.5, MAX_VELOCITY / 1.5, MAX_VELOCITY / 1.65]
     )
 
     print("Running event MILP on grid2 (sample2_default)...")
