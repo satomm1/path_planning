@@ -23,7 +23,6 @@ from social_path_planning.multi_planning import (
     _iter_conflicting_segment_pairs,
     _maximal_consecutive_runs,
     _multi_agent_times_from_solver,
-    _tag_opposite_segment_pairs,
     create_map_context_plot,
     create_space_time_plot,
     create_video,
@@ -31,6 +30,26 @@ from social_path_planning.multi_planning import (
 )
 
 MAX_VELOCITY = DEFAULT_MAX_VELOCITY_MPS
+
+
+def _encounter_kind_from_index_corners(segment_pairs):
+    """
+    Classify an encounter from conflicting segment-index corners.
+
+    Opposite when the earliest conflict index on one robot pairs with the
+    latest index on the other, and vice versa (anti-diagonal in index space).
+    """
+    pair_set = {(int(i), int(j)) for i, j in segment_pairs}
+    if len(pair_set) < 2:
+        return "same"
+    seg_i = {i for i, _ in pair_set}
+    seg_j = {j for _, j in pair_set}
+    i_start, i_end = min(seg_i), max(seg_i)
+    j_start, j_end = min(seg_j), max(seg_j)
+    if (i_start, j_end) in pair_set and (i_end, j_start) in pair_set:
+        return "opposite"
+    return "same"
+
 
 VIZ_EVENT_WAYPOINTS = False
 VIZ_EVENT_OUTPUT_DIR = "results/event_planning_viz"
@@ -241,10 +260,9 @@ def analyze_event_paths(paths, threshold=ROBOT_DIAMETER):
             segment_pairs = list(_iter_conflicting_segment_pairs(path_a, path_b, threshold))
             if not segment_pairs:
                 continue
-            opposite_pairs = _tag_opposite_segment_pairs(path_a, path_b, segment_pairs)
             pair_conflicts[(a1, a2)] = {
                 "pairs": segment_pairs,
-                "opposite": opposite_pairs,
+                "kind": _encounter_kind_from_index_corners(segment_pairs),
             }
             for i, _j in segment_pairs:
                 segment_indices_by_agent[a1].add(int(i))
@@ -257,7 +275,7 @@ def analyze_event_paths(paths, threshold=ROBOT_DIAMETER):
     for (a1, a2), row in sorted(pair_conflicts.items()):
         seg_i = {int(i) for i, _j in row["pairs"]}
         seg_j = {int(j) for _i, j in row["pairs"]}
-        kind = "opposite" if row["opposite"] else "same"
+        kind = row["kind"]
         interval_a = _encounter_interval(a1, paths[a1], seg_i)
         interval_b = _encounter_interval(a2, paths[a2], seg_j)
         encounters.append(
@@ -405,6 +423,26 @@ def _pair_same_direction_checkpoints(agent_a, agent_b, interval_a, interval_b):
     return sorted(pairs)
 
 
+def _conflict_exit_is_goal(agent_path, exit_idx):
+    """True when the encounter exit waypoint is the robot's goal."""
+    waypoints = agent_path.interest_waypoints
+    if exit_idx < 0 or exit_idx >= len(waypoints):
+        return False
+    return waypoints[exit_idx].kind == "goal"
+
+
+def _opposite_encounter_uses_z(agent_a, agent_b, i_exit, j_exit):
+    """
+    Opposite encounters need a binary only when neither or both agents end at goal.
+
+    If exactly one agent's conflict exit is its goal, that robot must wait for the
+    other to clear; ordering is fixed and no z is required.
+    """
+    a_goal = _conflict_exit_is_goal(agent_a, i_exit)
+    b_goal = _conflict_exit_is_goal(agent_b, j_exit)
+    return not (a_goal ^ b_goal)
+
+
 def _add_opposite_encounter_mutex_constraints(
     constraints,
     times_a,
@@ -416,8 +454,27 @@ def _add_opposite_encounter_mutex_constraints(
     z_var,
     z_index,
     big_m,
+    *,
+    agent_a,
+    agent_b,
+    uses_z,
 ):
-    """Two Big-M constraints: one agent fully clears before the other enters."""
+    """
+    Opposite mutex: Big-M with z, or fixed ordering when one robot ends at goal.
+
+    When agent A's conflict exit is its goal, B must clear before A enters and
+    A must reach goal only after B has cleared. Symmetric when B ends at goal.
+    """
+    if not uses_z:
+        a_goal = _conflict_exit_is_goal(agent_a, i_exit)
+        if a_goal:
+            constraints.append(times_b[j_exit] <= times_a[i_enter] - DELTA)
+            constraints.append(times_a[i_exit] >= times_b[j_exit] + DELTA)
+        else:
+            constraints.append(times_a[i_exit] <= times_b[j_enter] - DELTA)
+            constraints.append(times_b[j_exit] >= times_a[i_exit] + DELTA)
+        return 2
+
     constraints.append(times_a[i_exit] <= times_b[j_enter] - DELTA + big_m * z_var[z_index])
     constraints.append(
         times_b[j_exit] <= times_a[i_enter] - DELTA - big_m * (1 - z_var[z_index])
@@ -457,11 +514,12 @@ def _add_encounter_mutex_constraints(
     agent_a,
     agent_b,
 ):
-    """Append mutex Big-M constraints for one encounter window."""
+    """Append mutex constraints for one encounter window."""
     i_enter, i_exit = _refined_indices_for_interval(agent_a, encounter.interval_a)
     j_enter, j_exit = _refined_indices_for_interval(agent_b, encounter.interval_b)
     if encounter.kind == "opposite":
-        return _add_opposite_encounter_mutex_constraints(
+        uses_z = _opposite_encounter_uses_z(agent_a, agent_b, i_exit, j_exit)
+        added = _add_opposite_encounter_mutex_constraints(
             constraints,
             times_a,
             times_b,
@@ -472,7 +530,11 @@ def _add_encounter_mutex_constraints(
             z_var,
             z_index,
             big_m,
-        ), []
+            agent_a=agent_a,
+            agent_b=agent_b,
+            uses_z=uses_z,
+        )
+        return added, [], uses_z
     paired_indices = _pair_same_direction_checkpoints(
         agent_a,
         agent_b,
@@ -488,7 +550,7 @@ def _add_encounter_mutex_constraints(
         z_index,
         big_m,
     )
-    return added, paired_indices
+    return added, paired_indices, True
 
 
 def _mutex_constraint_count_for_encounters(analysis):
@@ -508,6 +570,17 @@ def _mutex_constraint_count_for_encounters(analysis):
         )
         total += 2 * len(pairs)
     return total
+
+
+def _encounter_uses_z(analysis, encounter):
+    """Return whether an encounter allocates a binary decision variable."""
+    if encounter.kind != "opposite":
+        return True
+    agent_a = analysis.agents[encounter.agent_a]
+    agent_b = analysis.agents[encounter.agent_b]
+    i_enter, i_exit = _refined_indices_for_interval(agent_a, encounter.interval_a)
+    j_enter, j_exit = _refined_indices_for_interval(agent_b, encounter.interval_b)
+    return _opposite_encounter_uses_z(agent_a, agent_b, i_exit, j_exit)
 
 
 def _print_event_milp_summary(analysis, num_z, mutex_constraint_count):
@@ -560,21 +633,27 @@ def _print_event_milp_constraints(
                 f"   # path_len={float(seg_len):.4f} m, {from_lbl} -> {to_lbl}"
             )
 
+    z_encounter_count = sum(1 for row in encounter_rows if row.get("uses_z"))
     if not encounter_rows:
         print("\nNo encounter mutex constraints (zero binaries).")
     else:
-        print(f"\nEncounter mutex constraints ({len(encounter_rows)} binaries):")
+        print(
+            f"\nEncounter mutex constraints "
+            f"({z_encounter_count} binaries, {len(encounter_rows)} encounters):"
+        )
         for row in encounter_rows:
             enc = row["encounter"]
-            z_index = row["z_index"]
+            z_index = row.get("z_index")
+            uses_z = row.get("uses_z", True)
             a, b = enc.agent_a, enc.agent_b
             agent_a = analysis.agents[a]
             agent_b = analysis.agents[b]
             i_enter, i_exit = row["i_enter"], row["i_exit"]
             j_enter, j_exit = row["j_enter"], row["j_exit"]
-            print(
-                f"\n  z_{z_index}: agents ({a},{b}), kind={enc.kind}"
-            )
+            if uses_z:
+                print(f"\n  z_{z_index}: agents ({a},{b}), kind={enc.kind}")
+            else:
+                print(f"\n  fixed ordering: agents ({a},{b}), kind={enc.kind} (no binary)")
             print(
                 f"    agent {a} interval: s=[{enc.interval_a.s_enter:.4f}, {enc.interval_a.s_exit:.4f}]"
                 f" -> indices enter={i_enter} ({_waypoint_label(agent_a, i_enter)}),"
@@ -586,16 +665,35 @@ def _print_event_milp_constraints(
                 f" exit={j_exit} ({_waypoint_label(agent_b, j_exit)})"
             )
             if enc.kind == "opposite":
-                print(
-                    f"    (1) t_{a}[{i_exit}] <= t_{b}[{j_enter}] - {float(DELTA):.4f}"
-                    f" + {float(big_m):.4f} * z_{z_index}"
-                    f"   # agent {a} clears before agent {b} enters"
-                )
-                print(
-                    f"    (2) t_{b}[{j_exit}] <= t_{a}[{i_enter}] - {float(DELTA):.4f}"
-                    f" - {float(big_m):.4f} * (1 - z_{z_index})"
-                    f"   # agent {b} clears before agent {a} enters"
-                )
+                if uses_z:
+                    print(
+                        f"    (1) t_{a}[{i_exit}] <= t_{b}[{j_enter}] - {float(DELTA):.4f}"
+                        f" + {float(big_m):.4f} * z_{z_index}"
+                        f"   # agent {a} clears before agent {b} enters"
+                    )
+                    print(
+                        f"    (2) t_{b}[{j_exit}] <= t_{a}[{i_enter}] - {float(DELTA):.4f}"
+                        f" - {float(big_m):.4f} * (1 - z_{z_index})"
+                        f"   # agent {b} clears before agent {a} enters"
+                    )
+                elif _conflict_exit_is_goal(agent_a, i_exit):
+                    print(
+                        f"    (1) t_{b}[{j_exit}] <= t_{a}[{i_enter}] - {float(DELTA):.4f}"
+                        f"   # agent {b} clears before agent {a} enters"
+                    )
+                    print(
+                        f"    (2) t_{a}[{i_exit}] >= t_{b}[{j_exit}] + {float(DELTA):.4f}"
+                        f"   # agent {a} reaches goal after agent {b} cleared"
+                    )
+                else:
+                    print(
+                        f"    (1) t_{a}[{i_exit}] <= t_{b}[{j_enter}] - {float(DELTA):.4f}"
+                        f"   # agent {a} clears before agent {b} enters"
+                    )
+                    print(
+                        f"    (2) t_{b}[{j_exit}] >= t_{a}[{i_exit}] + {float(DELTA):.4f}"
+                        f"   # agent {b} reaches goal after agent {a} cleared"
+                    )
             else:
                 paired_indices = row.get("paired_indices", [])
                 for pair_no, (ia, ib) in enumerate(paired_indices, start=1):
@@ -704,18 +802,39 @@ class EventMultiAgentSimultaneousPlanner(EventMultiAgentPlanner):
             for k, seg_len in enumerate(_interest_segment_lengths(agent_path)):
                 constraints.append(agent_time[k + 1] - agent_time[k] >= seg_len / velocity)
 
-        num_z = len(analysis.encounters)
-        z = cp.Variable(num_z, boolean=True) if num_z > 0 else None
         big_m = _compute_big_m_horizon(analysis, velocities)
-        mutex_constraint_count = 0
-        encounter_rows = []
-
-        for z_index, encounter in enumerate(analysis.encounters):
+        encounter_specs = []
+        for encounter in analysis.encounters:
             agent_a = analysis.agents[encounter.agent_a]
             agent_b = analysis.agents[encounter.agent_b]
             i_enter, i_exit = _refined_indices_for_interval(agent_a, encounter.interval_a)
             j_enter, j_exit = _refined_indices_for_interval(agent_b, encounter.interval_b)
-            added, paired_indices = _add_encounter_mutex_constraints(
+            encounter_specs.append(
+                {
+                    "encounter": encounter,
+                    "agent_a": agent_a,
+                    "agent_b": agent_b,
+                    "i_enter": i_enter,
+                    "i_exit": i_exit,
+                    "j_enter": j_enter,
+                    "j_exit": j_exit,
+                    "uses_z": _encounter_uses_z(analysis, encounter),
+                }
+            )
+
+        num_z = sum(1 for spec in encounter_specs if spec["uses_z"])
+        z = cp.Variable(num_z, boolean=True) if num_z > 0 else None
+        mutex_constraint_count = 0
+        encounter_rows = []
+        z_slot = 0
+
+        for spec in encounter_specs:
+            encounter = spec["encounter"]
+            agent_a = spec["agent_a"]
+            agent_b = spec["agent_b"]
+            uses_z = spec["uses_z"]
+            z_index = z_slot if uses_z else None
+            added, paired_indices, _uses_z = _add_encounter_mutex_constraints(
                 constraints,
                 agent_times[encounter.agent_a],
                 agent_times[encounter.agent_b],
@@ -726,14 +845,17 @@ class EventMultiAgentSimultaneousPlanner(EventMultiAgentPlanner):
                 agent_a,
                 agent_b,
             )
+            if uses_z:
+                z_slot += 1
             encounter_rows.append(
                 {
                     "z_index": z_index,
+                    "uses_z": uses_z,
                     "encounter": encounter,
-                    "i_enter": i_enter,
-                    "i_exit": i_exit,
-                    "j_enter": j_enter,
-                    "j_exit": j_exit,
+                    "i_enter": spec["i_enter"],
+                    "i_exit": spec["i_exit"],
+                    "j_enter": spec["j_enter"],
+                    "j_exit": spec["j_exit"],
                     "paired_indices": paired_indices,
                 }
             )
@@ -1012,7 +1134,7 @@ if __name__ == "__main__":
         occ_grid, map_size, map_resolution, "path2.pkl", [2, 40], [97, 50]
     )
     path3 = _load_or_plan_path(
-        occ_grid, map_size, map_resolution, "path3.pkl", [75, 48], [65, 45]
+        occ_grid, map_size, map_resolution, "path3.pkl", [75, 48], [65, 45.5]
     )
     path4 = _load_or_plan_path(
         occ_grid, map_size, map_resolution, "path4.pkl", [50, 20], [97, 75]
