@@ -2,7 +2,7 @@
 Event-based multi-agent path analysis: conflict intervals and interest waypoints.
 
 Phase 1: detect conflict boundaries, refine polylines, visualize interest waypoints.
-MILP timing optimization is deferred to a later phase.
+Phase 2: event-based MILP on interest waypoints with per-encounter mutex constraints.
 """
 
 from __future__ import annotations
@@ -10,17 +10,27 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import cvxpy as cp
 import matplotlib.pyplot as plt
 import numpy as np
 
+from social_path_planning.mapf_comparison.motion import DEFAULT_MAX_VELOCITY_MPS
 from social_path_planning.multi_planning import (
+    DELTA,
     GEOM_MATCH_TOL,
+    M,
     ROBOT_DIAMETER,
     _iter_conflicting_segment_pairs,
     _maximal_consecutive_runs,
+    _multi_agent_times_from_solver,
     _tag_opposite_segment_pairs,
+    create_map_context_plot,
+    create_space_time_plot,
+    create_video,
     path_to_arc_length,
 )
+
+MAX_VELOCITY = DEFAULT_MAX_VELOCITY_MPS
 
 VIZ_EVENT_WAYPOINTS = False
 VIZ_EVENT_OUTPUT_DIR = "results/event_planning_viz"
@@ -161,16 +171,21 @@ def _intervals_from_segment_indices(agent, path, segment_indices):
     return _merge_conflict_intervals(intervals)
 
 
-def _build_interest_waypoints(agent, path, intervals):
+def _build_interest_waypoints(agent, path, intervals, encounter_intervals=None):
+    """Build interest waypoints from merged conflicts and per-pair encounter boundaries."""
     cum = path_to_arc_length(path)
     total = float(cum[-1]) if cum else 0.0
-    s_values = {0.0, total}
+    enter_s = set()
+    exit_s = set()
     for interval in intervals:
-        s_values.add(float(interval.s_enter))
-        s_values.add(float(interval.s_exit))
+        enter_s.add(float(interval.s_enter))
+        exit_s.add(float(interval.s_exit))
+    for interval in encounter_intervals or []:
+        enter_s.add(float(interval.s_enter))
+        exit_s.add(float(interval.s_exit))
 
+    s_values = {0.0, total, *enter_s, *exit_s}
     ordered_s = sorted(s_values)
-    exit_s = {float(iv.s_exit) for iv in intervals}
 
     waypoints = []
     for s in ordered_s:
@@ -178,10 +193,15 @@ def _build_interest_waypoints(agent, path, intervals):
             kind = "start"
         elif abs(s - total) <= GEOM_MATCH_TOL:
             kind = "goal"
-        elif any(abs(float(s) - val) <= GEOM_MATCH_TOL for val in exit_s):
-            kind = "conflict_exit"
         else:
-            kind = "conflict_enter"
+            is_enter = any(abs(float(s) - val) <= GEOM_MATCH_TOL for val in enter_s)
+            is_exit = any(abs(float(s) - val) <= GEOM_MATCH_TOL for val in exit_s)
+            if is_exit:
+                kind = "conflict_exit"
+            elif is_enter:
+                kind = "conflict_enter"
+            else:
+                kind = "conflict_enter"
         waypoints.append(
             InterestWaypoint(
                 agent=int(agent),
@@ -232,9 +252,34 @@ def analyze_event_paths(paths, threshold=ROBOT_DIAMETER):
                 segment_indices_by_agent[a2].add(int(j))
 
     agents = []
+    encounter_intervals_by_agent = [[] for _ in range(num_agents)]
+    encounters = []
+    for (a1, a2), row in sorted(pair_conflicts.items()):
+        seg_i = {int(i) for i, _j in row["pairs"]}
+        seg_j = {int(j) for _i, j in row["pairs"]}
+        kind = "opposite" if row["opposite"] else "same"
+        interval_a = _encounter_interval(a1, paths[a1], seg_i)
+        interval_b = _encounter_interval(a2, paths[a2], seg_j)
+        encounters.append(
+            EncounterWindow(
+                agent_a=a1,
+                agent_b=a2,
+                interval_a=interval_a,
+                interval_b=interval_b,
+                kind=kind,
+            )
+        )
+        encounter_intervals_by_agent[a1].append(interval_a)
+        encounter_intervals_by_agent[a2].append(interval_b)
+
     for agent, path in enumerate(paths):
         intervals = _intervals_from_segment_indices(agent, path, segment_indices_by_agent[agent])
-        interest = _build_interest_waypoints(agent, path, intervals)
+        interest = _build_interest_waypoints(
+            agent,
+            path,
+            intervals,
+            encounter_intervals_by_agent[agent],
+        )
         s_values = [wp.s for wp in interest]
         refined = refine_path_at_arc_lengths(path, s_values)
         agents.append(
@@ -247,22 +292,506 @@ def analyze_event_paths(paths, threshold=ROBOT_DIAMETER):
             )
         )
 
-    encounters = []
-    for (a1, a2), row in sorted(pair_conflicts.items()):
-        seg_i = {int(i) for i, _j in row["pairs"]}
-        seg_j = {int(j) for _i, j in row["pairs"]}
-        kind = "opposite" if row["opposite"] else "same"
-        encounters.append(
-            EncounterWindow(
-                agent_a=a1,
-                agent_b=a2,
-                interval_a=_encounter_interval(a1, paths[a1], seg_i),
-                interval_b=_encounter_interval(a2, paths[a2], seg_j),
-                kind=kind,
+    return EventPathAnalysis(agents=agents, encounters=encounters)
+
+
+def _interest_segment_lengths(agent_path):
+    """Return planned-path arc-length between consecutive interest waypoints."""
+    waypoints = agent_path.interest_waypoints
+    if len(waypoints) < 2:
+        return []
+    return [
+        max(0.0, float(waypoints[k + 1].s) - float(waypoints[k].s))
+        for k in range(len(waypoints) - 1)
+    ]
+
+
+def _index_for_arc_s_on_waypoints(interest_waypoints, s, *, endpoint="enter", eps=GEOM_MATCH_TOL):
+    """
+    Map original-path arc-length ``s`` to an interest-waypoint index.
+
+    Waypoint ``s`` values are defined along the original planned path. Do not
+    bracket using Euclidean cumulative length on ``refined_path``; that polyline
+    can shortcut corners and mis-assign exit indices past the true boundary.
+    """
+    s = float(s)
+    for idx, waypoint in enumerate(interest_waypoints):
+        if abs(float(waypoint.s) - s) <= eps:
+            return int(idx)
+
+    s_vals = [float(waypoint.s) for waypoint in interest_waypoints]
+    if endpoint == "enter":
+        idx = int(np.searchsorted(s_vals, s, side="right") - 1)
+    else:
+        idx = int(np.searchsorted(s_vals, s, side="left"))
+    return max(0, min(idx, len(interest_waypoints) - 1))
+
+
+def _refined_indices_for_interval(agent_path, interval):
+    """Map a conflict interval to enter/exit indices on the agent's interest waypoints."""
+    waypoints = agent_path.interest_waypoints
+    enter_idx = _index_for_arc_s_on_waypoints(waypoints, interval.s_enter, endpoint="enter")
+    exit_idx = _index_for_arc_s_on_waypoints(waypoints, interval.s_exit, endpoint="exit")
+    if exit_idx < enter_idx:
+        exit_idx = enter_idx
+    return enter_idx, exit_idx
+
+
+def _compute_big_m_horizon(analysis, velocities):
+    """Upper bound on schedule horizon for tightening Big-M."""
+    horizon = 0.0
+    for agent_path, velocity in zip(analysis.agents, velocities):
+        velocity = max(float(velocity), 1e-6)
+        for length in _interest_segment_lengths(agent_path):
+            horizon += float(length) / velocity
+    return max(float(M), horizon + float(DELTA) + 1.0)
+
+
+def _normalized_encounter_position(s, interval):
+    """Return progress in [0, 1] through an encounter interval."""
+    span = float(interval.s_exit) - float(interval.s_enter)
+    if span <= GEOM_MATCH_TOL:
+        return 0.0
+    return (float(s) - float(interval.s_enter)) / span
+
+
+def _waypoint_indices_in_interval(agent_path, interval):
+    """Interest-waypoint indices whose arc-length lies in the encounter interval."""
+    indices = []
+    for idx, waypoint in enumerate(agent_path.interest_waypoints):
+        s = float(waypoint.s)
+        if float(interval.s_enter) - GEOM_MATCH_TOL <= s <= float(interval.s_exit) + GEOM_MATCH_TOL:
+            indices.append(int(idx))
+    return indices
+
+
+def _pair_same_direction_checkpoints(agent_a, agent_b, interval_a, interval_b):
+    """
+    Pair interest waypoints in the encounter band so both agents keep the same leader.
+
+    Interior waypoints from other encounters can fall inside this band; each is paired
+    to the closest checkpoint on the other agent by normalized progress through the
+    encounter interval.
+    """
+    indices_a = _waypoint_indices_in_interval(agent_a, interval_a)
+    indices_b = _waypoint_indices_in_interval(agent_b, interval_b)
+    if not indices_a or not indices_b:
+        return []
+
+    waypoints_a = agent_a.interest_waypoints
+    waypoints_b = agent_b.interest_waypoints
+    pairs = set()
+
+    for ia in indices_a:
+        ua = _normalized_encounter_position(waypoints_a[ia].s, interval_a)
+        ib = min(
+            indices_b,
+            key=lambda j: abs(
+                _normalized_encounter_position(waypoints_b[j].s, interval_b) - ua
+            ),
+        )
+        pairs.add((int(ia), int(ib)))
+
+    for ib in indices_b:
+        ub = _normalized_encounter_position(waypoints_b[ib].s, interval_b)
+        ia = min(
+            indices_a,
+            key=lambda i: abs(
+                _normalized_encounter_position(waypoints_a[i].s, interval_a) - ub
+            ),
+        )
+        pairs.add((int(ia), int(ib)))
+
+    return sorted(pairs)
+
+
+def _add_opposite_encounter_mutex_constraints(
+    constraints,
+    times_a,
+    times_b,
+    i_enter,
+    i_exit,
+    j_enter,
+    j_exit,
+    z_var,
+    z_index,
+    big_m,
+):
+    """Two Big-M constraints: one agent fully clears before the other enters."""
+    constraints.append(times_a[i_exit] <= times_b[j_enter] - DELTA + big_m * z_var[z_index])
+    constraints.append(
+        times_b[j_exit] <= times_a[i_enter] - DELTA - big_m * (1 - z_var[z_index])
+    )
+    return 2
+
+
+def _add_same_encounter_mutex_constraints(
+    constraints,
+    times_a,
+    times_b,
+    paired_indices,
+    z_var,
+    z_index,
+    big_m,
+):
+    """
+    Two Big-M constraints per paired checkpoint, one z for the whole encounter.
+
+    z=0 -> agent A is ahead at every paired waypoint; z=1 -> agent B is ahead.
+    """
+    z = z_var[z_index]
+    for ia, ib in paired_indices:
+        constraints.append(times_a[ia] <= times_b[ib] - DELTA + big_m * z)
+        constraints.append(times_b[ib] <= times_a[ia] - DELTA + big_m * (1 - z))
+    return 2 * len(paired_indices)
+
+
+def _add_encounter_mutex_constraints(
+    constraints,
+    times_a,
+    times_b,
+    z_var,
+    z_index,
+    big_m,
+    encounter,
+    agent_a,
+    agent_b,
+):
+    """Append mutex Big-M constraints for one encounter window."""
+    i_enter, i_exit = _refined_indices_for_interval(agent_a, encounter.interval_a)
+    j_enter, j_exit = _refined_indices_for_interval(agent_b, encounter.interval_b)
+    if encounter.kind == "opposite":
+        return _add_opposite_encounter_mutex_constraints(
+            constraints,
+            times_a,
+            times_b,
+            i_enter,
+            i_exit,
+            j_enter,
+            j_exit,
+            z_var,
+            z_index,
+            big_m,
+        ), []
+    paired_indices = _pair_same_direction_checkpoints(
+        agent_a,
+        agent_b,
+        encounter.interval_a,
+        encounter.interval_b,
+    )
+    added = _add_same_encounter_mutex_constraints(
+        constraints,
+        times_a,
+        times_b,
+        paired_indices,
+        z_var,
+        z_index,
+        big_m,
+    )
+    return added, paired_indices
+
+
+def _mutex_constraint_count_for_encounters(analysis):
+    """Return total mutex rows: 2 per opposite encounter, 2 per same-direction pair."""
+    total = 0
+    for encounter in analysis.encounters:
+        if encounter.kind == "opposite":
+            total += 2
+            continue
+        agent_a = analysis.agents[encounter.agent_a]
+        agent_b = analysis.agents[encounter.agent_b]
+        pairs = _pair_same_direction_checkpoints(
+            agent_a,
+            agent_b,
+            encounter.interval_a,
+            encounter.interval_b,
+        )
+        total += 2 * len(pairs)
+    return total
+
+
+def _print_event_milp_summary(analysis, num_z, mutex_constraint_count):
+    interest_total = sum(len(agent.interest_waypoints) for agent in analysis.agents)
+    opposite_count = sum(1 for enc in analysis.encounters if enc.kind == "opposite")
+    same_count = len(analysis.encounters) - opposite_count
+    print(
+        "Event MILP: "
+        f"{len(analysis.agents)} agents, {interest_total} interest waypoints, "
+        f"{len(analysis.encounters)} encounters ({opposite_count} opposite, {same_count} same), "
+        f"{mutex_constraint_count} mutex constraints, {int(num_z)} binaries"
+    )
+
+
+def _waypoint_label(agent_path, idx):
+    """Human-readable label for a refined-path / interest-waypoint index."""
+    if 0 <= idx < len(agent_path.interest_waypoints):
+        waypoint = agent_path.interest_waypoints[idx]
+        return f"{waypoint.kind} (s={float(waypoint.s):.4f})"
+    return f"idx={idx}"
+
+
+def _print_event_milp_constraints(
+    analysis,
+    velocities,
+    *,
+    norm,
+    big_m,
+    encounter_rows,
+):
+    """Print a human-readable listing of the event MILP objective and constraints."""
+    norm_label = "inf" if norm == np.inf else str(int(norm))
+    final_terms = [f"t_{agent.agent}[{len(agent.refined_path) - 1}]" for agent in analysis.agents]
+    print("\n=== Event MILP formulation ===")
+    print(f"Objective: minimize ||[{', '.join(final_terms)}]||_{norm_label}")
+    print(f"Big-M: {float(big_m):.4f}  (DELTA={float(DELTA):.4f})")
+
+    for agent_path, velocity in zip(analysis.agents, velocities):
+        agent = agent_path.agent
+        velocity = max(float(velocity), 1e-6)
+        num_wp = len(agent_path.interest_waypoints)
+        print(f"\nAgent {agent}: {num_wp} waypoints, v_max={velocity:.4f} m/s")
+        print(f"  t_{agent}[0] = 0")
+        for k, seg_len in enumerate(_interest_segment_lengths(agent_path)):
+            min_dt = float(seg_len) / velocity
+            from_lbl = _waypoint_label(agent_path, k)
+            to_lbl = _waypoint_label(agent_path, k + 1)
+            print(
+                f"  t_{agent}[{k + 1}] - t_{agent}[{k}] >= {min_dt:.4f}"
+                f"   # path_len={float(seg_len):.4f} m, {from_lbl} -> {to_lbl}"
             )
+
+    if not encounter_rows:
+        print("\nNo encounter mutex constraints (zero binaries).")
+    else:
+        print(f"\nEncounter mutex constraints ({len(encounter_rows)} binaries):")
+        for row in encounter_rows:
+            enc = row["encounter"]
+            z_index = row["z_index"]
+            a, b = enc.agent_a, enc.agent_b
+            agent_a = analysis.agents[a]
+            agent_b = analysis.agents[b]
+            i_enter, i_exit = row["i_enter"], row["i_exit"]
+            j_enter, j_exit = row["j_enter"], row["j_exit"]
+            print(
+                f"\n  z_{z_index}: agents ({a},{b}), kind={enc.kind}"
+            )
+            print(
+                f"    agent {a} interval: s=[{enc.interval_a.s_enter:.4f}, {enc.interval_a.s_exit:.4f}]"
+                f" -> indices enter={i_enter} ({_waypoint_label(agent_a, i_enter)}),"
+                f" exit={i_exit} ({_waypoint_label(agent_a, i_exit)})"
+            )
+            print(
+                f"    agent {b} interval: s=[{enc.interval_b.s_enter:.4f}, {enc.interval_b.s_exit:.4f}]"
+                f" -> indices enter={j_enter} ({_waypoint_label(agent_b, j_enter)}),"
+                f" exit={j_exit} ({_waypoint_label(agent_b, j_exit)})"
+            )
+            if enc.kind == "opposite":
+                print(
+                    f"    (1) t_{a}[{i_exit}] <= t_{b}[{j_enter}] - {float(DELTA):.4f}"
+                    f" + {float(big_m):.4f} * z_{z_index}"
+                    f"   # agent {a} clears before agent {b} enters"
+                )
+                print(
+                    f"    (2) t_{b}[{j_exit}] <= t_{a}[{i_enter}] - {float(DELTA):.4f}"
+                    f" - {float(big_m):.4f} * (1 - z_{z_index})"
+                    f"   # agent {b} clears before agent {a} enters"
+                )
+            else:
+                paired_indices = row.get("paired_indices", [])
+                for pair_no, (ia, ib) in enumerate(paired_indices, start=1):
+                    print(
+                        f"    ({pair_no}a) t_{a}[{ia}] ({_waypoint_label(agent_a, ia)})"
+                        f" <= t_{b}[{ib}] ({_waypoint_label(agent_b, ib)})"
+                        f" - {float(DELTA):.4f} + {float(big_m):.4f} * z_{z_index}"
+                        f"   # z=0: agent {a} ahead"
+                    )
+                    print(
+                        f"    ({pair_no}b) t_{b}[{ib}] ({_waypoint_label(agent_b, ib)})"
+                        f" <= t_{a}[{ia}] ({_waypoint_label(agent_a, ia)})"
+                        f" - {float(DELTA):.4f} + {float(big_m):.4f} * (1 - z_{z_index})"
+                        f"   # z=1: agent {b} ahead"
+                    )
+    print("=== End formulation ===\n")
+
+
+def expand_event_times_to_original_path(agent_path, event_times):
+    """
+    Linearly interpolate event times from interest waypoints onto ``original_path``.
+
+    ``event_times[k]`` aligns with ``agent_path.interest_waypoints[k].s``.
+    """
+    original = agent_path.original_path
+    if not original:
+        return []
+    if len(original) == 1:
+        return [float(event_times[0]) if event_times else 0.0]
+
+    s_vals = [float(wp.s) for wp in agent_path.interest_waypoints]
+    t_vals = [float(t) for t in event_times]
+    if len(s_vals) != len(t_vals):
+        raise ValueError("event_times length must match interest_waypoints")
+
+    cum = path_to_arc_length(original)
+    out = []
+    for s in cum:
+        s = float(s)
+        if s <= s_vals[0]:
+            out.append(t_vals[0])
+            continue
+        if s >= s_vals[-1]:
+            out.append(t_vals[-1])
+            continue
+        idx = int(np.searchsorted(s_vals, s, side="right") - 1)
+        idx = max(0, min(idx, len(s_vals) - 2))
+        ds = s_vals[idx + 1] - s_vals[idx]
+        if ds <= 1e-12:
+            out.append(t_vals[idx])
+        else:
+            alpha = (s - s_vals[idx]) / ds
+            out.append(t_vals[idx] + alpha * (t_vals[idx + 1] - t_vals[idx]))
+    return out
+
+
+class EventMultiAgentPlanner:
+    def __init__(self, occupancy_grid, paths=None, v=None):
+        self.occupancy_grid = occupancy_grid
+        self.paths = paths
+        self.v = v if v is not None else MAX_VELOCITY
+        self.analysis = None
+        self.event_times = None
+
+    def assign_path(self, paths):
+        self.paths = paths
+
+    def assign_velocities(self, v):
+        self.v = v
+
+
+class EventMultiAgentSimultaneousPlanner(EventMultiAgentPlanner):
+    def __init__(self, occupancy_grid, paths=None, norm=1, v=None):
+        super().__init__(occupancy_grid, paths=paths, v=v)
+        self.norm = norm
+        self.mutex_constraint_count = 0
+        self.num_z = 0
+
+    def analyze(self, threshold=ROBOT_DIAMETER):
+        if self.paths is None:
+            raise ValueError("Paths not assigned.")
+        self.analysis = analyze_event_paths(self.paths, threshold=threshold)
+        return self.analysis
+
+    def build_problem(self, analysis=None, threshold=ROBOT_DIAMETER, print_constraints=False):
+        if analysis is None:
+            analysis = self.analyze(threshold=threshold)
+        else:
+            self.analysis = analysis
+
+        if len(self.v) == 1:
+            velocities = [self.v[0] for _ in range(len(analysis.agents))]
+        else:
+            velocities = list(self.v)
+
+        agent_times = [
+            cp.Variable(len(agent.refined_path)) for agent in analysis.agents
+        ]
+        constraints = []
+        for agent_time in agent_times:
+            constraints.append(agent_time[0] == 0)
+
+        for agent_idx, agent_path in enumerate(analysis.agents):
+            velocity = max(float(velocities[agent_idx]), 1e-6)
+            agent_time = agent_times[agent_idx]
+            for k, seg_len in enumerate(_interest_segment_lengths(agent_path)):
+                constraints.append(agent_time[k + 1] - agent_time[k] >= seg_len / velocity)
+
+        num_z = len(analysis.encounters)
+        z = cp.Variable(num_z, boolean=True) if num_z > 0 else None
+        big_m = _compute_big_m_horizon(analysis, velocities)
+        mutex_constraint_count = 0
+        encounter_rows = []
+
+        for z_index, encounter in enumerate(analysis.encounters):
+            agent_a = analysis.agents[encounter.agent_a]
+            agent_b = analysis.agents[encounter.agent_b]
+            i_enter, i_exit = _refined_indices_for_interval(agent_a, encounter.interval_a)
+            j_enter, j_exit = _refined_indices_for_interval(agent_b, encounter.interval_b)
+            added, paired_indices = _add_encounter_mutex_constraints(
+                constraints,
+                agent_times[encounter.agent_a],
+                agent_times[encounter.agent_b],
+                z,
+                z_index,
+                big_m,
+                encounter,
+                agent_a,
+                agent_b,
+            )
+            encounter_rows.append(
+                {
+                    "z_index": z_index,
+                    "encounter": encounter,
+                    "i_enter": i_enter,
+                    "i_exit": i_exit,
+                    "j_enter": j_enter,
+                    "j_exit": j_exit,
+                    "paired_indices": paired_indices,
+                }
+            )
+            mutex_constraint_count += added
+
+        final_time_vars = cp.hstack([agent_time[-1] for agent_time in agent_times])
+        objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))
+        prob = cp.Problem(objective, constraints)
+
+        self.num_z = num_z
+        self.mutex_constraint_count = mutex_constraint_count
+        _print_event_milp_summary(analysis, num_z, mutex_constraint_count)
+        if print_constraints:
+            _print_event_milp_constraints(
+                analysis,
+                velocities,
+                norm=self.norm,
+                big_m=big_m,
+                encounter_rows=encounter_rows,
+            )
+        return prob, agent_times, num_z
+
+    def _solve_problem(self, prob, agent_times, verbose=False):
+        print("Starting to solve event multi-agent planning problem...")
+        solver_chain = [
+            name
+            for name in (cp.GLPK_MI, cp.HIGHS, cp.SCIPY)
+            if name in cp.installed_solvers()
+        ]
+        if not solver_chain:
+            raise RuntimeError("No cvxpy solver available for event MILP")
+
+        last_error = None
+        for solver in solver_chain:
+            try:
+                prob.solve(verbose=verbose, solver=solver)
+                if prob.status is not None:
+                    break
+            except Exception as exc:
+                last_error = exc
+        else:
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError("Event MILP solve failed without a solver status")
+
+        return _multi_agent_times_from_solver(
+            prob, agent_times, "EventMultiAgentSimultaneousPlanner"
         )
 
-    return EventPathAnalysis(agents=agents, encounters=encounters)
+    def plan(self, verbose=False, threshold=ROBOT_DIAMETER, print_constraints=False):
+        if self.paths is None:
+            raise ValueError("Paths not assigned.")
+        prob, agent_times, _num_z = self.build_problem(
+            threshold=threshold,
+            print_constraints=print_constraints,
+        )
+        self.event_times = self._solve_problem(prob, agent_times, verbose=verbose)
+        return self.event_times
 
 
 def _plot_conflict_segments(ax, path, intervals, color="crimson"):
@@ -400,3 +929,144 @@ def _save_encounter_panel(analysis, encounter, *, occ_grid=None, output_path=Non
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved encounter visualization: {Path(output_path).resolve()}")
+
+
+def build_constant_velocity_schedules(analysis, event_times_list):
+    """
+    Build per-agent (path, arrival_times) for constant-velocity playback.
+
+    Times are expanded onto ``original_path`` with speed uniform in arc-length
+    between consecutive interest waypoints, so the robot follows the planned
+    polyline rather than straight chords between event vertices.
+    """
+    paths = []
+    times = []
+    for agent_path, event_times in zip(analysis.agents, event_times_list):
+        paths.append(list(agent_path.original_path))
+        times.append(expand_event_times_to_original_path(agent_path, event_times))
+    return paths, times
+
+
+def create_event_video(
+    analysis,
+    event_times_list,
+    *,
+    output_file="video_event.gif",
+    occ_grid=None,
+):
+    """Render a multi-agent animation from event MILP schedules."""
+    paths, times = build_constant_velocity_schedules(analysis, event_times_list)
+    create_video(paths, times, output_file=output_file, occ_grid=occ_grid)
+
+
+def _load_or_plan_path(occ_grid, map_size, map_resolution, pickle_name, x_init, x_goal):
+    """Load a cached A* path or plan and pickle it (grid2 demo helper)."""
+    import pickle
+
+    from social_path_planning.a_star import AStar
+    from social_path_planning.utils import snap_to_grid
+
+    try:
+        with open(pickle_name, "rb") as handle:
+            return pickle.load(handle)
+    except FileNotFoundError:
+        problem = AStar(
+            [0, 0],
+            snap_to_grid(map_size, map_resolution),
+            snap_to_grid(x_init, map_resolution),
+            snap_to_grid(x_goal, map_resolution),
+            occ_grid,
+            resolution=map_resolution,
+        )
+        if not problem.solve():
+            raise RuntimeError(f"A* failed for {pickle_name}")
+        path = problem.path
+        with open(pickle_name, "wb") as handle:
+            pickle.dump(path, handle)
+        return path
+
+
+if __name__ == "__main__":
+    from social_path_planning.grid_loader import load_grid_scenario
+    from social_path_planning.occupancy_grid import StochOccupancyGrid2D
+
+    scenario_name = "sample2_default"  # grid2 / four-quadrant benchmark map
+    output_dir = Path("results/event_planning_viz")
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    occ, map_size, map_resolution = load_grid_scenario(scenario_name, plot=False)
+    occ_grid = StochOccupancyGrid2D(
+        map_resolution,
+        round(map_size[0] / map_resolution),
+        round(map_size[1] / map_resolution),
+        0,
+        0,
+        10,
+        occ.T,
+    )
+
+    path1 = _load_or_plan_path(
+        occ_grid, map_size, map_resolution, "path1.pkl", [2, 25], [97, 50]
+    )
+    path2 = _load_or_plan_path(
+        occ_grid, map_size, map_resolution, "path2.pkl", [2, 40], [97, 50]
+    )
+    path3 = _load_or_plan_path(
+        occ_grid, map_size, map_resolution, "path3.pkl", [75, 48], [65, 45]
+    )
+    path4 = _load_or_plan_path(
+        occ_grid, map_size, map_resolution, "path4.pkl", [50, 20], [97, 75]
+    )
+
+    stride = 1
+    stage_paths = [path1[::stride], path2[::stride], path3[::stride], path4[::stride]]
+
+    planner = EventMultiAgentSimultaneousPlanner(occ_grid, paths=stage_paths, norm=1)
+    planner.assign_velocities(
+        [MAX_VELOCITY, MAX_VELOCITY / 1.2, MAX_VELOCITY / 1.5, MAX_VELOCITY / 1.65]
+    )
+
+    print("Running event MILP on grid2 (sample2_default)...")
+    try:
+        event_times = planner.plan(verbose=True, print_constraints=True)
+        for event_time in event_times:
+            print(event_time)
+    except Exception as exc:
+        print(f"Event MILP failed: {type(exc).__name__}: {exc}")
+        raise
+
+    analysis = planner.analysis
+    anim_paths, anim_times = build_constant_velocity_schedules(analysis, event_times)
+
+    viz_event_waypoints(
+        analysis,
+        occ_grid=occ_grid,
+        output_path=output_dir / "grid2_event_waypoints.png",
+        also_write_pair_panels=True,
+    )
+    create_space_time_plot(
+        anim_paths,
+        anim_times,
+        output_file=str(output_dir / "grid2_space_time_event.png"),
+        title="Event MILP Space-Time Plot (constant velocity segments)",
+    )
+    snapshot_time = 0.35 * max(t_seq[-1] for t_seq in anim_times)
+    create_map_context_plot(
+        anim_paths,
+        occ_grid=occ_grid,
+        times=anim_times,
+        snapshot_time=snapshot_time,
+        output_file=str(output_dir / "grid2_map_context_event.png"),
+        title="Event MILP Paths on Grid2",
+    )
+    create_event_video(
+        analysis,
+        event_times,
+        output_file=str(output_dir / "grid2_video_event.gif"),
+        occ_grid=occ_grid,
+    )
+    print(
+        "Event MILP demo complete: "
+        f"{planner.num_z} binaries, {planner.mutex_constraint_count} mutex constraints, "
+        f"outputs in {output_dir.resolve()}"
+    )
