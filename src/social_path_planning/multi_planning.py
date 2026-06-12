@@ -18,7 +18,7 @@ from social_path_planning.mapf_comparison.motion import DEFAULT_MAX_VELOCITY_MPS
 NOMINAL_VELOCITY = 0.35  # m/s
 TIME_STEP = 5  # seconds
 MAX_VELOCITY = DEFAULT_MAX_VELOCITY_MPS
-ROBOT_DIAMETER = 0.2  # meters
+ROBOT_DIAMETER = 0.5  # meters
 M = 60  # Big-M constant for constraints
 DELTA = 1  # Safety margin in seconds
 # Max factor k between consecutive segment speeds v_i = d_i / (t_{i+1} - t_i):
@@ -1198,7 +1198,7 @@ def create_video(paths, times, output_file="video.gif", occ_grid=None):
 
     # --- 5. Run Animation ---
     total_frames = 200
-    interval_ms = 50
+    interval_ms = 100
     frames = np.linspace(start_time, end_time, total_frames)
 
     ani = animation.FuncAnimation(
