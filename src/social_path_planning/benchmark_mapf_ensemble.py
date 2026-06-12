@@ -136,6 +136,7 @@ def run_mapf_ensemble(
     heatmap_file: str | None = None,
     refresh_social_bank: bool = False,
     pregen_only: bool = False,
+    milp_stride: int = 1,
 ):
     if pool_size < num_agents:
         raise ValueError(f"pool_size ({pool_size}) must be >= num_agents ({num_agents})")
@@ -263,6 +264,7 @@ def run_mapf_ensemble(
             "map_resolution": float(map_resolution),
             "motion": motion.to_manifest_dict(),
             "milp_astar_mode": milp_astar_mode,
+            "milp_stride": int(milp_stride),
             "heatmap_prefix": heatmap_prefix,
             "heatmap_file": heatmap_file,
             "mapf_downsample": mapf_downsample,
@@ -350,11 +352,19 @@ def main(argv=None):
         action="store_true",
         help="Re-run modified A* and overwrite cached paths in the path pool.",
     )
+    milp_group.add_argument(
+        "--milp-stride",
+        type=int,
+        default=1,
+        help="Subsample MILP path waypoints every N vertices (1=full path, default).",
+    )
     cli = parser.parse_args(argv)
     if cli.milp_astar_vanilla:
         cli.milp_astar_mode = "vanilla"
     if cli.heatmap_prefix and cli.heatmap_file:
         parser.error("Use only one of --heatmap-prefix or --heatmap-file.")
+    if cli.milp_stride < 1:
+        parser.error("--milp-stride must be >= 1.")
 
     run_mapf_ensemble(
         scenario_name=cli.scenario,
@@ -379,6 +389,7 @@ def main(argv=None):
         heatmap_file=cli.heatmap_file,
         refresh_social_bank=cli.refresh_social_bank,
         pregen_only=cli.pregen_only,
+        milp_stride=cli.milp_stride,
     )
     return 0
 
