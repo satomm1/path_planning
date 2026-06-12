@@ -431,16 +431,21 @@ def _conflict_exit_is_goal(agent_path, exit_idx):
     return waypoints[exit_idx].kind == "goal"
 
 
-def _opposite_encounter_uses_z(agent_a, agent_b, i_exit, j_exit):
+def _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit):
     """
-    Opposite encounters need a binary only when neither or both agents end at goal.
+    Encounters need a binary only when neither or both agents end at goal.
 
-    If exactly one agent's conflict exit is its goal, that robot must wait for the
-    other to clear; ordering is fixed and no z is required.
+    If exactly one agent's conflict exit is its goal, that robot must trail the
+    other through the encounter; ordering is fixed and no z is required.
     """
     a_goal = _conflict_exit_is_goal(agent_a, i_exit)
     b_goal = _conflict_exit_is_goal(agent_b, j_exit)
     return not (a_goal ^ b_goal)
+
+
+def _opposite_encounter_uses_z(agent_a, agent_b, i_exit, j_exit):
+    """Backward-compatible alias for :func:`_encounter_goal_exit_uses_z`."""
+    return _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit)
 
 
 def _add_opposite_encounter_mutex_constraints(
@@ -482,6 +487,37 @@ def _add_opposite_encounter_mutex_constraints(
     return 2
 
 
+def _filter_fixed_same_direction_pairs(paired_indices, agent_a, agent_b, *, a_goal):
+    """
+    Drop paired checkpoints that contradict fixed trailing-goal ordering with t[0]=0.
+
+    Requiring the leader to be ahead of the other agent's path start is impossible
+    when both schedules begin at zero.
+    """
+    filtered = []
+    for ia, ib in paired_indices:
+        if a_goal:
+            waypoint = agent_b.interest_waypoints[ib]
+            if waypoint.kind == "start" and ib == 0:
+                continue
+        else:
+            waypoint = agent_a.interest_waypoints[ia]
+            if waypoint.kind == "start" and ia == 0:
+                continue
+        filtered.append((int(ia), int(ib)))
+    return filtered
+
+
+def _same_direction_pairs_for_mutex(agent_a, agent_b, interval_a, interval_b, *, uses_z):
+    """Return paired checkpoints used for same-direction mutex constraints."""
+    pairs = _pair_same_direction_checkpoints(agent_a, agent_b, interval_a, interval_b)
+    if uses_z:
+        return pairs
+    i_enter, i_exit = _refined_indices_for_interval(agent_a, interval_a)
+    a_goal = _conflict_exit_is_goal(agent_a, i_exit)
+    return _filter_fixed_same_direction_pairs(pairs, agent_a, agent_b, a_goal=a_goal)
+
+
 def _add_same_encounter_mutex_constraints(
     constraints,
     times_a,
@@ -490,12 +526,28 @@ def _add_same_encounter_mutex_constraints(
     z_var,
     z_index,
     big_m,
+    *,
+    agent_a,
+    agent_b,
+    i_exit,
+    j_exit,
+    uses_z,
 ):
     """
-    Two Big-M constraints per paired checkpoint, one z for the whole encounter.
+    Mutex for same-direction co-marching.
 
-    z=0 -> agent A is ahead at every paired waypoint; z=1 -> agent B is ahead.
+    With z: two Big-M rows per paired checkpoint (leader chosen by z).
+    Without z: exactly one agent ends at goal; it trails at every paired checkpoint.
     """
+    if not uses_z:
+        a_goal = _conflict_exit_is_goal(agent_a, i_exit)
+        for ia, ib in paired_indices:
+            if a_goal:
+                constraints.append(times_b[ib] <= times_a[ia] - DELTA)
+            else:
+                constraints.append(times_a[ia] <= times_b[ib] - DELTA)
+        return len(paired_indices)
+
     z = z_var[z_index]
     for ia, ib in paired_indices:
         constraints.append(times_a[ia] <= times_b[ib] - DELTA + big_m * z)
@@ -518,7 +570,7 @@ def _add_encounter_mutex_constraints(
     i_enter, i_exit = _refined_indices_for_interval(agent_a, encounter.interval_a)
     j_enter, j_exit = _refined_indices_for_interval(agent_b, encounter.interval_b)
     if encounter.kind == "opposite":
-        uses_z = _opposite_encounter_uses_z(agent_a, agent_b, i_exit, j_exit)
+        uses_z = _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit)
         added = _add_opposite_encounter_mutex_constraints(
             constraints,
             times_a,
@@ -535,11 +587,13 @@ def _add_encounter_mutex_constraints(
             uses_z=uses_z,
         )
         return added, [], uses_z
-    paired_indices = _pair_same_direction_checkpoints(
+    uses_z = _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit)
+    paired_indices = _same_direction_pairs_for_mutex(
         agent_a,
         agent_b,
         encounter.interval_a,
         encounter.interval_b,
+        uses_z=uses_z,
     )
     added = _add_same_encounter_mutex_constraints(
         constraints,
@@ -549,38 +603,45 @@ def _add_encounter_mutex_constraints(
         z_var,
         z_index,
         big_m,
+        agent_a=agent_a,
+        agent_b=agent_b,
+        i_exit=i_exit,
+        j_exit=j_exit,
+        uses_z=uses_z,
     )
-    return added, paired_indices, True
+    return added, paired_indices, uses_z
 
 
 def _mutex_constraint_count_for_encounters(analysis):
-    """Return total mutex rows: 2 per opposite encounter, 2 per same-direction pair."""
+    """Return total mutex rows for all encounter windows."""
     total = 0
     for encounter in analysis.encounters:
+        agent_a = analysis.agents[encounter.agent_a]
+        agent_b = analysis.agents[encounter.agent_b]
+        i_enter, i_exit = _refined_indices_for_interval(agent_a, encounter.interval_a)
+        j_enter, j_exit = _refined_indices_for_interval(agent_b, encounter.interval_b)
+        uses_z = _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit)
         if encounter.kind == "opposite":
             total += 2
             continue
-        agent_a = analysis.agents[encounter.agent_a]
-        agent_b = analysis.agents[encounter.agent_b]
-        pairs = _pair_same_direction_checkpoints(
+        pairs = _same_direction_pairs_for_mutex(
             agent_a,
             agent_b,
             encounter.interval_a,
             encounter.interval_b,
+            uses_z=uses_z,
         )
-        total += 2 * len(pairs)
+        total += (2 if uses_z else 1) * len(pairs)
     return total
 
 
 def _encounter_uses_z(analysis, encounter):
     """Return whether an encounter allocates a binary decision variable."""
-    if encounter.kind != "opposite":
-        return True
     agent_a = analysis.agents[encounter.agent_a]
     agent_b = analysis.agents[encounter.agent_b]
     i_enter, i_exit = _refined_indices_for_interval(agent_a, encounter.interval_a)
     j_enter, j_exit = _refined_indices_for_interval(agent_b, encounter.interval_b)
-    return _opposite_encounter_uses_z(agent_a, agent_b, i_exit, j_exit)
+    return _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit)
 
 
 def _print_event_milp_summary(analysis, num_z, mutex_constraint_count):
@@ -696,19 +757,35 @@ def _print_event_milp_constraints(
                     )
             else:
                 paired_indices = row.get("paired_indices", [])
+                uses_z = row.get("uses_z", True)
                 for pair_no, (ia, ib) in enumerate(paired_indices, start=1):
-                    print(
-                        f"    ({pair_no}a) t_{a}[{ia}] ({_waypoint_label(agent_a, ia)})"
-                        f" <= t_{b}[{ib}] ({_waypoint_label(agent_b, ib)})"
-                        f" - {float(DELTA):.4f} + {float(big_m):.4f} * z_{z_index}"
-                        f"   # z=0: agent {a} ahead"
-                    )
-                    print(
-                        f"    ({pair_no}b) t_{b}[{ib}] ({_waypoint_label(agent_b, ib)})"
-                        f" <= t_{a}[{ia}] ({_waypoint_label(agent_a, ia)})"
-                        f" - {float(DELTA):.4f} + {float(big_m):.4f} * (1 - z_{z_index})"
-                        f"   # z=1: agent {b} ahead"
-                    )
+                    if uses_z:
+                        print(
+                            f"    ({pair_no}a) t_{a}[{ia}] ({_waypoint_label(agent_a, ia)})"
+                            f" <= t_{b}[{ib}] ({_waypoint_label(agent_b, ib)})"
+                            f" - {float(DELTA):.4f} + {float(big_m):.4f} * z_{z_index}"
+                            f"   # z=0: agent {a} ahead"
+                        )
+                        print(
+                            f"    ({pair_no}b) t_{b}[{ib}] ({_waypoint_label(agent_b, ib)})"
+                            f" <= t_{a}[{ia}] ({_waypoint_label(agent_a, ia)})"
+                            f" - {float(DELTA):.4f} + {float(big_m):.4f} * (1 - z_{z_index})"
+                            f"   # z=1: agent {b} ahead"
+                        )
+                    elif _conflict_exit_is_goal(agent_a, i_exit):
+                        print(
+                            f"    ({pair_no}) t_{b}[{ib}] ({_waypoint_label(agent_b, ib)})"
+                            f" <= t_{a}[{ia}] ({_waypoint_label(agent_a, ia)})"
+                            f" - {float(DELTA):.4f}"
+                            f"   # agent {b} leads, agent {a} reaches goal last"
+                        )
+                    else:
+                        print(
+                            f"    ({pair_no}) t_{a}[{ia}] ({_waypoint_label(agent_a, ia)})"
+                            f" <= t_{b}[{ib}] ({_waypoint_label(agent_b, ib)})"
+                            f" - {float(DELTA):.4f}"
+                            f"   # agent {a} leads, agent {b} reaches goal last"
+                        )
     print("=== End formulation ===\n")
 
 
@@ -1128,16 +1205,16 @@ if __name__ == "__main__":
     )
 
     path1 = _load_or_plan_path(
-        occ_grid, map_size, map_resolution, "path1.pkl", [2, 25], [97, 50]
+        occ_grid, map_size, map_resolution, "path1.pkl", [2, 25], [97, 65]
     )
     path2 = _load_or_plan_path(
-        occ_grid, map_size, map_resolution, "path2.pkl", [2, 40], [97, 50]
+        occ_grid, map_size, map_resolution, "path2.pkl", [46, 80], [46, 20]
     )
     path3 = _load_or_plan_path(
         occ_grid, map_size, map_resolution, "path3.pkl", [75, 48], [65, 45.5]
     )
     path4 = _load_or_plan_path(
-        occ_grid, map_size, map_resolution, "path4.pkl", [50, 20], [97, 75]
+        occ_grid, map_size, map_resolution, "path4.pkl", [50, 20], [99, 60]
     )
 
     stride = 1
