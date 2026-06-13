@@ -782,7 +782,7 @@ def _solve_event_problem(prob, agent_times, *, context, verbose=False):
     print("Starting to solve event multi-agent planning problem...")
     solver_chain = [
         name
-        for name in (cp.MOSEK, cp.GLPK_MI, cp.HIGHS, cp.SCIPY)
+        for name in (cp.MOSEK, cp.GLPK_MI, cp.ECOS_BB, cp.SCIPY)
         if name in cp.installed_solvers()
     ]
     if not solver_chain:
