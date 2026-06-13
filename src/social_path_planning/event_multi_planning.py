@@ -505,20 +505,57 @@ def _conflict_exit_is_goal(agent_path, exit_idx):
     return waypoints[exit_idx].kind == "goal"
 
 
-def _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit):
-    """
-    Encounters need a binary only when neither or both agents end at goal.
+def _conflict_enter_is_start(agent_path, enter_idx):
+    """True when the encounter enter waypoint is the robot's start."""
+    waypoints = agent_path.interest_waypoints
+    if enter_idx < 0 or enter_idx >= len(waypoints):
+        return False
+    return int(enter_idx) == 0 and waypoints[enter_idx].kind == "start"
 
-    If exactly one agent's conflict exit is its goal, that robot must trail the
-    other through the encounter; ordering is fixed and no z is required.
+
+def _encounter_mutex_uses_z(agent_a, agent_b, i_enter, i_exit, j_enter, j_exit):
     """
+    Encounters need a binary only when neither fixed trailing-goal nor fixed
+    leading-start ordering applies alone.
+
+    Exactly one goal-at-exit robot must trail; exactly one start-at-enter robot
+    must lead. Otherwise a binary chooses the encounter ordering.
+    """
+    a_goal = _conflict_exit_is_goal(agent_a, i_exit)
+    b_goal = _conflict_exit_is_goal(agent_b, j_exit)
+    a_start = _conflict_enter_is_start(agent_a, i_enter)
+    b_start = _conflict_enter_is_start(agent_b, j_enter)
+    goal_fixed = bool(a_goal ^ b_goal)
+    start_fixed = bool(a_start ^ b_start)
+    return not (goal_fixed or start_fixed)
+
+
+def _encounter_fixed_leader_is_a(agent_a, agent_b, i_enter, i_exit, j_enter, j_exit):
+    """
+    Return True when agent A must lead through a fixed-order encounter.
+
+    Start-at-enter takes precedence over goal-at-exit when both prescribe order.
+    """
+    a_start = _conflict_enter_is_start(agent_a, i_enter)
+    b_start = _conflict_enter_is_start(agent_b, j_enter)
+    if a_start ^ b_start:
+        return bool(a_start)
+    a_goal = _conflict_exit_is_goal(agent_a, i_exit)
+    b_goal = _conflict_exit_is_goal(agent_b, j_exit)
+    if a_goal ^ b_goal:
+        return bool(b_goal)
+    raise ValueError("fixed encounter ordering requires goal-exit or start-enter XOR")
+
+
+def _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit):
+    """Backward-compatible goal-only check; prefer :func:`_encounter_mutex_uses_z`."""
     a_goal = _conflict_exit_is_goal(agent_a, i_exit)
     b_goal = _conflict_exit_is_goal(agent_b, j_exit)
     return not (a_goal ^ b_goal)
 
 
 def _opposite_encounter_uses_z(agent_a, agent_b, i_exit, j_exit):
-    """Backward-compatible alias for :func:`_encounter_goal_exit_uses_z`."""
+    """Backward-compatible alias for goal-only checks without enter indices."""
     return _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit)
 
 
@@ -705,19 +742,20 @@ def _add_opposite_encounter_mutex_constraints(
     uses_z,
 ):
     """
-    Opposite mutex: Big-M with z, or fixed ordering when one robot ends at goal.
+    Opposite mutex: Big-M with z, or fixed ordering when one robot leads.
 
-    When agent A's conflict exit is its goal, B must clear before A enters and
-    A must reach goal only after B has cleared. Symmetric when B ends at goal.
+    Fixed order applies when exactly one robot starts at conflict enter (it leads)
+    or exactly one robot ends at conflict exit at goal (it trails).
     """
     if not uses_z:
-        a_goal = _conflict_exit_is_goal(agent_a, i_exit)
-        if a_goal:
-            constraints.append(_time_at_index(times_b, j_exit) <= times_a[i_enter] - DELTA)
-            constraints.append(times_a[i_exit] >= _time_at_index(times_b, j_exit) + DELTA)
-        else:
+        if _encounter_fixed_leader_is_a(
+            agent_a, agent_b, i_enter, i_exit, j_enter, j_exit
+        ):
             constraints.append(times_a[i_exit] <= _time_at_index(times_b, j_enter) - DELTA)
             constraints.append(_time_at_index(times_b, j_exit) >= times_a[i_exit] + DELTA)
+        else:
+            constraints.append(_time_at_index(times_b, j_exit) <= times_a[i_enter] - DELTA)
+            constraints.append(times_a[i_exit] >= _time_at_index(times_b, j_exit) + DELTA)
         return 2
 
     constraints.append(
@@ -729,20 +767,24 @@ def _add_opposite_encounter_mutex_constraints(
     return 2
 
 
-def _filter_fixed_same_direction_pairs(paired_indices, agent_a, agent_b, *, a_goal):
+def _filter_fixed_same_direction_pairs(paired_indices, agent_a, agent_b, *, leader_is_a):
     """
-    Drop paired checkpoints that contradict fixed trailing-goal ordering with t[0]=0.
+    Drop paired checkpoints that contradict fixed leader ordering with t[0]=0.
 
-    Requiring the leader to be ahead of the other agent's path start is impossible
-    when both schedules begin at zero.
+    Requiring the leader to be ahead at its own start, or the trailer to lead at
+    the other's start, is impossible when both schedules begin at zero.
     """
     filtered = []
     for ia, ib in paired_indices:
-        if a_goal:
+        if leader_is_a:
+            if ia == 0 and agent_a.interest_waypoints[ia].kind == "start":
+                continue
             waypoint = agent_b.interest_waypoints[ib]
             if waypoint.kind == "start" and ib == 0:
                 continue
         else:
+            if ib == 0 and agent_b.interest_waypoints[ib].kind == "start":
+                continue
             waypoint = agent_a.interest_waypoints[ia]
             if waypoint.kind == "start" and ia == 0:
                 continue
@@ -750,14 +792,28 @@ def _filter_fixed_same_direction_pairs(paired_indices, agent_a, agent_b, *, a_go
     return filtered
 
 
-def _same_direction_pairs_for_mutex(agent_a, agent_b, interval_a, interval_b, *, uses_z):
+def _same_direction_pairs_for_mutex(
+    agent_a,
+    agent_b,
+    interval_a,
+    interval_b,
+    *,
+    i_enter,
+    j_enter,
+    i_exit,
+    j_exit,
+    uses_z,
+):
     """Return paired checkpoints used for same-direction mutex constraints."""
     pairs = _pair_same_direction_checkpoints(agent_a, agent_b, interval_a, interval_b)
     if uses_z:
         return pairs
-    i_enter, i_exit = _refined_indices_for_interval(agent_a, interval_a)
-    a_goal = _conflict_exit_is_goal(agent_a, i_exit)
-    return _filter_fixed_same_direction_pairs(pairs, agent_a, agent_b, a_goal=a_goal)
+    leader_is_a = _encounter_fixed_leader_is_a(
+        agent_a, agent_b, i_enter, i_exit, j_enter, j_exit
+    )
+    return _filter_fixed_same_direction_pairs(
+        pairs, agent_a, agent_b, leader_is_a=leader_is_a
+    )
 
 
 def _add_same_encounter_mutex_constraints(
@@ -771,6 +827,8 @@ def _add_same_encounter_mutex_constraints(
     *,
     agent_a,
     agent_b,
+    i_enter,
+    j_enter,
     i_exit,
     j_exit,
     uses_z,
@@ -779,15 +837,17 @@ def _add_same_encounter_mutex_constraints(
     Mutex for same-direction co-marching.
 
     With z: two Big-M rows per paired checkpoint (leader chosen by z).
-    Without z: exactly one agent ends at goal; it trails at every paired checkpoint.
+    Without z: fixed leader from start-at-enter or trailing goal-at-exit.
     """
     if not uses_z:
-        a_goal = _conflict_exit_is_goal(agent_a, i_exit)
+        leader_is_a = _encounter_fixed_leader_is_a(
+            agent_a, agent_b, i_enter, i_exit, j_enter, j_exit
+        )
         for ia, ib in paired_indices:
-            if a_goal:
-                constraints.append(_time_at_index(times_b, ib) <= times_a[ia] - DELTA)
-            else:
+            if leader_is_a:
                 constraints.append(times_a[ia] <= _time_at_index(times_b, ib) - DELTA)
+            else:
+                constraints.append(_time_at_index(times_b, ib) <= times_a[ia] - DELTA)
         return len(paired_indices)
 
     z = z_var[z_index]
@@ -811,8 +871,8 @@ def _add_encounter_mutex_constraints(
     """Append mutex constraints for one encounter window."""
     i_enter, i_exit = _refined_indices_for_interval(agent_a, encounter.interval_a)
     j_enter, j_exit = _refined_indices_for_interval(agent_b, encounter.interval_b)
+    uses_z = _encounter_mutex_uses_z(agent_a, agent_b, i_enter, i_exit, j_enter, j_exit)
     if _encounter_uses_opposite_mutex(encounter.kind):
-        uses_z = _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit)
         added = _add_opposite_encounter_mutex_constraints(
             constraints,
             times_a,
@@ -829,12 +889,15 @@ def _add_encounter_mutex_constraints(
             uses_z=uses_z,
         )
         return added, [], uses_z
-    uses_z = _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit)
     paired_indices = _same_direction_pairs_for_mutex(
         agent_a,
         agent_b,
         encounter.interval_a,
         encounter.interval_b,
+        i_enter=i_enter,
+        j_enter=j_enter,
+        i_exit=i_exit,
+        j_exit=j_exit,
         uses_z=uses_z,
     )
     added = _add_same_encounter_mutex_constraints(
@@ -847,6 +910,8 @@ def _add_encounter_mutex_constraints(
         big_m,
         agent_a=agent_a,
         agent_b=agent_b,
+        i_enter=i_enter,
+        j_enter=j_enter,
         i_exit=i_exit,
         j_exit=j_exit,
         uses_z=uses_z,
@@ -862,7 +927,7 @@ def _mutex_constraint_count_for_encounters(analysis):
         agent_b = analysis.agents[encounter.agent_b]
         i_enter, i_exit = _refined_indices_for_interval(agent_a, encounter.interval_a)
         j_enter, j_exit = _refined_indices_for_interval(agent_b, encounter.interval_b)
-        uses_z = _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit)
+        uses_z = _encounter_mutex_uses_z(agent_a, agent_b, i_enter, i_exit, j_enter, j_exit)
         if _encounter_uses_opposite_mutex(encounter.kind):
             total += 2
             continue
@@ -871,6 +936,10 @@ def _mutex_constraint_count_for_encounters(analysis):
             agent_b,
             encounter.interval_a,
             encounter.interval_b,
+            i_enter=i_enter,
+            j_enter=j_enter,
+            i_exit=i_exit,
+            j_exit=j_exit,
             uses_z=uses_z,
         )
         total += (2 if uses_z else 1) * len(pairs)
@@ -883,7 +952,7 @@ def _encounter_uses_z(analysis, encounter):
     agent_b = analysis.agents[encounter.agent_b]
     i_enter, i_exit = _refined_indices_for_interval(agent_a, encounter.interval_a)
     j_enter, j_exit = _refined_indices_for_interval(agent_b, encounter.interval_b)
-    return _encounter_goal_exit_uses_z(agent_a, agent_b, i_exit, j_exit)
+    return _encounter_mutex_uses_z(agent_a, agent_b, i_enter, i_exit, j_enter, j_exit)
 
 
 def _encounter_kind_counts(encounters):
@@ -987,24 +1056,28 @@ def _print_event_milp_constraints(
                         f" - {float(big_m):.4f} * (1 - z_{z_index})"
                         f"   # agent {b} clears before agent {a} enters"
                     )
-                elif _conflict_exit_is_goal(agent_a, i_exit):
-                    print(
-                        f"    (1) t_{b}[{j_exit}] <= t_{a}[{i_enter}] - {float(DELTA):.4f}"
-                        f"   # agent {b} clears before agent {a} enters"
+                elif not uses_z:
+                    leader_is_a = _encounter_fixed_leader_is_a(
+                        agent_a, agent_b, i_enter, i_exit, j_enter, j_exit
                     )
-                    print(
-                        f"    (2) t_{a}[{i_exit}] >= t_{b}[{j_exit}] + {float(DELTA):.4f}"
-                        f"   # agent {a} reaches goal after agent {b} cleared"
-                    )
-                else:
-                    print(
-                        f"    (1) t_{a}[{i_exit}] <= t_{b}[{j_enter}] - {float(DELTA):.4f}"
-                        f"   # agent {a} clears before agent {b} enters"
-                    )
-                    print(
-                        f"    (2) t_{b}[{j_exit}] >= t_{a}[{i_exit}] + {float(DELTA):.4f}"
-                        f"   # agent {b} reaches goal after agent {a} cleared"
-                    )
+                    if leader_is_a:
+                        print(
+                            f"    (1) t_{a}[{i_exit}] <= t_{b}[{j_enter}] - {float(DELTA):.4f}"
+                            f"   # agent {a} leads (start-at-enter or other trails)"
+                        )
+                        print(
+                            f"    (2) t_{b}[{j_exit}] >= t_{a}[{i_exit}] + {float(DELTA):.4f}"
+                            f"   # agent {b} follows agent {a}"
+                        )
+                    else:
+                        print(
+                            f"    (1) t_{b}[{j_exit}] <= t_{a}[{i_enter}] - {float(DELTA):.4f}"
+                            f"   # agent {b} leads (start-at-enter or other trails)"
+                        )
+                        print(
+                            f"    (2) t_{a}[{i_exit}] >= t_{b}[{j_exit}] + {float(DELTA):.4f}"
+                            f"   # agent {a} follows agent {b}"
+                        )
             else:
                 paired_indices = row.get("paired_indices", [])
                 uses_z = row.get("uses_z", True)
@@ -1022,20 +1095,24 @@ def _print_event_milp_constraints(
                             f" - {float(DELTA):.4f} + {float(big_m):.4f} * (1 - z_{z_index})"
                             f"   # z=1: agent {b} ahead"
                         )
-                    elif _conflict_exit_is_goal(agent_a, i_exit):
-                        print(
-                            f"    ({pair_no}) t_{b}[{ib}] ({_waypoint_label(agent_b, ib)})"
-                            f" <= t_{a}[{ia}] ({_waypoint_label(agent_a, ia)})"
-                            f" - {float(DELTA):.4f}"
-                            f"   # agent {b} leads, agent {a} reaches goal last"
+                    elif not uses_z:
+                        leader_is_a = _encounter_fixed_leader_is_a(
+                            agent_a, agent_b, i_enter, i_exit, j_enter, j_exit
                         )
-                    else:
-                        print(
-                            f"    ({pair_no}) t_{a}[{ia}] ({_waypoint_label(agent_a, ia)})"
-                            f" <= t_{b}[{ib}] ({_waypoint_label(agent_b, ib)})"
-                            f" - {float(DELTA):.4f}"
-                            f"   # agent {a} leads, agent {b} reaches goal last"
-                        )
+                        if leader_is_a:
+                            print(
+                                f"    ({pair_no}) t_{a}[{ia}] ({_waypoint_label(agent_a, ia)})"
+                                f" <= t_{b}[{ib}] ({_waypoint_label(agent_b, ib)})"
+                                f" - {float(DELTA):.4f}"
+                                f"   # agent {a} leads"
+                            )
+                        else:
+                            print(
+                                f"    ({pair_no}) t_{b}[{ib}] ({_waypoint_label(agent_b, ib)})"
+                                f" <= t_{a}[{ia}] ({_waypoint_label(agent_a, ia)})"
+                                f" - {float(DELTA):.4f}"
+                                f"   # agent {b} leads"
+                            )
     print("=== End formulation ===\n")
 
 
