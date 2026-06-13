@@ -315,33 +315,26 @@ def _cluster_segment_pairs_into_encounters(segment_pairs):
     return list(grouped.values())
 
 
-def analyze_event_paths(paths, threshold=ROBOT_DIAMETER):
-    """
-    Analyze multi-agent paths and build interest waypoints at conflict boundaries.
+def _segment_indices_from_pair_conflicts(pair_conflicts, num_agents):
+    """Collect per-agent conflicting segment indices from a pair_conflicts map."""
+    segment_indices_by_agent = [set() for _ in range(num_agents)]
+    for (a1, a2), row in pair_conflicts.items():
+        for i, _j in row["pairs"]:
+            segment_indices_by_agent[int(a1)].add(int(i))
+        for _i, j in row["pairs"]:
+            segment_indices_by_agent[int(a2)].add(int(j))
+    return segment_indices_by_agent
 
-    Returns:
-        EventPathAnalysis with per-agent refined paths and pairwise encounter windows.
+
+def _build_event_analysis(paths, pair_conflicts):
+    """
+    Build EventPathAnalysis from paths and precomputed conflicting segment pairs.
+
+    ``pair_conflicts`` maps ``(a1, a2)`` to ``{"pairs": [(i, j), ...]}``.
     """
     paths = [list(path) for path in paths]
     num_agents = len(paths)
-    segment_indices_by_agent = [set() for _ in range(num_agents)]
-    pair_conflicts = {}
-
-    for a1 in range(num_agents):
-        for a2 in range(a1 + 1, num_agents):
-            path_a, path_b = paths[a1], paths[a2]
-            if len(path_a) < 2 or len(path_b) < 2:
-                continue
-            segment_pairs = list(_iter_conflicting_segment_pairs(path_a, path_b, threshold))
-            if not segment_pairs:
-                continue
-            pair_conflicts[(a1, a2)] = {
-                "pairs": segment_pairs,
-            }
-            for i, _j in segment_pairs:
-                segment_indices_by_agent[a1].add(int(i))
-            for _i, j in segment_pairs:
-                segment_indices_by_agent[a2].add(int(j))
+    segment_indices_by_agent = _segment_indices_from_pair_conflicts(pair_conflicts, num_agents)
 
     agents = []
     encounter_intervals_by_agent = [[] for _ in range(num_agents)]
@@ -386,6 +379,89 @@ def analyze_event_paths(paths, threshold=ROBOT_DIAMETER):
         )
 
     return EventPathAnalysis(agents=agents, encounters=encounters)
+
+
+def analyze_event_paths(paths, threshold=ROBOT_DIAMETER):
+    """
+    Analyze multi-agent paths and build interest waypoints at conflict boundaries.
+
+    Returns:
+        EventPathAnalysis with per-agent refined paths and pairwise encounter windows.
+    """
+    paths = [list(path) for path in paths]
+    num_agents = len(paths)
+    pair_conflicts = {}
+
+    for a1 in range(num_agents):
+        for a2 in range(a1 + 1, num_agents):
+            path_a, path_b = paths[a1], paths[a2]
+            if len(path_a) < 2 or len(path_b) < 2:
+                continue
+            segment_pairs = list(_iter_conflicting_segment_pairs(path_a, path_b, threshold))
+            if not segment_pairs:
+                continue
+            pair_conflicts[(a1, a2)] = {
+                "pairs": segment_pairs,
+            }
+
+    return _build_event_analysis(paths, pair_conflicts)
+
+
+def analyze_event_paths_from_segment_reports(paths, reports, threshold=ROBOT_DIAMETER):
+    """
+    Build EventPathAnalysis from distributed segment-collision reports.
+
+    ``reports`` is a list of dicts with keys ``a1``, ``a2``, ``segment_i``,
+    ``segment_j`` (0-based agent indices into ``paths``, parallel segment lists).
+    """
+    del threshold  # reserved for API compatibility; pairs are pre-detected
+    paths = [list(path) for path in paths]
+    num_agents = len(paths)
+    pair_conflicts = {}
+
+    for row in sorted(reports, key=lambda item: (int(item["a1"]), int(item["a2"]))):
+        a1 = int(row["a1"])
+        a2 = int(row["a2"])
+        if a1 < 0 or a2 < 0 or a1 >= num_agents or a2 >= num_agents:
+            raise ValueError(f"report agent indices ({a1}, {a2}) out of range for {num_agents} paths")
+        if a1 == a2:
+            raise ValueError(f"report agent indices must differ, got ({a1}, {a2})")
+
+        seg_i = [int(x) for x in (row.get("segment_i") or [])]
+        seg_j = [int(x) for x in (row.get("segment_j") or [])]
+        if len(seg_i) != len(seg_j):
+            raise ValueError(f"segment_i/segment_j length mismatch for pair ({a1}, {a2})")
+
+        path_a = paths[a1]
+        path_b = paths[a2]
+        segment_pairs = []
+        for i, j in zip(seg_i, seg_j):
+            if i < 0 or j < 0:
+                raise ValueError(f"negative segment index in report for pair ({a1}, {a2})")
+            if i >= len(path_a) - 1:
+                raise ValueError(
+                    f"segment_i index {i} out of range for agent {a1} path len {len(path_a)}"
+                )
+            if j >= len(path_b) - 1:
+                raise ValueError(
+                    f"segment_j index {j} out of range for agent {a2} path len {len(path_b)}"
+                )
+            segment_pairs.append((int(i), int(j)))
+
+        if not segment_pairs:
+            continue
+
+        key = (min(a1, a2), max(a1, a2))
+        existing = pair_conflicts.setdefault(key, {"pairs": []})
+        pair_set = {(int(i), int(j)) for i, j in existing["pairs"]}
+        for i, j in segment_pairs:
+            if key[0] == a1:
+                pair_set.add((int(i), int(j)))
+            else:
+                pair_set.add((int(j), int(i)))
+        existing["pairs"] = sorted(pair_set)
+
+    return _build_event_analysis(paths, pair_conflicts)
 
 
 def _interest_segment_lengths(agent_path):
@@ -1237,6 +1313,22 @@ class EventMultiAgentSimultaneousPlanner(EventMultiAgentPlanner):
             raise ValueError("Paths not assigned.")
         prob, agent_times, _num_z = self.build_problem(
             threshold=threshold,
+            print_constraints=print_constraints,
+        )
+        self.event_times, self.solver_runtime_s = _solve_event_problem(
+            prob,
+            agent_times,
+            context="EventMultiAgentSimultaneousPlanner",
+            verbose=verbose,
+        )
+        return self.event_times
+
+    def plan_from_analysis(self, analysis, verbose=False, print_constraints=False):
+        """Solve event MILP from a precomputed :class:`EventPathAnalysis`."""
+        if self.paths is None:
+            raise ValueError("Paths not assigned.")
+        prob, agent_times, _num_z = self.build_problem(
+            analysis=analysis,
             print_constraints=print_constraints,
         )
         self.event_times, self.solver_runtime_s = _solve_event_problem(
