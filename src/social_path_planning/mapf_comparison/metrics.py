@@ -135,6 +135,8 @@ def aggregate_milp_metrics(
     norm: int = 1,
     world_paths: Sequence[Sequence] | None = None,
     motion: MotionConfig | None = None,
+    *,
+    solver_runtime_s: float | None = None,
 ) -> Dict[str, Any]:
     success = status == "ok" and agent_times is not None and len(agent_times) > 0
     finals = []
@@ -175,7 +177,9 @@ def aggregate_milp_metrics(
         "per_agent_completion_s": finals if success else [],
         "total_path_length_m": total_path_length_m,
         "per_agent_path_length_m": per_agent_path_length_m,
-        "solver_runtime_s": float(runtime_s),
+        "solver_runtime_s": float(
+            runtime_s if solver_runtime_s is None else solver_runtime_s
+        ),
         "runtime_s": float(runtime_s),
         "max_velocity_mps": float(motion_cfg.max_velocity_mps),
     }

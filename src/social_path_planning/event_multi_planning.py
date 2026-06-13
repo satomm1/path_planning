@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import time
 
 import cvxpy as cp
 import matplotlib.pyplot as plt
@@ -697,7 +698,11 @@ def _within_event_encounters(analysis, agent_indices):
 
 
 def _solve_event_problem(prob, agent_times, *, context, verbose=False):
-    """Solve an event MILP and read per-agent optimized schedules."""
+    """Solve an event MILP and read per-agent optimized schedules.
+
+    Returns ``(event_times, solver_runtime_s)`` where ``solver_runtime_s`` covers
+    only cvxpy solve attempts and reading optimized schedules (not model build).
+    """
     print("Starting to solve event multi-agent planning problem...")
     solver_chain = [
         name
@@ -707,6 +712,7 @@ def _solve_event_problem(prob, agent_times, *, context, verbose=False):
     if not solver_chain:
         raise RuntimeError("No cvxpy solver available for event MILP")
 
+    t0 = time.perf_counter()
     last_error = None
     for solver in solver_chain:
         try:
@@ -721,8 +727,10 @@ def _solve_event_problem(prob, agent_times, *, context, verbose=False):
         raise RuntimeError("Event MILP solve failed without a solver status")
 
     if len(agent_times) == 1 and isinstance(agent_times[0], cp.Variable):
-        return _scalar_times_from_solver(prob, agent_times[0], context)
-    return _multi_agent_times_from_solver(prob, agent_times, context)
+        event_times = _scalar_times_from_solver(prob, agent_times[0], context)
+    else:
+        event_times = _multi_agent_times_from_solver(prob, agent_times, context)
+    return event_times, float(time.perf_counter() - t0)
 
 
 def _add_opposite_encounter_mutex_constraints(
@@ -1231,7 +1239,7 @@ class EventMultiAgentSimultaneousPlanner(EventMultiAgentPlanner):
             threshold=threshold,
             print_constraints=print_constraints,
         )
-        self.event_times = _solve_event_problem(
+        self.event_times, self.solver_runtime_s = _solve_event_problem(
             prob,
             agent_times,
             context="EventMultiAgentSimultaneousPlanner",
@@ -1312,7 +1320,7 @@ class EventMultiAgentSequentialPlanner(EventMultiAgentPlanner):
             threshold=threshold,
             print_constraints=print_constraints,
         )
-        self.event_times = _solve_event_problem(
+        self.event_times, self.solver_runtime_s = _solve_event_problem(
             prob,
             agent_times,
             context="EventMultiAgentSequentialPlanner",
@@ -1425,7 +1433,7 @@ class EventMultiAgentCombinedPlanner(EventMultiAgentPlanner):
             threshold=threshold,
             print_constraints=print_constraints,
         )
-        self.event_times = _solve_event_problem(
+        self.event_times, self.solver_runtime_s = _solve_event_problem(
             prob,
             agent_times,
             context="EventMultiAgentCombinedPlanner",

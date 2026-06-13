@@ -19,11 +19,15 @@ from social_path_planning.mapf_comparison.motion import MotionConfig
 from social_path_planning.mapf_comparison.pipeline import (
     MapfRunConfig,
     prepare_mapf_problem,
+    run_event_milp_solver,
     run_mapf_solvers,
-    run_milp_solver,
 )
 
-METHODS = ("cbs", "pp_path_length", "milp_soc", "milp_makespan")
+METHODS = (
+    "cbs",
+    "pp_path_length",
+    "event_milp_soc",
+)
 
 
 def sample_route_subset(
@@ -170,6 +174,8 @@ def _trial_row(
         "makespan_seconds": metrics.get("makespan_seconds"),
         "total_path_length_m": metrics.get("total_path_length_m"),
         "conflict_count": metrics.get("conflict_count"),
+        "error_type": metrics.get("error_type"),
+        "error_message": metrics.get("error_message"),
     }
     if extra:
         row.update(extra)
@@ -187,6 +193,9 @@ def run_ensemble_trial(
     path_bank_path,
     milp_astar_mode: str = "modified",
     milp_stride: int = 1,
+    run_event_milp: bool = True,
+    print_event_milp_constraints: bool = False,
+    print_event_milp_constraints_on_error: bool = True,
     *,
     social_graph=None,
     heatmap_prefix=None,
@@ -235,45 +244,53 @@ def run_ensemble_trial(
             )
         )
 
-    milp_routes = load_cached_milp_routes(
-        stage_records,
-        milp_astar_mode,
-        path_bank_path,
-        social_graph=social_graph,
-        heatmap_prefix=heatmap_prefix,
-        heatmap_file=heatmap_file,
-    )
-
-    milp_soc = run_milp_solver(
-        occ_grid, milp_routes, norm=1, motion=motion, verbose=False
-    )
-    rows.append(
-        _trial_row(
-            trial_id,
-            trial_seed,
-            route_ids,
-            "milp_soc",
-            milp_soc["metrics"],
+    if run_event_milp:
+        milp_routes = load_cached_milp_routes(
+            stage_records,
+            milp_astar_mode,
+            path_bank_path,
+            social_graph=social_graph,
+            heatmap_prefix=heatmap_prefix,
+            heatmap_file=heatmap_file,
         )
-    )
-
-    milp_ms = run_milp_solver(
-        occ_grid,
-        milp_routes,
-        norm=np.inf,
-        motion=motion,
-        stride=milp_stride,
-        verbose=False,
-    )
-    rows.append(
-        _trial_row(
-            trial_id,
-            trial_seed,
-            route_ids,
-            "milp_makespan",
-            milp_ms["metrics"],
+        event_context = {
+            "trial_id": trial_id,
+            "trial_seed": trial_seed,
+            "route_ids": list(route_ids),
+            "num_agents": len(route_ids),
+            "milp_stride": milp_stride,
+        }
+        if print_event_milp_constraints:
+            print(
+                f"\n=== Event MILP constraints "
+                f"(trial_id={trial_id}, trial_seed={trial_seed}, route_ids={route_ids}) ===",
+                flush=True,
+            )
+        event_soc = run_event_milp_solver(
+            occ_grid,
+            milp_routes,
+            norm=1,
+            motion=motion,
+            stride=milp_stride,
+            verbose=False,
+            print_constraints=print_event_milp_constraints,
+            print_constraints_on_error=print_event_milp_constraints_on_error,
+            error_context={**event_context, "method": "event_milp_soc", "norm": 1},
         )
-    )
+        rows.append(
+            _trial_row(
+                trial_id,
+                trial_seed,
+                route_ids,
+                "event_milp_soc",
+                event_soc["metrics"],
+                extra={
+                    "interest_waypoint_count": event_soc.get("interest_waypoint_count"),
+                    "encounter_count": event_soc.get("encounter_count"),
+                    "binary_z_count": event_soc.get("binary_z_count"),
+                },
+            )
+        )
 
     return rows
 
@@ -330,7 +347,7 @@ def aggregate_ensemble_metrics(trial_rows: Sequence[dict]) -> List[dict]:
 
 def print_ensemble_summary(summary_rows: Sequence[dict], pool_astar_build_s: float) -> None:
     """Print a compact table for console reporting."""
-    print(f"\nPool A* build time (excluded from MILP trial averages): {pool_astar_build_s:.2f}s")
+    print(f"\nPool A* build time (excluded from event MILP trial averages): {pool_astar_build_s:.2f}s")
     print(f"{'Method':<18} {'Success%':>9} {'Avg solver s':>13} {'Avg makespan s':>15} {'Failures':>9}")
     print("-" * 68)
     for row in summary_rows:

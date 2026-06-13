@@ -16,9 +16,18 @@ METHOD_LABELS = {
     "pp_path_length": "PP (longest path first)",
     "milp_soc": "MILP (sum of times)",
     "milp_makespan": "MILP (makespan obj)",
+    "event_milp_soc": "Event MILP (sum of times)",
+    "event_milp_makespan": "Event MILP (makespan obj)",
 }
 
-METHOD_ORDER = ["milp_soc", "milp_makespan", "cbs", "pp_path_length"]
+METHOD_ORDER = [
+    "milp_soc",
+    "milp_makespan",
+    "event_milp_soc",
+    "event_milp_makespan",
+    "cbs",
+    "pp_path_length",
+]
 
 
 def _load_summary_csv(path: Path) -> List[dict]:

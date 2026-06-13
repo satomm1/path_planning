@@ -30,6 +30,7 @@ def plot_routes_overlay(
 
     styles = {
         "milp": ("MILP (social A* paths)", "darkviolet", "-"),
+        "event_milp": ("Event MILP (interest waypoints)", "darkorange", "-"),
         "cbs": ("CBS", "crimson", "-"),
         "pp": ("PP (longest first)", "forestgreen", "-."),
     }
@@ -44,7 +45,12 @@ def plot_routes_overlay(
             ax.plot(xs, ys, color=color, linestyle=ls, linewidth=2.2,
                     label=label if i == 0 else None)
 
-    for key, color in (("milp", "darkviolet"), ("cbs", "crimson"), ("pp", "forestgreen")):
+    for key, color in (
+        ("milp", "darkviolet"),
+        ("event_milp", "darkorange"),
+        ("cbs", "crimson"),
+        ("pp", "forestgreen"),
+    ):
         entry = results.get(key)
         if not entry:
             continue
@@ -54,7 +60,7 @@ def plot_routes_overlay(
             ax.scatter(sx, sy, marker="o", s=60, color=color, edgecolors="k", linewidths=0.5, zorder=6)
             ax.scatter(gx, gy, marker="*", s=140, color=color, edgecolors="k", linewidths=0.5, zorder=6)
 
-    ax.set_title("Spatial routes: path bank vs MILP / CBS / PP")
+    ax.set_title("Spatial routes: path bank vs MILP / Event MILP / CBS / PP")
     ax.set_aspect("equal", adjustable="box")
     ax.legend(loc="upper right")
     fig.tight_layout()
@@ -75,7 +81,7 @@ def plot_side_by_side_snapshots(
     """Grid of panels: methods (rows) x snapshot times (cols)."""
     methods = [
         k
-        for k in ("milp", "cbs", "pp")
+        for k in ("milp", "event_milp", "cbs", "pp")
         if k in snapshot_results and snapshot_results[k].get("success")
     ]
     if not methods:
@@ -111,7 +117,7 @@ def plot_side_by_side_snapshots(
                     cx, cy = get_position_at_time(t_snap, path, tseq)
                     edge = "red" if any(i in p for p in conflicts) else color
                     ax.scatter(cx, cy, s=80, color=color, edgecolors=edge, linewidths=2, zorder=5)
-            title = {"milp": "MILP", "cbs": "CBS", "pp": "PP"}.get(method, method.upper())
+            title = {"milp": "MILP", "event_milp": "Event MILP", "cbs": "CBS", "pp": "PP"}.get(method, method.upper())
             ax.set_title(f"{title}  t={t_snap:.1f}")
             ax.set_aspect("equal", adjustable="box")
 

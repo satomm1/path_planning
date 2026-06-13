@@ -30,7 +30,7 @@ def write_verification_report(
         "priority_order": results.get("pp", {}).get("priority_order"),
         "methods": {},
     }
-    for method in ("milp", "cbs", "pp"):
+    for method in ("milp", "event_milp", "cbs", "pp"):
         if method not in results:
             continue
         m = results[method]["metrics"]
@@ -40,13 +40,24 @@ def write_verification_report(
         extra = (
             f" SOC_steps={m.get('soc_timesteps')} conflicts={m.get('conflict_count')} "
             f"static_valid={m.get('static_valid')}"
-            if method != "milp"
+            if method not in ("milp", "event_milp")
             else ""
         )
+        event_extra = ""
+        if method == "event_milp":
+            total_rt = m.get("runtime_s")
+            total_rt_s = f"{float(total_rt):.3f}s" if total_rt is not None else "n/a"
+            event_extra = (
+                f" encounters={m.get('encounter_count')} "
+                f"interest_wps={m.get('interest_waypoint_count')} "
+                f"z={m.get('binary_z_count')} "
+                f"total_runtime_s={total_rt_s}"
+            )
+        label = method.upper().replace("_", " ")
         print(
-            f"\n{method.upper()}: success={m['success']} status={m['status']} "
+            f"\n{label}: success={m['success']} status={m['status']} "
             f"SOC_s={m.get('soc_seconds')} makespan_s={m.get('makespan_seconds')} "
-            f"path_len_m={m.get('total_path_length_m')} solver_runtime_s={rt_s}{extra}"
+            f"path_len_m={m.get('total_path_length_m')} solver_runtime_s={rt_s}{extra}{event_extra}"
         )
 
     def _json_default(obj):

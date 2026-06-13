@@ -21,7 +21,12 @@ from social_path_planning.benchmark_sparse_snapshots import (
 )
 from social_path_planning.mapf_comparison import MotionConfig
 from social_path_planning.mapf_comparison.metrics import aggregate_milp_metrics
-from social_path_planning.mapf_comparison.pipeline import MapfRunConfig, prepare_mapf_problem, run_mapf_solvers
+from social_path_planning.mapf_comparison.pipeline import (
+    MapfRunConfig,
+    prepare_mapf_problem,
+    run_event_milp_solver,
+    run_mapf_solvers,
+)
 
 
 def _file_sha256(path: Path) -> str:
@@ -83,6 +88,8 @@ def run_mapf_comparison(
     heatmap_prefix: str | None = None,
     heatmap_file: str | None = None,
     refresh_social_bank: bool = False,
+    run_event_milp: bool = True,
+    milp_stride: int = 1,
 ):
     motion = (
         MotionConfig(max_velocity_mps=max_velocity_mps)
@@ -229,6 +236,54 @@ def run_mapf_comparison(
             stage_size,
         )
 
+        if run_event_milp:
+            event_soc = run_event_milp_solver(
+                occ_grid,
+                milp_routes,
+                norm=1,
+                motion=motion,
+                stride=milp_stride,
+                verbose=False,
+            )
+            _append_rows(
+                detailed_rows,
+                run_id,
+                stage_size,
+                benchmark_seed,
+                "event_milp_soc",
+                event_soc["metrics"],
+                stage_size,
+            )
+
+            event_ms = run_event_milp_solver(
+                occ_grid,
+                milp_routes,
+                norm=np.inf,
+                motion=motion,
+                stride=milp_stride,
+                verbose=False,
+            )
+            _append_rows(
+                detailed_rows,
+                run_id,
+                stage_size,
+                benchmark_seed,
+                "event_milp_makespan",
+                event_ms["metrics"],
+                stage_size,
+            )
+
+        stage_methods = (
+            "cbs",
+            "pp_path_length",
+            "milp_soc",
+            "milp_makespan",
+            "event_milp_soc",
+            "event_milp_makespan",
+        )
+        if not run_event_milp:
+            stage_methods = ("cbs", "pp_path_length", "milp_soc", "milp_makespan")
+
         if save_example_maps and stage_size == example_stage_size and example_payload is None:
             example_payload = {
                 "stage_size": stage_size,
@@ -239,7 +294,7 @@ def run_mapf_comparison(
                 "pp_paths_world": (solver_results.get("pp") or {}).get("world_polylines") or [],
             }
 
-        for method in ("cbs", "pp_path_length", "milp_soc", "milp_makespan"):
+        for method in stage_methods:
             row = next(r for r in detailed_rows if r["stage_size"] == stage_size and r["method"] == method)
             summary_rows.append(_summary_from_detail(row))
 
@@ -271,6 +326,8 @@ def run_mapf_comparison(
             "robot_radius_cells": int(grid_config.robot_radius),
             "motion": motion.to_manifest_dict(),
             "milp_astar_mode": milp_astar_mode,
+            "run_event_milp": bool(run_event_milp),
+            "milp_stride": int(milp_stride),
             "heatmap_prefix": heatmap_prefix,
             "heatmap_file": heatmap_file,
         },
@@ -368,6 +425,9 @@ def _detail_fieldnames():
         "downsample",
         "seed",
         "priority_order",
+        "interest_waypoint_count",
+        "encounter_count",
+        "binary_z_count",
     ]
 
 
@@ -459,11 +519,24 @@ def main(argv=None):
         action="store_true",
         help="Re-run social/modified A* and overwrite cached paths in the path bank.",
     )
+    milp_group.add_argument(
+        "--no-event-milp",
+        action="store_true",
+        help="Skip event MILP (interest-waypoint) timing in the benchmark.",
+    )
+    milp_group.add_argument(
+        "--milp-stride",
+        type=int,
+        default=1,
+        help="Subsample MILP/event polylines every N waypoints (default: 1).",
+    )
     cli = parser.parse_args(argv)
     if cli.milp_astar_vanilla:
         cli.milp_astar_mode = "vanilla"
     if cli.heatmap_prefix and cli.heatmap_file:
         parser.error("Use only one of --heatmap-prefix or --heatmap-file.")
+    if cli.milp_stride < 1:
+        parser.error("--milp-stride must be >= 1.")
 
     stage_sizes = [int(s.strip()) for s in cli.stage_sizes.split(",") if s.strip()]
     run_mapf_comparison(
@@ -487,6 +560,8 @@ def main(argv=None):
         heatmap_prefix=cli.heatmap_prefix,
         heatmap_file=cli.heatmap_file,
         refresh_social_bank=cli.refresh_social_bank,
+        run_event_milp=not cli.no_event_milp,
+        milp_stride=cli.milp_stride,
     )
     return 0
 

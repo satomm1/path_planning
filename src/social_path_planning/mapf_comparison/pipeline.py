@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import time
+import traceback
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -37,6 +38,34 @@ from social_path_planning.mapf_comparison.motion import MotionConfig
 from social_path_planning.mapf_comparison.schedule import schedule_mapf_paths
 
 Coord = Tuple[int, int]
+
+
+def _format_solver_error_status(exc: BaseException) -> str:
+    msg = str(exc).strip().replace("\n", " ")
+    if msg:
+        return f"error:{type(exc).__name__}:{msg}"
+    return f"error:{type(exc).__name__}"
+
+
+def _print_solver_exception(
+    solver_label: str,
+    exc: BaseException,
+    *,
+    context: Mapping[str, Any] | None = None,
+    diagnostics: Mapping[str, Any] | None = None,
+    print_traceback: bool = True,
+) -> None:
+    lines = [f"\n--- {solver_label} failed ---"]
+    if context:
+        ctx = ", ".join(f"{key}={value}" for key, value in context.items())
+        lines.append(f"Context: {ctx}")
+    if diagnostics:
+        diag = ", ".join(f"{key}={value}" for key, value in diagnostics.items())
+        lines.append(f"Diagnostics: {diag}")
+    lines.append(f"{type(exc).__name__}: {exc}")
+    print("\n".join(lines), flush=True)
+    if print_traceback:
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
 
 
 @dataclass
@@ -152,6 +181,7 @@ def run_mapf_solvers(
     map_resolution = float(occ_grid.resolution)
 
     if cfg.run_cbs:
+        print("Starting CBS...", flush=True)
         if verbose:
             print("\nSolving CBS...")
         t0 = time.perf_counter()
@@ -197,6 +227,7 @@ def run_mapf_solvers(
         )
 
     if cfg.run_pp:
+        print("Starting PP...", flush=True)
         if verbose:
             print("\nSolving PP (prioritized planning)...")
         t0 = time.perf_counter()
@@ -344,6 +375,10 @@ def run_event_milp_solver(
     motion: MotionConfig | None = None,
     stride: int = 1,
     verbose: bool = True,
+    print_errors: bool = True,
+    print_constraints: bool = False,
+    print_constraints_on_error: bool = True,
+    error_context: Mapping[str, Any] | None = None,
 ) -> dict:
     """Time-optimal coordination on event interest waypoints (reduced MILP)."""
     motion_cfg = motion if motion is not None else MotionConfig()
@@ -358,6 +393,13 @@ def run_event_milp_solver(
         )
         from social_path_planning.multi_planning import subsample_path_by_stride
     except ImportError as exc:
+        if print_errors:
+            _print_solver_exception(
+                "Event MILP import",
+                exc,
+                context=error_context,
+                print_traceback=False,
+            )
         stage_paths = [list(route["path"]) for route in routes]
         starts_world = [tuple(route["x_init"]) for route in routes]
         goals_world = [tuple(route["x_goal"]) for route in routes]
@@ -390,36 +432,52 @@ def run_event_milp_solver(
     agent_times = None
     analysis = None
     planner = None
+    solver_runtime_s = 0.0
+    solver_exc: BaseException | None = None
     try:
         planner = EventMultiAgentSimultaneousPlanner(occ_grid, paths=stage_paths, norm=norm)
         planner.assign_velocities([motion_cfg.max_velocity_mps] * len(stage_paths))
-        agent_times = planner.plan(verbose=False)
+        agent_times = planner.plan(verbose=False, print_constraints=print_constraints)
         analysis = planner.analysis
-    except Exception as exc:
-        status = f"error:{type(exc).__name__}"
-    runtime_s = float(time.perf_counter() - t0)
-
-    if agent_times is not None and analysis is not None:
+        solver_runtime_s = float(getattr(planner, "solver_runtime_s", 0.0))
         time_lists = [
             expand_event_times_to_original_path(agent_path, event_times)
             for agent_path, event_times in zip(analysis.agents, agent_times)
         ]
-    else:
+    except Exception as exc:
+        solver_exc = exc
+        status = _format_solver_error_status(exc)
         time_lists = [[] for _ in routes]
-
-    metrics = aggregate_milp_metrics(
-        time_lists,
-        runtime_s,
-        status,
-        norm=norm,
-        world_paths=stage_paths,
-        motion=motion_cfg,
-    )
-    if verbose:
-        print(
-            f"Event MILP done: status={metrics.get('status')} success={metrics.get('success')} "
-            f"({runtime_s:.2f}s)"
-        )
+        if print_errors:
+            diagnostics = {
+                "norm": norm,
+                "num_agents": len(stage_paths),
+                "milp_stride": stride,
+            }
+            if planner is not None:
+                diagnostics["binary_z_count"] = getattr(planner, "num_z", None)
+                planner_analysis = getattr(planner, "analysis", None)
+                if planner_analysis is not None:
+                    diagnostics["encounter_count"] = len(planner_analysis.encounters)
+                    diagnostics["interest_waypoint_count"] = sum(
+                        len(agent.interest_waypoints) for agent in planner_analysis.agents
+                    )
+            _print_solver_exception(
+                "Event MILP",
+                exc,
+                context=error_context,
+                diagnostics=diagnostics,
+            )
+            if print_constraints_on_error and not print_constraints and planner is not None:
+                try:
+                    planner.build_problem(print_constraints=True)
+                except Exception as print_exc:
+                    print(
+                        f"Could not print event MILP constraints after failure: "
+                        f"{type(print_exc).__name__}: {print_exc}",
+                        flush=True,
+                    )
+    runtime_s = float(time.perf_counter() - t0)
 
     interest_waypoint_count = (
         sum(len(agent.interest_waypoints) for agent in analysis.agents)
@@ -428,6 +486,35 @@ def run_event_milp_solver(
     )
     encounter_count = len(analysis.encounters) if analysis is not None else 0
     binary_z_count = int(planner.num_z) if planner is not None else 0
+
+    metrics = aggregate_milp_metrics(
+        time_lists,
+        runtime_s,
+        status,
+        norm=norm,
+        world_paths=stage_paths,
+        motion=motion_cfg,
+        solver_runtime_s=solver_runtime_s,
+    )
+    metrics["interest_waypoint_count"] = int(interest_waypoint_count)
+    metrics["encounter_count"] = int(encounter_count)
+    metrics["binary_z_count"] = binary_z_count
+    if solver_exc is not None:
+        metrics["error_type"] = type(solver_exc).__name__
+        metrics["error_message"] = str(solver_exc)
+    if verbose:
+        print(
+            f"Event MILP done: status={metrics.get('status')} success={metrics.get('success')} "
+            f"encounters={encounter_count} z={binary_z_count} "
+            f"(solver={solver_runtime_s:.2f}s total={runtime_s:.2f}s)"
+        )
+    elif print_errors and solver_exc is not None:
+        print(
+            f"Event MILP trial recorded as failure: status={status} "
+            f"encounters={encounter_count} z={binary_z_count} "
+            f"(solver={solver_runtime_s:.2f}s total={runtime_s:.2f}s)",
+            flush=True,
+        )
 
     return {
         "grid_paths": None,

@@ -10,6 +10,7 @@ import hashlib
 import json
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -91,6 +92,11 @@ def _trial_fieldnames():
         "total_path_length_m",
         "conflict_count",
         "priority_order",
+        "interest_waypoint_count",
+        "encounter_count",
+        "binary_z_count",
+        "error_type",
+        "error_message",
     ]
 
 
@@ -197,6 +203,9 @@ def run_mapf_ensemble(
     milp_stride: int = 1,
     viz_event_waypoints: bool = False,
     viz_event_every: int = 1,
+    print_event_milp_constraints: bool = False,
+    print_event_milp_constraints_every: int = 1,
+    print_event_milp_constraints_on_error: bool = True,
 ):
     if pool_size < num_agents:
         raise ValueError(f"pool_size ({pool_size}) must be >= num_agents ({num_agents})")
@@ -293,21 +302,38 @@ def run_mapf_ensemble(
                 heatmap_prefix=heatmap_prefix,
                 heatmap_file=heatmap_file,
             )
-        rows = run_ensemble_trial(
-            trial_id,
-            this_trial_seed,
-            pool,
-            num_agents,
-            occ_grid,
-            mapf_cfg,
-            motion,
-            path_bank_path,
-            milp_astar_mode=milp_astar_mode,
-            social_graph=social_graph,
-            heatmap_prefix=heatmap_prefix,
-            heatmap_file=heatmap_file,
+        print_constraints_this_trial = (
+            print_event_milp_constraints
+            and trial_id % int(print_event_milp_constraints_every) == 0
         )
-        trial_rows.extend(rows)
+        try:
+            rows = run_ensemble_trial(
+                trial_id,
+                this_trial_seed,
+                pool,
+                num_agents,
+                occ_grid,
+                mapf_cfg,
+                motion,
+                path_bank_path,
+                milp_astar_mode=milp_astar_mode,
+                milp_stride=milp_stride,
+                print_event_milp_constraints=print_constraints_this_trial,
+                print_event_milp_constraints_on_error=print_event_milp_constraints_on_error,
+                social_graph=social_graph,
+                heatmap_prefix=heatmap_prefix,
+                heatmap_file=heatmap_file,
+            )
+            trial_rows.extend(rows)
+        except Exception as exc:
+            print(
+                f"\n--- Ensemble trial {trial_id + 1}/{num_trials} failed "
+                f"(seed={this_trial_seed}) ---\n"
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
+            raise
     trial_loop_s = float(time.perf_counter() - t_loop_start)
 
     summary_rows = aggregate_ensemble_metrics(trial_rows)
@@ -362,7 +388,15 @@ def run_mapf_ensemble(
                 "One-time modified/vanilla A* path generation during pool prep; "
                 "excluded from avg_milp_solver_runtime_s in trial summary."
             ),
-            "avg_solver_runtime_s": "Mean over successful trials only (MILP = cvxpy coordination only).",
+            "avg_solver_runtime_s": (
+                "Mean over successful trials only. "
+                "Event MILP: cvxpy solve only (excludes constraint build). "
+                "CBS/PP: full planner wall time."
+            ),
+            "runtime_s": (
+                "Per-trial total wall time. Event MILP includes analysis, "
+                "constraint construction, solve, and time expansion."
+            ),
             "avg_makespan_seconds": "Mean over successful trials only.",
         },
     }
@@ -444,6 +478,22 @@ def main(argv=None):
         default=1,
         help="With --viz-event-waypoints, visualize every N trials (default 1 = all).",
     )
+    milp_group.add_argument(
+        "--print-event-milp-constraints",
+        action="store_true",
+        help="Print full event MILP objective and mutex constraints during trials.",
+    )
+    milp_group.add_argument(
+        "--print-event-milp-constraints-every",
+        type=int,
+        default=1,
+        help="With --print-event-milp-constraints, print every N trials (default 1).",
+    )
+    milp_group.add_argument(
+        "--no-print-event-milp-constraints-on-error",
+        action="store_true",
+        help="Do not dump event MILP constraints when a trial fails.",
+    )
     cli = parser.parse_args(argv)
     if cli.milp_astar_vanilla:
         cli.milp_astar_mode = "vanilla"
@@ -453,6 +503,8 @@ def main(argv=None):
         parser.error("--milp-stride must be >= 1.")
     if cli.viz_event_every < 1:
         parser.error("--viz-event-every must be >= 1.")
+    if cli.print_event_milp_constraints_every < 1:
+        parser.error("--print-event-milp-constraints-every must be >= 1.")
 
     run_mapf_ensemble(
         scenario_name=cli.scenario,
@@ -478,8 +530,11 @@ def main(argv=None):
         refresh_social_bank=cli.refresh_social_bank,
         pregen_only=cli.pregen_only,
         milp_stride=cli.milp_stride,
-        viz_event_waypoints=True,
-        viz_event_every=1,
+        viz_event_waypoints=cli.viz_event_waypoints,
+        viz_event_every=cli.viz_event_every,
+        print_event_milp_constraints=cli.print_event_milp_constraints,
+        print_event_milp_constraints_every=cli.print_event_milp_constraints_every,
+        print_event_milp_constraints_on_error=not cli.no_print_event_milp_constraints_on_error,
     )
     return 0
 

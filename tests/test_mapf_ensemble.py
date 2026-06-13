@@ -68,13 +68,13 @@ def test_aggregate_ensemble_metrics_success_only_averages():
             "makespan_seconds": 20.0,
         },
         {
-            "method": "milp_makespan",
+            "method": "event_milp_soc",
             "success": True,
             "solver_runtime_s": 0.5,
             "makespan_seconds": 8.0,
         },
         {
-            "method": "milp_makespan",
+            "method": "event_milp_soc",
             "success": False,
             "solver_runtime_s": 0.2,
             "makespan_seconds": None,
@@ -90,11 +90,11 @@ def test_aggregate_ensemble_metrics_success_only_averages():
     assert cbs["avg_solver_runtime_s"] == pytest.approx(2.0)
     assert cbs["avg_makespan_seconds"] == pytest.approx(15.0)
 
-    milp = summary["milp_makespan"]
-    assert milp["num_trials"] == 2
-    assert milp["failure_count"] == 1
-    assert milp["avg_solver_runtime_s"] == pytest.approx(0.5)
-    assert milp["avg_makespan_seconds"] == pytest.approx(8.0)
+    event_milp = summary["event_milp_soc"]
+    assert event_milp["num_trials"] == 2
+    assert event_milp["failure_count"] == 1
+    assert event_milp["avg_solver_runtime_s"] == pytest.approx(0.5)
+    assert event_milp["avg_makespan_seconds"] == pytest.approx(8.0)
 
 
 def test_aggregate_ensemble_metrics_empty_methods_omitted():

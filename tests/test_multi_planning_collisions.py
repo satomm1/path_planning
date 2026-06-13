@@ -21,8 +21,11 @@ from social_path_planning.multi_planning import (
     ROBOT_DIAMETER,
     MultiAgentSequentialPlanner,
     MultiAgentSimultaneousPlanner,
+    _assign_z_to_segment_pairs,
     _collect_segment_collision_pairs,
     _iter_conflicting_segment_pairs,
+    _parse_collision_entry,
+    _same_direction_bands,
     _segment_endpoint_conflict,
 )
 
@@ -50,12 +53,35 @@ class TestSegmentConflictHelpers(unittest.TestCase):
         num_z = _collect_segment_collision_pairs(pairs, path_a, path_b, ROBOT_DIAMETER)
         self.assertEqual(len(pairs), 2)
         self.assertEqual(num_z, 1)
-        self.assertEqual(pairs[0][-1], pairs[1][-1])
+        self.assertEqual(pairs[0][-2], pairs[1][-2])
+
+    def test_same_direction_bands_diagonal_chain(self):
+        pair_set = {(0, 1), (1, 2), (2, 3), (5, 5)}
+        bands = _same_direction_bands(pair_set)
+        self.assertEqual(len(bands), 1)
+        self.assertEqual(bands[0], {(0, 1), (1, 2), (2, 3)})
+
+    def test_co_increment_diagonal_band_uses_one_z(self):
+        segment_pairs = [(0, 1), (1, 2), (2, 3)]
+        assigned, z_index = _assign_z_to_segment_pairs(segment_pairs)
+        z_vals = {z for _i, _j, z in assigned}
+        self.assertEqual(z_vals, {0})
+        self.assertEqual(z_index, 1)
+
+    def test_parallel_corridor_marching_band_uses_one_z(self):
+        path_a = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0), (4.0, 0.0)]
+        path_b = [(0.0, 0.1), (1.0, 0.1), (2.0, 0.1), (3.0, 0.1), (4.0, 0.1)]
+        pairs = []
+        num_z = _collect_segment_collision_pairs(pairs, path_a, path_b, ROBOT_DIAMETER)
+        z_vals = {entry[-2] for entry in pairs}
+        self.assertEqual(len(pairs), 10)
+        self.assertEqual(num_z, 1)
+        self.assertEqual(z_vals, {0})
 
 
 class TestSequentialSegmentPairs(unittest.TestCase):
     def test_emits_segment_indices_not_waypoint_only(self):
-        ego = [(0.0, 0.0), (2.0, 0.0)]
+        ego = [(0.0, 0.0), (1.0, 0.0)]
         other = [(1.0, 0.0), (1.0, 1.0)]
         other_times = [0.0, 5.0]
         planner = MultiAgentSequentialPlanner(
@@ -63,8 +89,9 @@ class TestSequentialSegmentPairs(unittest.TestCase):
         )
         pairs, num_z = planner.find_collision_pairs()
         self.assertGreater(num_z, 0)
-        self.assertEqual(len(pairs[0]), 4)
-        _other_idx, i, j, _z = pairs[0]
+        self.assertGreaterEqual(len(pairs[0]), 4)
+        _leading, i, j, _z, _mode = _parse_collision_entry(pairs[0])
+        _other_idx = _leading[0]
         self.assertEqual(i, 0)
         self.assertGreaterEqual(j, 0)
 
@@ -78,7 +105,27 @@ class TestIntervalOverlapRegression(unittest.TestCase):
         planner = MultiAgentSimultaneousPlanner(_DummyGrid(), paths=[path1, path2], v=[1.0, 1.0])
         pairs, num_z = planner.find_collision_pairs()
         self.assertGreater(num_z, 0)
-        self.assertTrue(any(i == 0 and j == 0 for _a1, _a2, i, j, _z in pairs))
+        self.assertTrue(
+            any(
+                i == 0 and j == 0
+                for entry in pairs
+                for _leading, i, j, _z, _mode in [_parse_collision_entry(entry)]
+            )
+        )
+
+    def test_opposite_corridor_window_uses_boundary_constraints(self):
+        path_a = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0), (3.0, 0.0)]
+        path_b = [(3.0, 0.0), (2.0, 0.0), (1.0, 0.0), (0.0, 0.0)]
+        pairs = []
+        _collect_segment_collision_pairs(pairs, path_a, path_b, ROBOT_DIAMETER)
+        boundary = [
+            _parse_collision_entry(p)
+            for p in pairs
+            if _parse_collision_entry(p)[4] in ("a_first", "b_first")
+        ]
+        self.assertEqual(len(boundary), 2)
+        self.assertEqual(boundary[0][3], boundary[1][3])
+        self.assertEqual({row[4] for row in boundary}, {"a_first", "b_first"})
 
     def test_interval_constraints_exclude_overlapping_occupancy(self):
         try:

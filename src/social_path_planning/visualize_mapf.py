@@ -1,5 +1,5 @@
 """
-Run CBS / PP / MILP simultaneous coordination and produce animations for visual verification.
+Run CBS / PP / MILP / Event MILP simultaneous coordination and produce animations for visual verification.
 
 Example:
   python -m social_path_planning.visualize_mapf --scenario sample2_default --num-agents 4 --output-dir results/mapf_comparison/verify
@@ -23,6 +23,7 @@ from social_path_planning.mapf_comparison.pipeline import (
     MapfRunConfig,
     prepare_mapf_problem,
     print_grid_summary,
+    run_event_milp_solver,
     run_mapf_solvers,
     run_milp_solver,
 )
@@ -58,7 +59,9 @@ def run_visualization(
     crop: bool = True,
     crop_padding_cells: int = 40,
     run_milp: bool = True,
+    run_event_milp: bool = True,
     milp_norm: int = 1,
+    milp_stride: int = 1,
     milp_astar_mode: str = "modified",
     heatmap_prefix: Optional[str] = None,
     heatmap_file: Optional[str] = None,
@@ -126,8 +129,7 @@ def run_visualization(
         occ_grid, routes, grid_config, starts, goals, budget, cfg
     )
 
-    if run_milp:
-        print("\n--- MILP timing ---")
+    if run_milp or run_event_milp:
         milp_routes = routes
         if milp_astar_mode != "vanilla":
             if demo_open:
@@ -179,11 +181,23 @@ def run_visualization(
                     heatmap_file=heatmap_file,
                     refresh=refresh_social_bank,
                 )
-        results["milp"] = run_milp_solver(
-            occ_grid, milp_routes, norm=milp_norm, motion=motion
-        )
+        if run_milp:
+            print("\n--- MILP timing ---")
+            results["milp"] = run_milp_solver(
+                occ_grid, milp_routes, norm=milp_norm, motion=motion, stride=milp_stride
+            )
+        else:
+            print("\nSkipping classic MILP (--no-milp).")
+
+        if run_event_milp:
+            print("\n--- Event MILP timing ---")
+            results["event_milp"] = run_event_milp_solver(
+                occ_grid, milp_routes, norm=milp_norm, motion=motion, stride=milp_stride
+            )
+        else:
+            print("\nSkipping event MILP (--no-event-milp).")
     else:
-        print("\nSkipping MILP (--no-milp).")
+        print("\nSkipping MILP and event MILP (--no-milp and --no-event-milp).")
 
     write_verification_report(
         output_dir / "verification_report.json",
@@ -192,7 +206,7 @@ def run_visualization(
         benchmark_seed=benchmark_seed,
         motion=motion,
         results=results,
-        milp_astar_mode=milp_astar_mode if run_milp else None,
+        milp_astar_mode=milp_astar_mode if (run_milp or run_event_milp) else None,
     )
 
     if make_static:
@@ -200,7 +214,8 @@ def run_visualization(
             occ_grid, fixed_paths, results, output_dir / "routes_overlay.png"
         )
 
-    for method in ("milp", "cbs", "pp"):
+    viz_methods = ("milp", "event_milp", "cbs", "pp")
+    for method in viz_methods:
         if method not in results:
             continue
         entry = results[method]
@@ -210,6 +225,7 @@ def run_visualization(
         if make_video:
             title = {
                 "milp": f"MILP (social A*) — {scenario_name}, N={num_agents}",
+                "event_milp": f"Event MILP — {scenario_name}, N={num_agents}",
                 "cbs": f"CBS — {scenario_name}, N={num_agents}",
                 "pp": f"PP — {scenario_name}, N={num_agents}",
             }.get(method, method)
@@ -227,7 +243,8 @@ def run_visualization(
 
     if make_snapshots:
         end_times = []
-        for method in ("milp", "cbs", "pp"):
+        viz_methods = ("milp", "event_milp", "cbs", "pp")
+    for method in viz_methods:
             if method not in results:
                 continue
             if results[method].get("time_lists") and results[method]["time_lists"][0]:
@@ -241,7 +258,12 @@ def run_visualization(
     if make_video:
         comparison_panels = [
             (results[m], lbl)
-            for m, lbl in (("milp", "MILP"), ("cbs", "CBS"), ("pp", "PP"))
+            for m, lbl in (
+                ("milp", "MILP"),
+                ("event_milp", "Event MILP"),
+                ("cbs", "CBS"),
+                ("pp", "PP"),
+            )
             if m in results and results[m].get("success")
         ]
         if len(comparison_panels) >= 2:
@@ -305,7 +327,14 @@ def main(argv=None):
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--demo-open", action="store_true")
     parser.add_argument("--no-milp", action="store_true")
+    parser.add_argument("--no-event-milp", action="store_true")
     parser.add_argument("--milp-norm", type=int, default=1, choices=[1, 2])
+    parser.add_argument(
+        "--milp-stride",
+        type=int,
+        default=1,
+        help="Subsample MILP/event polylines every N waypoints (default: 1).",
+    )
     parser.add_argument(
         "--milp-astar-mode",
         default="modified",
@@ -326,6 +355,10 @@ def main(argv=None):
         choices=["any", "all", "majority", "center", "fine_center"],
     )
     cli = parser.parse_args(argv)
+    if cli.heatmap_prefix and cli.heatmap_file:
+        parser.error("Use only one of --heatmap-prefix or --heatmap-file.")
+    if cli.milp_stride < 1:
+        parser.error("--milp-stride must be >= 1.")
 
     run_visualization(
         scenario_name=cli.scenario,
@@ -346,7 +379,9 @@ def main(argv=None):
         crop=not cli.no_crop,
         crop_padding_cells=cli.crop_padding,
         run_milp=not cli.no_milp,
+        run_event_milp=not cli.no_event_milp,
         milp_norm=cli.milp_norm,
+        milp_stride=cli.milp_stride,
         milp_astar_mode=cli.milp_astar_mode,
         heatmap_prefix=cli.heatmap_prefix,
         heatmap_file=cli.heatmap_file,

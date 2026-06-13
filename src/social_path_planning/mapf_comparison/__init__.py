@@ -13,6 +13,7 @@ from social_path_planning.mapf_comparison.motion import (
 from social_path_planning.mapf_comparison.pipeline import (
     MapfRunConfig,
     prepare_mapf_problem,
+    run_event_milp_solver,
     run_mapf_solvers,
     run_milp_solver,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "prepare_mapf_problem",
     "run_mapf_solvers",
     "run_milp_solver",
+    "run_event_milp_solver",
     "compute_solution_metrics",
     "dedupe_world_path",
     "aggregate_mapf_metrics",
