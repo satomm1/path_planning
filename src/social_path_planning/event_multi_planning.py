@@ -269,6 +269,51 @@ def _encounter_interval(agent, path, seg_indices):
     return _segment_run_to_interval(agent, path, seg_start, seg_end)
 
 
+def _cluster_segment_pairs_into_encounters(segment_pairs):
+    """
+    Split conflicting segment pairs into disjoint encounter components.
+
+    Pairs belong to the same encounter when they share a segment index on either
+    robot or use consecutive segment indices on one robot (one contiguous
+    conflict zone). Disjoint spatial conflict regions must not be merged into a
+    single encounter window.
+    """
+    pairs = [(int(i), int(j)) for i, j in segment_pairs]
+    if not pairs:
+        return []
+    if len(pairs) == 1:
+        return [pairs]
+
+    parent = list(range(len(pairs)))
+
+    def find(idx):
+        while parent[idx] != idx:
+            parent[idx] = parent[parent[idx]]
+            idx = parent[idx]
+        return idx
+
+    def union(left, right):
+        root_left = find(left)
+        root_right = find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    for left in range(len(pairs)):
+        i_left, j_left = pairs[left]
+        for right in range(left + 1, len(pairs)):
+            i_right, j_right = pairs[right]
+            if i_left == i_right or j_left == j_right:
+                union(left, right)
+            elif abs(i_left - i_right) == 1 or abs(j_left - j_right) == 1:
+                union(left, right)
+
+    grouped: dict[int, list[tuple[int, int]]] = {}
+    for idx, pair in enumerate(pairs):
+        root = find(idx)
+        grouped.setdefault(root, []).append(pair)
+    return list(grouped.values())
+
+
 def analyze_event_paths(paths, threshold=ROBOT_DIAMETER):
     """
     Analyze multi-agent paths and build interest waypoints at conflict boundaries.
@@ -301,22 +346,23 @@ def analyze_event_paths(paths, threshold=ROBOT_DIAMETER):
     encounter_intervals_by_agent = [[] for _ in range(num_agents)]
     encounters = []
     for (a1, a2), row in sorted(pair_conflicts.items()):
-        seg_i = {int(i) for i, _j in row["pairs"]}
-        seg_j = {int(j) for _i, j in row["pairs"]}
-        interval_a = _encounter_interval(a1, paths[a1], seg_i)
-        interval_b = _encounter_interval(a2, paths[a2], seg_j)
-        kind = _classify_encounter_kind(row["pairs"], interval_a, interval_b)
-        encounters.append(
-            EncounterWindow(
-                agent_a=a1,
-                agent_b=a2,
-                interval_a=interval_a,
-                interval_b=interval_b,
-                kind=kind,
+        for component_pairs in _cluster_segment_pairs_into_encounters(row["pairs"]):
+            seg_i = {int(i) for i, _j in component_pairs}
+            seg_j = {int(j) for _i, j in component_pairs}
+            interval_a = _encounter_interval(a1, paths[a1], seg_i)
+            interval_b = _encounter_interval(a2, paths[a2], seg_j)
+            kind = _classify_encounter_kind(component_pairs, interval_a, interval_b)
+            encounters.append(
+                EncounterWindow(
+                    agent_a=a1,
+                    agent_b=a2,
+                    interval_a=interval_a,
+                    interval_b=interval_b,
+                    kind=kind,
+                )
             )
-        )
-        encounter_intervals_by_agent[a1].append(interval_a)
-        encounter_intervals_by_agent[a2].append(interval_b)
+            encounter_intervals_by_agent[a1].append(interval_a)
+            encounter_intervals_by_agent[a2].append(interval_b)
 
     for agent, path in enumerate(paths):
         intervals = _intervals_from_segment_indices(agent, path, segment_indices_by_agent[agent])
@@ -618,7 +664,7 @@ def _solve_event_problem(prob, agent_times, *, context, verbose=False):
     print("Starting to solve event multi-agent planning problem...")
     solver_chain = [
         name
-        for name in (cp.GLPK_MI, cp.HIGHS, cp.SCIPY)
+        for name in (cp.MOSEK, cp.GLPK_MI, cp.HIGHS, cp.SCIPY)
         if name in cp.installed_solvers()
     ]
     if not solver_chain:
