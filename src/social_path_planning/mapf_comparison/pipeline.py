@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -81,6 +82,17 @@ class MapfRunConfig:
     run_cbs: bool = True
     run_pp: bool = True
     crop: bool = True
+    cbs_timeout_s: float = 0.0
+    pp_timeout_s: float = 0.0
+
+
+def _run_with_timeout(func, timeout_s: float, *args, **kwargs):
+    """Run ``func`` in a worker thread; raise ``FuturesTimeoutError`` on expiry."""
+    if timeout_s <= 0:
+        return func(*args, **kwargs)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(func, *args, **kwargs)
+        return future.result(timeout=float(timeout_s))
 
 
 def resolve_downsample(occ_grid, cfg: MapfRunConfig, demo_open: bool = False) -> int:
@@ -185,15 +197,29 @@ def run_mapf_solvers(
         if verbose:
             print("\nSolving CBS...")
         t0 = time.perf_counter()
-        cbs_paths, cbs_status = run_cbs(
-            grid_config,
-            list(starts),
-            list(goals),
-            max_iter=budget["cbs_max_iter"],
-            low_level_max_iter=budget["cbs_low_level_max_iter"],
-            max_process=cfg.cbs_max_process,
+        cbs_paths = None
+        cbs_status = "error"
+        try:
+            cbs_paths, cbs_status = _run_with_timeout(
+                run_cbs,
+                cfg.cbs_timeout_s,
+                grid_config,
+                list(starts),
+                list(goals),
+                max_iter=budget["cbs_max_iter"],
+                low_level_max_iter=budget["cbs_low_level_max_iter"],
+                max_process=cfg.cbs_max_process,
+            )
+        except FuturesTimeoutError:
+            cbs_status = "timeout"
+            cbs_paths = None
+        except Exception as exc:
+            cbs_status = _format_solver_error_status(exc)
+            if verbose:
+                _print_solver_exception("CBS", exc, print_traceback=True)
+        cbs_runtime = float(
+            cfg.cbs_timeout_s if cbs_status == "timeout" else time.perf_counter() - t0
         )
-        cbs_runtime = float(time.perf_counter() - t0)
         cbs_metrics = aggregate_mapf_metrics(
             cbs_paths or [],
             grid_config.robot_radius,
@@ -231,14 +257,31 @@ def run_mapf_solvers(
         if verbose:
             print("\nSolving PP (prioritized planning)...")
         t0 = time.perf_counter()
-        pp_paths, pp_order, pp_status = run_prioritized_planning(
-            grid_config,
-            list(starts),
-            list(goals),
-            routes,
-            low_level_max_iter=budget["pp_low_level_max_iter"],
+        pp_paths = None
+        pp_order: List[int] = []
+        pp_status = "error"
+        try:
+            pp_paths, pp_order, pp_status = _run_with_timeout(
+                run_prioritized_planning,
+                cfg.pp_timeout_s,
+                grid_config,
+                list(starts),
+                list(goals),
+                routes,
+                low_level_max_iter=budget["pp_low_level_max_iter"],
+            )
+        except FuturesTimeoutError:
+            pp_status = "timeout"
+            pp_paths = None
+            pp_order = priority_order_by_path_length(routes)
+        except Exception as exc:
+            pp_status = _format_solver_error_status(exc)
+            pp_order = priority_order_by_path_length(routes)
+            if verbose:
+                _print_solver_exception("PP", exc, print_traceback=True)
+        pp_runtime = float(
+            cfg.pp_timeout_s if pp_status == "timeout" else time.perf_counter() - t0
         )
-        pp_runtime = float(time.perf_counter() - t0)
         pp_metrics = aggregate_mapf_metrics(
             pp_paths or [],
             grid_config.robot_radius,
@@ -556,6 +599,6 @@ def print_grid_summary(
         f"cbs_low_level_max_iter={budget['cbs_low_level_max_iter']}, "
         f"pp_low_level_max_iter={budget['pp_low_level_max_iter']}, "
         f"max_velocity_mps={motion.max_velocity_mps}, "
-        f"stastar_connectivity=8_octile"
+        f"stastar_connectivity=library_default"
     )
     print(f"Priority order (longer path first): {priority_order_by_path_length(routes)}")

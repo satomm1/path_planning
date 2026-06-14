@@ -49,7 +49,7 @@ Comparison code lives in `social_path_planning/mapf_comparison/`:
 - **`metrics`** — unified SOC/makespan/path length plus **static** (obstacle) and **dynamic** (agent–agent) validation on scheduled paths.
 - **`viz/`** — route overlays, animations, verification JSON.
 
-CBS/PP and MILP each use **native path geometry**; travel times are comparable because all methods share the same **max velocity** (default **0.7 m/s**, overridable with `--max-velocity`). CBS/PP low-level STA* is **8-connected** with **octile** edge costs (10 per cardinal step, 14 per diagonal) so diagonal shortcuts are costlier than straight corridor travel. Path-bank A* is also 8-connected on the fine grid.
+CBS/PP use **discrete space-time MAPF** (library-default STA*, unit cost per timestep); primary coordination metrics are `soc_timesteps` and `makespan_timesteps`. Event MILP uses **continuous-time** kinematics with a shared **max velocity** cap (default **0.7 m/s**, overridable with `--max-velocity`). Cross-method time comparison is intentionally asymmetric — use method-appropriate units in tables.
 
 | Metric | Meaning |
 |--------|---------|
@@ -67,21 +67,26 @@ CBS/PP and MILP each use **native path geometry**; travel times are comparable b
 export PYTHONPATH=/path/to/path_planning/src:$PYTHONPATH
 python3 -m social_path_planning.benchmark_mapf_ensemble \
   --scenario sample2_default \
-  --pool-size 32 --num-agents 4 --num-trials 50 \
-  --output-prefix results/mapf_ensemble/sample2_n4_t50
+  --pool-size 32 \
+  --num-agents-list 3,4,5,6,7,8,9,10 \
+  --num-trials 50 \
+  --output-prefix results/mapf_ensemble/sample2_sweep \
+  --cbs-timeout-s 120 --pp-timeout-s 60 \
+  --resume
 ```
 
 1. **Pool prep (once, cached):** generates `pool_size` random start/goal routes and caches modified A* polylines in `{prefix}_path_pool.json`. Use `--pregen-only` to build the pool without running trials.
-2. **Each trial:** samples `num_agents` routes without replacement; CBS, PP, MILP SOC, and MILP makespan all use the same endpoints. MILP uses cached polylines (no per-trial social A*).
-3. **Outputs:** `{prefix}_trials.csv` (per trial × method), `{prefix}_summary.csv` (aggregated), `{prefix}_manifest.json`.
+2. **Each trial:** samples `num_agents` routes without replacement; runs **CBS**, **PP**, and **event MILP SOC** on the same endpoints. MILP uses cached polylines (no per-trial social A*).
+3. **Outputs:** `{prefix}_trials.csv` (append/checkpoint per trial), `{prefix}_summary.csv` (aggregated by `num_agents` × method), `{prefix}_manifest.json`. Use `--resume` to continue a sweep; `--reaggregate-only` to rebuild summary from trials CSV.
 
 | Summary field | Meaning |
 |---------------|---------|
-| `success_rate` / `failure_count` | Fraction and count of trials with no valid solution |
+| `num_agents` | Agent count for this summary row |
+| `success_rate` / `failure_count` / `timeout_count` | Trial outcome counts |
 | `avg_solver_runtime_s` | Mean planning time over **successful** trials only |
-| `avg_makespan_seconds` | Mean task makespan over **successful** trials only |
-| `pool_astar_build_s` (manifest) | One-time social/modified A* cost during pool prep; **excluded** from MILP trial averages |
-| `--milp-stride` | Subsample MILP waypoints every N vertices (`1` = full cached path, default) |
+| `avg_makespan_timesteps` | CBS/PP discrete makespan (primary cost metric) |
+| `avg_makespan_seconds` | Event MILP continuous makespan (primary cost metric) |
+| `pool_astar_build_s` (manifest) | One-time social/modified A* cost during pool prep |
 
 Outputs go under `results/mapf_comparison/` (detailed/summary CSV, manifest JSON, metrics bar chart, example map overlay). Re-plot from a prior run:
 

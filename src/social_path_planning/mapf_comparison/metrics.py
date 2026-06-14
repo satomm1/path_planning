@@ -8,6 +8,7 @@ import numpy as np
 
 from social_path_planning.mapf_adapter import (
     MapfPath,
+    cell_to_world,
     path_length_meters,
     validate_mapf_solution,
     validation_robot_radius_cells,
@@ -17,7 +18,6 @@ from social_path_planning.mapf_comparison.grid_traversability import (
     TraversabilityModel,
 )
 from social_path_planning.mapf_comparison.motion import MotionConfig, cell_size_m
-from social_path_planning.mapf_comparison.schedule import schedule_mapf_paths
 from social_path_planning.mapf_comparison.solution_metrics import compute_solution_metrics
 
 
@@ -86,24 +86,23 @@ def aggregate_mapf_metrics(
     makespan_steps = int(max(per_agent_steps)) if per_agent_steps else None
 
     motion_cfg = motion if motion is not None else MotionConfig()
-    grid_for_schedule = occ_grid if occ_grid is not None else _minimal_occ_grid(resolution)
+    grid_for_metrics = occ_grid if occ_grid is not None else _minimal_occ_grid(resolution)
 
-    soc_seconds = None
-    makespan_seconds = None
+    soc_seconds = float(soc_steps) if soc_steps is not None else None
+    makespan_seconds = float(makespan_steps) if makespan_steps is not None else None
     total_path_length_m = None
     per_agent_path_length_m: List[float] = []
-    per_agent_completion_s: List[float] = []
+    per_agent_completion_s = (
+        [float(t) for t in per_agent_steps] if per_agent_steps else []
+    )
 
     if valid_paths and resolution > 0:
-        world_paths, time_lists = schedule_mapf_paths(
-            grid_for_schedule, paths, ds, motion_cfg
-        )
-        sol = compute_solution_metrics(world_paths, time_lists)
-        soc_seconds = sol["soc_seconds"]
-        makespan_seconds = sol["makespan_seconds"]
-        total_path_length_m = sol["total_path_length_m"]
-        per_agent_path_length_m = sol["per_agent_path_length_m"]
-        per_agent_completion_s = sol["per_agent_completion_s"]
+        world_paths = [
+            [cell_to_world(grid_for_metrics, (int(p[0]), int(p[1])), ds) for p in path]
+            for path in paths
+        ]
+        per_agent_path_length_m = [path_length_meters(wp) for wp in world_paths]
+        total_path_length_m = float(sum(per_agent_path_length_m))
 
     return {
         "success": bool(success),

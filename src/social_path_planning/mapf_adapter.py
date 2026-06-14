@@ -44,6 +44,8 @@ DEFAULT_ROBOT_DIAMETER_M = ROBOT_DIAMETER_M
 Coord = Tuple[int, int]
 MapfPath = np.ndarray  # shape (T, 2) integer positions per timestep
 
+_GRID_CONFIG_CACHE: dict[tuple, MapfGridConfig] = {}
+
 
 @dataclass(frozen=True)
 class MapfGridConfig:
@@ -129,9 +131,10 @@ def suggest_cbs_max_iter(
     ceiling: int = 5000,
 ) -> int:
     ds = max(1, int(downsample))
+    scaled_ceiling = int(min(20000, ceiling * max(1.0, num_agents / 4.0)))
     estimate = int(base * downsample_search_scale(ds) * max(1, num_agents) ** 0.5)
     floor = max(base, int(400 * downsample_search_scale(ds)))
-    return int(min(ceiling, max(floor, estimate)))
+    return int(min(scaled_ceiling, max(floor, estimate)))
 
 
 def resolve_mapf_search_budget(
@@ -145,14 +148,8 @@ def resolve_mapf_search_budget(
     cbs_max_iter: int = 0,
 ) -> dict:
     ds = max(1, int(downsample))
-    from social_path_planning.mapf_baselines.stastar_config import STA_LOW_LEVEL_ITER_SCALE
-
-    low_level = suggest_low_level_max_iter(starts, goals, num_agents=num_agents, downsample=ds)
     low_level = int(
-        min(
-            200000,
-            max(low_level, low_level * STA_LOW_LEVEL_ITER_SCALE),
-        )
+        min(200000, suggest_low_level_max_iter(starts, goals, num_agents=num_agents, downsample=ds))
     )
     if pp_low_level_max_iter > 0:
         low_level_pp = int(pp_low_level_max_iter)
@@ -264,9 +261,13 @@ def build_mapf_grid_config(
         crop_bounds = compute_crop_bounds(
             occ_grid, list(starts) + list(goals), crop_padding_cells, downsample=ds
         )
+    cache_key = (id(occ_grid), ds, policy, crop_bounds)
+    cached = _GRID_CONFIG_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     model = TraversabilityModel(occ_grid, downsample=ds, coarse_block_policy=policy)
     static_obstacles = model.static_obstacle_cells(crop_bounds)
-    return MapfGridConfig(
+    config = MapfGridConfig(
         grid_size=int(grid_size),
         robot_radius=mapf_robot_radius_cells(),
         static_obstacles=static_obstacles,
@@ -276,6 +277,8 @@ def build_mapf_grid_config(
         downsample=ds,
         coarse_block_policy=policy,
     )
+    _GRID_CONFIG_CACHE[cache_key] = config
+    return config
 
 
 def make_traversability_model(

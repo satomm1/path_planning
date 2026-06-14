@@ -7,7 +7,6 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 
 from social_path_planning.mapf_adapter import Coord, MapfGridConfig, MapfPath
-from social_path_planning.mapf_baselines.stastar_config import apply_stastar_connectivity
 
 CoordList = List[Coord]
 
@@ -44,7 +43,6 @@ def run_cbs(
     except ImportError as exc:
         raise ImportError("cbs-mapf is required: pip install cbs-mapf") from exc
 
-    apply_stastar_connectivity()
     planner = Planner(
         grid_size=grid_config.grid_size,
         robot_radius=grid_config.robot_radius,

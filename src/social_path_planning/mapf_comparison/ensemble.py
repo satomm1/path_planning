@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import traceback
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -15,9 +16,11 @@ from social_path_planning.benchmark_sparse_snapshots import (
 from social_path_planning.benchmark_sparse_snapshots import (
     _try_load_cached_astar_paths as try_load_cached_astar_paths,
 )
+from social_path_planning.mapf_comparison.metrics import aggregate_mapf_metrics, aggregate_milp_metrics
 from social_path_planning.mapf_comparison.motion import MotionConfig
 from social_path_planning.mapf_comparison.pipeline import (
     MapfRunConfig,
+    _format_solver_error_status,
     prepare_mapf_problem,
     run_event_milp_solver,
     run_mapf_solvers,
@@ -28,6 +31,8 @@ METHODS = (
     "pp_path_length",
     "event_milp_soc",
 )
+
+MAPF_METHODS = ("cbs", "pp_path_length")
 
 
 def sample_route_subset(
@@ -53,6 +58,8 @@ def load_cached_milp_routes(
     social_graph=None,
     heatmap_prefix=None,
     heatmap_file=None,
+    sparse_graph_threshold: float | None = None,
+    sparse_min_component_size: int | None = None,
 ) -> List[dict]:
     """
     Load MILP geometry from the path-bank cache only.
@@ -64,6 +71,8 @@ def load_cached_milp_routes(
         social_graph,
         heatmap_prefix=heatmap_prefix,
         heatmap_file=heatmap_file,
+        sparse_graph_threshold=sparse_graph_threshold,
+        sparse_min_component_size=sparse_min_component_size,
     )
     if mode == "vanilla":
         return list(routes)
@@ -90,6 +99,8 @@ def ensure_modified_path_pool(
     social_graph=None,
     heatmap_prefix=None,
     heatmap_file=None,
+    sparse_graph_threshold: float | None = None,
+    sparse_min_component_size: int | None = None,
     refresh: bool = False,
 ) -> Tuple[List[dict], dict]:
     """
@@ -128,8 +139,9 @@ def ensure_modified_path_pool(
             refresh=refresh,
             max_resample_attempts=max_attempts,
             resample_seed=int(benchmark_seed) + 1_000_003,
+            sparse_graph_threshold=sparse_graph_threshold,
+            sparse_min_component_size=sparse_min_component_size,
         )
-        # Reload so resampled endpoints and vanilla bank paths stay in sync for trials.
         pool, bank_meta = load_or_generate_path_bank(
             occ_grid=occ_grid,
             statespace_hi=statespace_hi,
@@ -172,6 +184,8 @@ def _trial_row(
         "runtime_s": metrics.get("runtime_s"),
         "soc_seconds": metrics.get("soc_seconds"),
         "makespan_seconds": metrics.get("makespan_seconds"),
+        "soc_timesteps": metrics.get("soc_timesteps"),
+        "makespan_timesteps": metrics.get("makespan_timesteps"),
         "total_path_length_m": metrics.get("total_path_length_m"),
         "conflict_count": metrics.get("conflict_count"),
         "error_type": metrics.get("error_type"),
@@ -180,6 +194,27 @@ def _trial_row(
     if extra:
         row.update(extra)
     return row
+
+
+def _error_metrics_for_method(method: str, exc: BaseException, *, motion: MotionConfig) -> dict:
+    status = _format_solver_error_status(exc)
+    if method in MAPF_METHODS:
+        return aggregate_mapf_metrics(
+            [],
+            0,
+            0.0,
+            0.0,
+            status,
+            downsample=1,
+            motion=motion,
+        )
+    return aggregate_milp_metrics(
+        None,
+        0.0,
+        status,
+        norm=1,
+        motion=motion,
+    )
 
 
 def run_ensemble_trial(
@@ -196,6 +231,9 @@ def run_ensemble_trial(
     run_event_milp: bool = True,
     print_event_milp_constraints: bool = False,
     print_event_milp_constraints_on_error: bool = True,
+    fail_soft: bool = True,
+    sparse_graph_threshold: float | None = None,
+    sparse_min_component_size: int | None = None,
     *,
     social_graph=None,
     heatmap_prefix=None,
@@ -204,55 +242,64 @@ def run_ensemble_trial(
     """Run one ensemble trial; return detailed rows for all methods."""
     rng = np.random.default_rng(trial_seed)
     stage_records, route_ids = sample_route_subset(pool, num_agents, rng)
-
-    grid_config, starts, goals, budget = prepare_mapf_problem(
-        occ_grid, stage_records, mapf_cfg
-    )
-    solver_results = run_mapf_solvers(
-        occ_grid,
-        stage_records,
-        grid_config,
-        starts,
-        goals,
-        budget,
-        mapf_cfg,
-        verbose=False,
-    )
-
     rows: List[dict] = []
 
-    if "cbs" in solver_results:
-        rows.append(
-            _trial_row(
-                trial_id,
-                trial_seed,
-                route_ids,
-                "cbs",
-                solver_results["cbs"]["metrics"],
-            )
+    try:
+        grid_config, starts, goals, budget = prepare_mapf_problem(
+            occ_grid, stage_records, mapf_cfg
         )
-    if "pp" in solver_results:
-        pp_entry = solver_results["pp"]
-        rows.append(
-            _trial_row(
-                trial_id,
-                trial_seed,
-                route_ids,
-                "pp_path_length",
-                pp_entry["metrics"],
-                extra={"priority_order": pp_entry.get("priority_order")},
-            )
+        solver_results = run_mapf_solvers(
+            occ_grid,
+            stage_records,
+            grid_config,
+            starts,
+            goals,
+            budget,
+            mapf_cfg,
+            verbose=False,
         )
+    except Exception as exc:
+        if not fail_soft:
+            raise
+        print(
+            f"MAPF setup/solve failed for trial_id={trial_id}: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+        for method in MAPF_METHODS:
+            metrics = _error_metrics_for_method(method, exc, motion=motion)
+            metrics["error_type"] = type(exc).__name__
+            metrics["error_message"] = str(exc)
+            rows.append(
+                _trial_row(trial_id, trial_seed, route_ids, method, metrics)
+            )
+        solver_results = {}
+    else:
+        if "cbs" in solver_results:
+            rows.append(
+                _trial_row(
+                    trial_id,
+                    trial_seed,
+                    route_ids,
+                    "cbs",
+                    solver_results["cbs"]["metrics"],
+                )
+            )
+        if "pp" in solver_results:
+            pp_entry = solver_results["pp"]
+            rows.append(
+                _trial_row(
+                    trial_id,
+                    trial_seed,
+                    route_ids,
+                    "pp_path_length",
+                    pp_entry["metrics"],
+                    extra={"priority_order": pp_entry.get("priority_order")},
+                )
+            )
 
     if run_event_milp:
-        milp_routes = load_cached_milp_routes(
-            stage_records,
-            milp_astar_mode,
-            path_bank_path,
-            social_graph=social_graph,
-            heatmap_prefix=heatmap_prefix,
-            heatmap_file=heatmap_file,
-        )
         event_context = {
             "trial_id": trial_id,
             "trial_seed": trial_seed,
@@ -266,98 +313,179 @@ def run_ensemble_trial(
                 f"(trial_id={trial_id}, trial_seed={trial_seed}, route_ids={route_ids}) ===",
                 flush=True,
             )
-        event_soc = run_event_milp_solver(
-            occ_grid,
-            milp_routes,
-            norm=1,
-            motion=motion,
-            stride=milp_stride,
-            verbose=False,
-            print_constraints=print_event_milp_constraints,
-            print_constraints_on_error=print_event_milp_constraints_on_error,
-            error_context={**event_context, "method": "event_milp_soc", "norm": 1},
-        )
-        rows.append(
-            _trial_row(
-                trial_id,
-                trial_seed,
-                route_ids,
-                "event_milp_soc",
-                event_soc["metrics"],
-                extra={
-                    "interest_waypoint_count": event_soc.get("interest_waypoint_count"),
-                    "encounter_count": event_soc.get("encounter_count"),
-                    "binary_z_count": event_soc.get("binary_z_count"),
-                },
+        try:
+            milp_routes = load_cached_milp_routes(
+                stage_records,
+                milp_astar_mode,
+                path_bank_path,
+                social_graph=social_graph,
+                heatmap_prefix=heatmap_prefix,
+                heatmap_file=heatmap_file,
+                sparse_graph_threshold=sparse_graph_threshold,
+                sparse_min_component_size=sparse_min_component_size,
             )
-        )
+            event_soc = run_event_milp_solver(
+                occ_grid,
+                milp_routes,
+                norm=1,
+                motion=motion,
+                stride=milp_stride,
+                verbose=False,
+                print_constraints=print_event_milp_constraints,
+                print_constraints_on_error=print_event_milp_constraints_on_error,
+                error_context={**event_context, "method": "event_milp_soc", "norm": 1},
+            )
+            rows.append(
+                _trial_row(
+                    trial_id,
+                    trial_seed,
+                    route_ids,
+                    "event_milp_soc",
+                    event_soc["metrics"],
+                    extra={
+                        "interest_waypoint_count": event_soc.get("interest_waypoint_count"),
+                        "encounter_count": event_soc.get("encounter_count"),
+                        "binary_z_count": event_soc.get("binary_z_count"),
+                    },
+                )
+            )
+        except Exception as exc:
+            if not fail_soft:
+                raise
+            print(
+                f"Event MILP failed for trial_id={trial_id}: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
+            metrics = _error_metrics_for_method("event_milp_soc", exc, motion=motion)
+            metrics["error_type"] = type(exc).__name__
+            metrics["error_message"] = str(exc)
+            rows.append(
+                _trial_row(
+                    trial_id,
+                    trial_seed,
+                    route_ids,
+                    "event_milp_soc",
+                    metrics,
+                )
+            )
 
     return rows
 
 
+def _aggregate_group(rows: Sequence[dict]) -> dict:
+    num_trials = len(rows)
+    successes = [r for r in rows if r.get("success")]
+    failures = [r for r in rows if not r.get("success")]
+    timeouts = [r for r in rows if r.get("status") == "timeout"]
+    success_count = len(successes)
+    failure_count = len(failures)
+    timeout_count = len(timeouts)
+    success_rate = float(success_count / num_trials) if num_trials else 0.0
+
+    def _floats(key: str, source: Sequence[dict]) -> List[float]:
+        out: List[float] = []
+        for r in source:
+            val = r.get(key)
+            if val is not None and val != "":
+                out.append(float(val))
+        return out
+
+    solver_times = _floats("solver_runtime_s", successes)
+    makespans_s = _floats("makespan_seconds", successes)
+    socs_s = _floats("soc_seconds", successes)
+    makespans_t = _floats("makespan_timesteps", successes)
+    socs_t = _floats("soc_timesteps", successes)
+    path_lens = _floats("total_path_length_m", successes)
+
+    def _mean(vals: List[float]) -> float | None:
+        return float(np.mean(vals)) if vals else None
+
+    def _std(vals: List[float]) -> float | None:
+        return float(np.std(vals)) if len(vals) > 1 else None
+
+    def _median(vals: List[float]) -> float | None:
+        return float(np.median(vals)) if vals else None
+
+    return {
+        "num_trials": num_trials,
+        "success_count": success_count,
+        "failure_count": failure_count,
+        "timeout_count": timeout_count,
+        "success_rate": success_rate,
+        "avg_solver_runtime_s": _mean(solver_times),
+        "std_solver_runtime_s": _std(solver_times),
+        "median_solver_runtime_s": _median(solver_times),
+        "avg_makespan_seconds": _mean(makespans_s),
+        "std_makespan_seconds": _std(makespans_s),
+        "avg_soc_seconds": _mean(socs_s),
+        "std_soc_seconds": _std(socs_s),
+        "avg_makespan_timesteps": _mean(makespans_t),
+        "std_makespan_timesteps": _std(makespans_t),
+        "avg_soc_timesteps": _mean(socs_t),
+        "std_soc_timesteps": _std(socs_t),
+        "avg_total_path_length_m": _mean(path_lens),
+        "std_total_path_length_m": _std(path_lens),
+    }
+
+
 def aggregate_ensemble_metrics(trial_rows: Sequence[dict]) -> List[dict]:
     """
-    Aggregate per-method statistics over trials.
+    Aggregate statistics grouped by ``(num_agents, method)``.
 
-    Averages for solver time and makespan use successful trials only.
+    Averages use successful trials only.
     """
-    by_method: Dict[str, List[dict]] = {m: [] for m in METHODS}
+    groups: Dict[Tuple[int, str], List[dict]] = {}
     for row in trial_rows:
         method = row.get("method")
-        if method in by_method:
-            by_method[method].append(row)
+        if method not in METHODS:
+            continue
+        key = (int(row.get("num_agents", 0)), str(method))
+        groups.setdefault(key, []).append(row)
 
     summary: List[dict] = []
-    for method in METHODS:
-        rows = by_method[method]
-        if not rows:
-            continue
-        num_trials = len(rows)
-        successes = [r for r in rows if r.get("success")]
-        failures = [r for r in rows if not r.get("success")]
-        success_count = len(successes)
-        failure_count = len(failures)
-        success_rate = float(success_count / num_trials) if num_trials else 0.0
-
-        solver_times = [
-            float(r["solver_runtime_s"])
-            for r in successes
-            if r.get("solver_runtime_s") is not None
-        ]
-        makespans = [
-            float(r["makespan_seconds"])
-            for r in successes
-            if r.get("makespan_seconds") is not None
-        ]
-
-        entry: Dict[str, Any] = {
+    for (num_agents, method) in sorted(groups.keys()):
+        entry = {
+            "num_agents": num_agents,
             "method": method,
-            "num_trials": num_trials,
-            "success_count": success_count,
-            "failure_count": failure_count,
-            "success_rate": success_rate,
-            "avg_solver_runtime_s": float(np.mean(solver_times)) if solver_times else None,
-            "std_solver_runtime_s": float(np.std(solver_times)) if len(solver_times) > 1 else None,
-            "avg_makespan_seconds": float(np.mean(makespans)) if makespans else None,
-            "std_makespan_seconds": float(np.std(makespans)) if len(makespans) > 1 else None,
+            **_aggregate_group(groups[(num_agents, method)]),
         }
         summary.append(entry)
     return summary
 
 
 def print_ensemble_summary(summary_rows: Sequence[dict], pool_astar_build_s: float) -> None:
-    """Print a compact table for console reporting."""
+    """Print a compact grid: agent count blocks with per-method stats."""
     print(f"\nPool A* build time (excluded from event MILP trial averages): {pool_astar_build_s:.2f}s")
-    print(f"{'Method':<18} {'Success%':>9} {'Avg solver s':>13} {'Avg makespan s':>15} {'Failures':>9}")
-    print("-" * 68)
+    if not summary_rows:
+        print("No summary rows.")
+        return
+
+    by_n: Dict[int, List[dict]] = {}
     for row in summary_rows:
-        sr = row.get("success_rate")
-        sr_pct = f"{100.0 * sr:.1f}" if sr is not None else "n/a"
-        avg_rt = row.get("avg_solver_runtime_s")
-        avg_ms = row.get("avg_makespan_seconds")
-        rt_str = f"{avg_rt:.3f}" if avg_rt is not None else "n/a"
-        ms_str = f"{avg_ms:.3f}" if avg_ms is not None else "n/a"
+        by_n.setdefault(int(row["num_agents"]), []).append(row)
+
+    for num_agents in sorted(by_n):
+        print(f"\n--- num_agents={num_agents} ---")
         print(
-            f"{row['method']:<18} {sr_pct:>8}% {rt_str:>13} {ms_str:>15} "
-            f"{row.get('failure_count', 0):>9}"
+            f"{'Method':<18} {'Success%':>9} {'Timeouts':>9} {'Avg solver s':>13} "
+            f"{'Avg cost':>12}"
         )
+        print("-" * 72)
+        for row in by_n[num_agents]:
+            sr = row.get("success_rate")
+            sr_pct = f"{100.0 * sr:.1f}" if sr is not None else "n/a"
+            avg_rt = row.get("avg_solver_runtime_s")
+            rt_str = f"{avg_rt:.3f}" if avg_rt is not None else "n/a"
+            method = row["method"]
+            if method in MAPF_METHODS:
+                cost = row.get("avg_makespan_timesteps")
+                cost_str = f"{cost:.1f} steps" if cost is not None else "n/a"
+            else:
+                cost = row.get("avg_makespan_seconds")
+                cost_str = f"{cost:.3f} s" if cost is not None else "n/a"
+            print(
+                f"{method:<18} {sr_pct:>8}% {row.get('timeout_count', 0):>9} "
+                f"{rt_str:>13} {cost_str:>12}"
+            )

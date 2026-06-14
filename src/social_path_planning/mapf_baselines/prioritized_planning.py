@@ -7,7 +7,6 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import numpy as np
 
 from social_path_planning.mapf_adapter import Coord, MapfGridConfig, MapfPath, path_length_meters
-from social_path_planning.mapf_baselines.stastar_config import apply_stastar_connectivity
 
 CoordList = List[Coord]
 
@@ -61,7 +60,6 @@ def run_prioritized_planning(
         raise ImportError("space-time-astar (stastar) is required: pip install cbs-mapf") from exc
 
     order = priority_order_by_path_length(routes)
-    apply_stastar_connectivity()
     st_planner = STPlanner(
         grid_config.grid_size,
         grid_config.robot_radius,

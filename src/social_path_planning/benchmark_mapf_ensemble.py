@@ -5,12 +5,10 @@ Multi-trial MAPF ensemble benchmark: pooled routes, random agent subsets, averag
 from __future__ import annotations
 
 import argparse
-import csv
 import hashlib
 import json
 import sys
 import time
-import traceback
 from pathlib import Path
 
 import numpy as np
@@ -22,6 +20,12 @@ from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 from social_path_planning.utils import snap_to_grid
 
 _MODULE_DIR = Path(__file__).resolve().parent
+from social_path_planning.mapf_comparison.checkpoint import (
+    append_trial_rows,
+    load_completed_keys,
+    load_trial_rows,
+    write_csv as checkpoint_write_csv,
+)
 from social_path_planning.mapf_comparison.ensemble import (
     aggregate_ensemble_metrics,
     ensure_modified_path_pool,
@@ -76,6 +80,10 @@ def _file_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _parse_int_list(text: str) -> list[int]:
+    return [int(x.strip()) for x in text.split(",") if x.strip()]
+
+
 def _trial_fieldnames():
     return [
         "trial_id",
@@ -89,6 +97,8 @@ def _trial_fieldnames():
         "runtime_s",
         "soc_seconds",
         "makespan_seconds",
+        "soc_timesteps",
+        "makespan_timesteps",
         "total_path_length_m",
         "conflict_count",
         "priority_order",
@@ -102,15 +112,26 @@ def _trial_fieldnames():
 
 def _summary_fieldnames():
     return [
+        "num_agents",
         "method",
         "num_trials",
         "success_count",
         "failure_count",
+        "timeout_count",
         "success_rate",
         "avg_solver_runtime_s",
         "std_solver_runtime_s",
+        "median_solver_runtime_s",
         "avg_makespan_seconds",
         "std_makespan_seconds",
+        "avg_soc_seconds",
+        "std_soc_seconds",
+        "avg_makespan_timesteps",
+        "std_makespan_timesteps",
+        "avg_soc_timesteps",
+        "std_soc_timesteps",
+        "avg_total_path_length_m",
+        "std_total_path_length_m",
     ]
 
 
@@ -137,6 +158,8 @@ def _viz_event_waypoints_for_trial(
     social_graph=None,
     heatmap_prefix=None,
     heatmap_file=None,
+    sparse_graph_threshold: float | None = None,
+    sparse_min_component_size: int | None = None,
 ):
     """Analyze and plot event interest waypoints for one trial's sampled MILP paths."""
     from social_path_planning.event_multi_planning import analyze_event_paths, viz_event_waypoints
@@ -151,6 +174,8 @@ def _viz_event_waypoints_for_trial(
         social_graph=social_graph,
         heatmap_prefix=heatmap_prefix,
         heatmap_file=heatmap_file,
+        sparse_graph_threshold=sparse_graph_threshold,
+        sparse_min_component_size=sparse_min_component_size,
     )
     paths = [
         subsample_path_by_stride(list(route["path"]), milp_stride) for route in milp_routes
@@ -168,13 +193,66 @@ def _viz_event_waypoints_for_trial(
     )
 
 
-def _write_csv(path: Path, rows, fieldnames):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        for row in rows:
-            writer.writerow(row)
+def _write_manifest(
+    manifest_json: Path,
+    *,
+    run_id: str,
+    config: dict,
+    pool_meta: dict,
+    path_bank_path: Path,
+    pool_astar_build_s: float,
+    trial_loop_s: float,
+    summary_rows: list,
+    trial_rows_count: int,
+) -> None:
+    try:
+        import cbs_mapf
+
+        cbs_version = getattr(cbs_mapf, "__version__", "unknown")
+    except ImportError:
+        cbs_version = None
+
+    manifest = {
+        "run_id": run_id,
+        "config": config,
+        "path_bank": pool_meta,
+        "path_bank_sha256": _file_sha256(path_bank_path) if path_bank_path.exists() else None,
+        "pool_astar_build_s": pool_astar_build_s,
+        "trial_loop_s": trial_loop_s,
+        "trial_rows_count": int(trial_rows_count),
+        "summary": summary_rows,
+        "libraries": {"cbs_mapf": cbs_version},
+        "comparison_notes": {
+            "cbs_pp": "Discrete space-time MAPF (library-default STA*, unit cost per timestep).",
+            "event_milp_soc": "Continuous-time coordination with max-velocity kinematic constraints.",
+            "cross_method_cost": (
+                "Use soc_timesteps/makespan_timesteps for CBS/PP and "
+                "soc_seconds/makespan_seconds for event MILP."
+            ),
+        },
+        "timing_notes": {
+            "pool_astar_build_s": (
+                "One-time modified/vanilla A* path generation during pool prep; "
+                "excluded from event MILP trial averages."
+            ),
+            "avg_solver_runtime_s": (
+                "Mean over successful trials only. "
+                "Event MILP: cvxpy solve only (excludes constraint build). "
+                "CBS/PP: full planner wall time."
+            ),
+            "runtime_s": (
+                "Per-trial total wall time. Event MILP includes analysis, "
+                "constraint construction, solve, and time expansion."
+            ),
+        },
+        "performance_notes": {
+            "mapf_grid_cache": "static_obstacles cached per (occ_grid, downsample, crop_bounds, policy)",
+            "cbs_max_iter_ceiling": "Scales with num_agents (base ceiling 5000, up to 20000)",
+        },
+    }
+    manifest_json.parent.mkdir(parents=True, exist_ok=True)
+    with manifest_json.open("w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
 
 
 def run_mapf_ensemble(
@@ -198,6 +276,8 @@ def run_mapf_ensemble(
     milp_astar_mode: str = "modified",
     heatmap_prefix: str | None = None,
     heatmap_file: str | None = None,
+    sparse_graph_threshold: float = 2.0,
+    sparse_min_component_size: int = 15,
     refresh_social_bank: bool = False,
     pregen_only: bool = False,
     milp_stride: int = 1,
@@ -206,11 +286,38 @@ def run_mapf_ensemble(
     print_event_milp_constraints: bool = False,
     print_event_milp_constraints_every: int = 1,
     print_event_milp_constraints_on_error: bool = True,
+    num_agents_list: list[int] | None = None,
+    resume: bool = False,
+    resume_partial: bool = False,
+    reaggregate_only: bool = False,
+    fail_soft: bool = True,
+    cbs_timeout_s: float = 0.0,
+    pp_timeout_s: float = 0.0,
 ):
-    if pool_size < num_agents:
-        raise ValueError(f"pool_size ({pool_size}) must be >= num_agents ({num_agents})")
-    if num_trials < 1 and not pregen_only:
+    agents_list = sorted(set(num_agents_list or [num_agents]))
+    if not agents_list:
+        raise ValueError("num_agents_list must contain at least one value")
+    max_agents = max(agents_list)
+    if pool_size < max_agents:
+        raise ValueError(
+            f"pool_size ({pool_size}) must be >= max num_agents ({max_agents})"
+        )
+    if num_trials < 1 and not pregen_only and not reaggregate_only:
         raise ValueError("num_trials must be >= 1")
+
+    output_prefix_path = Path(output_prefix)
+    trials_csv = Path(f"{output_prefix}_trials.csv")
+    summary_csv = Path(f"{output_prefix}_summary.csv")
+    manifest_json = Path(f"{output_prefix}_manifest.json")
+
+    if reaggregate_only:
+        trial_rows = load_trial_rows(trials_csv)
+        if not trial_rows:
+            raise FileNotFoundError(f"No trial rows found at {trials_csv}")
+        summary_rows = aggregate_ensemble_metrics(trial_rows)
+        checkpoint_write_csv(summary_csv, summary_rows, _summary_fieldnames())
+        print(f"Reaggregated {len(trial_rows)} trial rows -> {summary_csv}")
+        return trial_rows, summary_rows
 
     motion = (
         MotionConfig(max_velocity_mps=max_velocity_mps)
@@ -220,7 +327,6 @@ def run_mapf_ensemble(
 
     wall_cache_path = _wall_distance_cache_path(scenario_name)
     occ_grid, _, map_resolution, statespace_hi = build_occ_grid(scenario_name)
-    output_prefix_path = Path(output_prefix)
     if path_bank_path is None:
         path_bank_path = output_prefix_path.parent / f"{output_prefix_path.name}_path_pool.json"
     path_bank_path = Path(path_bank_path)
@@ -233,8 +339,14 @@ def run_mapf_ensemble(
             occ_grid,
             heatmap_prefix=heatmap_prefix,
             heatmap_path=heatmap_file,
+            sparse_graph_threshold=sparse_graph_threshold,
+            sparse_min_component_size=sparse_min_component_size,
         )
-        print("MILP geometry: modified A* on heatmap sparse graph")
+        print(
+            f"MILP geometry: modified A* on heatmap sparse graph "
+            f"(threshold={sparse_graph_threshold}, "
+            f"min_component_size={sparse_min_component_size})"
+        )
     elif milp_astar_mode == "modified":
         print("MILP geometry: modified A* (rightness penalty)")
     else:
@@ -254,6 +366,8 @@ def run_mapf_ensemble(
         social_graph=social_graph,
         heatmap_prefix=heatmap_prefix,
         heatmap_file=heatmap_file,
+        sparse_graph_threshold=sparse_graph_threshold,
+        sparse_min_component_size=sparse_min_component_size,
         refresh=refresh_social_bank,
     )
     pool_astar_build_s = float(pool_meta.get("pool_astar_build_s", 0.0))
@@ -274,39 +388,64 @@ def run_mapf_ensemble(
         motion=motion,
         run_cbs=True,
         run_pp=True,
+        cbs_timeout_s=float(cbs_timeout_s),
+        pp_timeout_s=float(pp_timeout_s),
     )
 
+    agents_tag = "-".join(str(n) for n in agents_list)
     run_id = (
-        f"ensemble_{scenario_name}_pool{pool_size}_n{num_agents}_"
+        f"ensemble_{scenario_name}_pool{pool_size}_agents{agents_tag}_"
         f"trials{num_trials}_seed{benchmark_seed}_trial{trial_seed}"
     )
 
-    trial_rows = []
-    t_loop_start = time.perf_counter()
-    for trial_id in range(num_trials):
-        this_trial_seed = int(trial_seed + trial_id)
-        if (trial_id + 1) % 10 == 0 or trial_id == 0:
-            print(f"Trial {trial_id + 1}/{num_trials} (seed={this_trial_seed})")
-        if viz_event_waypoints and trial_id % int(viz_event_every) == 0:
-            _viz_event_waypoints_for_trial(
-                trial_id=trial_id,
-                trial_seed=this_trial_seed,
-                occ_grid=occ_grid,
-                pool=pool,
-                num_agents=num_agents,
-                path_bank_path=path_bank_path,
-                milp_astar_mode=milp_astar_mode,
-                milp_stride=milp_stride,
-                output_prefix=output_prefix,
-                social_graph=social_graph,
-                heatmap_prefix=heatmap_prefix,
-                heatmap_file=heatmap_file,
-            )
-        print_constraints_this_trial = (
-            print_event_milp_constraints
-            and trial_id % int(print_event_milp_constraints_every) == 0
+    completed = (
+        load_completed_keys(
+            trials_csv,
+            require_all_methods=not resume_partial,
         )
-        try:
+        if resume
+        else set()
+    )
+    if resume and completed:
+        print(f"Resume: skipping {len(completed)} completed (num_agents, trial_id) pairs")
+
+    existing_rows = load_trial_rows(trials_csv) if resume else []
+    new_rows: list[dict] = []
+    t_loop_start = time.perf_counter()
+
+    for num_agents in agents_list:
+        print(f"\n=== Agent count N={num_agents} ===")
+        for trial_id in range(num_trials):
+            key = (int(num_agents), int(trial_id))
+            if key in completed:
+                continue
+            this_trial_seed = int(trial_seed + trial_id)
+            if (trial_id + 1) % 10 == 0 or trial_id == 0:
+                print(
+                    f"N={num_agents} trial {trial_id + 1}/{num_trials} "
+                    f"(seed={this_trial_seed})"
+                )
+            if viz_event_waypoints and trial_id % int(viz_event_every) == 0:
+                _viz_event_waypoints_for_trial(
+                    trial_id=trial_id,
+                    trial_seed=this_trial_seed,
+                    occ_grid=occ_grid,
+                    pool=pool,
+                    num_agents=num_agents,
+                    path_bank_path=path_bank_path,
+                    milp_astar_mode=milp_astar_mode,
+                    milp_stride=milp_stride,
+                    output_prefix=output_prefix,
+                    social_graph=social_graph,
+                    heatmap_prefix=heatmap_prefix,
+                    heatmap_file=heatmap_file,
+                    sparse_graph_threshold=sparse_graph_threshold,
+                    sparse_min_component_size=sparse_min_component_size,
+                )
+            print_constraints_this_trial = (
+                print_event_milp_constraints
+                and trial_id % int(print_event_milp_constraints_every) == 0
+            )
             rows = run_ensemble_trial(
                 trial_id,
                 this_trial_seed,
@@ -320,89 +459,66 @@ def run_mapf_ensemble(
                 milp_stride=milp_stride,
                 print_event_milp_constraints=print_constraints_this_trial,
                 print_event_milp_constraints_on_error=print_event_milp_constraints_on_error,
+                fail_soft=fail_soft,
+                sparse_graph_threshold=sparse_graph_threshold,
+                sparse_min_component_size=sparse_min_component_size,
                 social_graph=social_graph,
                 heatmap_prefix=heatmap_prefix,
                 heatmap_file=heatmap_file,
             )
-            trial_rows.extend(rows)
-        except Exception as exc:
-            print(
-                f"\n--- Ensemble trial {trial_id + 1}/{num_trials} failed "
-                f"(seed={this_trial_seed}) ---\n"
-                f"{type(exc).__name__}: {exc}",
-                flush=True,
-            )
-            traceback.print_exception(type(exc), exc, exc.__traceback__)
-            raise
+            new_rows.extend(rows)
+            append_trial_rows(trials_csv, rows, _trial_fieldnames())
+
     trial_loop_s = float(time.perf_counter() - t_loop_start)
+    trial_rows = existing_rows + new_rows if resume else new_rows
+    if resume and not new_rows:
+        trial_rows = load_trial_rows(trials_csv)
 
     summary_rows = aggregate_ensemble_metrics(trial_rows)
+    checkpoint_write_csv(summary_csv, summary_rows, _summary_fieldnames())
 
-    trials_csv = Path(f"{output_prefix}_trials.csv")
-    summary_csv = Path(f"{output_prefix}_summary.csv")
-    manifest_json = Path(f"{output_prefix}_manifest.json")
-
-    _write_csv(trials_csv, trial_rows, _trial_fieldnames())
-    _write_csv(summary_csv, summary_rows, _summary_fieldnames())
-
-    try:
-        import cbs_mapf
-
-        cbs_version = getattr(cbs_mapf, "__version__", "unknown")
-    except ImportError:
-        cbs_version = None
-
-    manifest = {
-        "run_id": run_id,
-        "config": {
-            "scenario_name": scenario_name,
-            "pool_size": int(pool_size),
-            "num_agents": int(num_agents),
-            "num_trials": int(num_trials),
-            "benchmark_seed": int(benchmark_seed),
-            "trial_seed": int(trial_seed),
-            "max_attempts": int(max_attempts),
-            "map_resolution": float(map_resolution),
-            "motion": motion.to_manifest_dict(),
-            "milp_astar_mode": milp_astar_mode,
-            "milp_stride": int(milp_stride),
-            "heatmap_prefix": heatmap_prefix,
-            "heatmap_file": heatmap_file,
-            "mapf_downsample": mapf_downsample,
-            "crop_padding_cells": int(crop_padding_cells),
-            "coarse_block_policy": coarse_block_policy,
-            "cbs_max_iter": int(cbs_max_iter),
-            "cbs_low_level_max_iter": int(cbs_low_level_max_iter),
-            "pp_low_level_max_iter": int(pp_low_level_max_iter),
-            "wall_distance_cache_path": str(wall_cache_path.resolve()),
-            "wall_distance_cache_used": bool(wall_cache_path.is_file()),
-        },
-        "path_bank": pool_meta,
-        "path_bank_sha256": _file_sha256(path_bank_path) if path_bank_path.exists() else None,
-        "pool_astar_build_s": pool_astar_build_s,
-        "trial_loop_s": trial_loop_s,
-        "summary": summary_rows,
-        "libraries": {"cbs_mapf": cbs_version},
-        "timing_notes": {
-            "pool_astar_build_s": (
-                "One-time modified/vanilla A* path generation during pool prep; "
-                "excluded from avg_milp_solver_runtime_s in trial summary."
-            ),
-            "avg_solver_runtime_s": (
-                "Mean over successful trials only. "
-                "Event MILP: cvxpy solve only (excludes constraint build). "
-                "CBS/PP: full planner wall time."
-            ),
-            "runtime_s": (
-                "Per-trial total wall time. Event MILP includes analysis, "
-                "constraint construction, solve, and time expansion."
-            ),
-            "avg_makespan_seconds": "Mean over successful trials only.",
-        },
+    config = {
+        "scenario_name": scenario_name,
+        "pool_size": int(pool_size),
+        "num_agents_list": agents_list,
+        "num_trials": int(num_trials),
+        "benchmark_seed": int(benchmark_seed),
+        "trial_seed": int(trial_seed),
+        "max_attempts": int(max_attempts),
+        "map_resolution": float(map_resolution),
+        "motion": motion.to_manifest_dict(),
+        "milp_astar_mode": milp_astar_mode,
+        "milp_stride": int(milp_stride),
+        "heatmap_prefix": heatmap_prefix,
+        "heatmap_file": heatmap_file,
+        "sparse_graph_threshold": float(sparse_graph_threshold),
+        "sparse_min_component_size": int(sparse_min_component_size),
+        "mapf_downsample": mapf_downsample,
+        "crop_padding_cells": int(crop_padding_cells),
+        "coarse_block_policy": coarse_block_policy,
+        "cbs_max_iter": int(cbs_max_iter),
+        "cbs_low_level_max_iter": int(cbs_low_level_max_iter),
+        "pp_low_level_max_iter": int(pp_low_level_max_iter),
+        "cbs_max_process": int(cbs_max_process),
+        "cbs_timeout_s": float(cbs_timeout_s),
+        "pp_timeout_s": float(pp_timeout_s),
+        "fail_soft": bool(fail_soft),
+        "resume": bool(resume),
+        "resume_partial": bool(resume_partial),
+        "wall_distance_cache_path": str(wall_cache_path.resolve()),
+        "wall_distance_cache_used": bool(wall_cache_path.is_file()),
     }
-    manifest_json.parent.mkdir(parents=True, exist_ok=True)
-    with manifest_json.open("w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
+    _write_manifest(
+        manifest_json,
+        run_id=run_id,
+        config=config,
+        pool_meta=pool_meta,
+        path_bank_path=path_bank_path,
+        pool_astar_build_s=pool_astar_build_s,
+        trial_loop_s=trial_loop_s,
+        summary_rows=summary_rows,
+        trial_rows_count=len(trial_rows),
+    )
 
     print(f"\nSaved {trials_csv}")
     print(f"Saved {summary_csv}")
@@ -418,7 +534,12 @@ def main(argv=None):
     )
     parser.add_argument("--scenario", default="sample2_default")
     parser.add_argument("--pool-size", type=int, default=32, help="Routes to pregenerate in pool")
-    parser.add_argument("--num-agents", type=int, default=4, help="Agents sampled per trial")
+    parser.add_argument("--num-agents", type=int, default=4, help="Agents sampled per trial (single-N runs)")
+    parser.add_argument(
+        "--num-agents-list",
+        default=None,
+        help="Comma-separated agent counts for sweep (e.g. 3,4,5,6,7,8,9,10)",
+    )
     parser.add_argument("--num-trials", type=int, default=50, help="Number of random trials")
     parser.add_argument("--benchmark-seed", type=int, default=42, help="Seed for pool generation")
     parser.add_argument("--trial-seed", type=int, default=0, help="Base seed for trial sampling")
@@ -434,6 +555,24 @@ def main(argv=None):
     parser.add_argument("--cbs-low-level-max-iter", type=int, default=500)
     parser.add_argument("--cbs-max-process", type=int, default=1)
     parser.add_argument("--pp-low-level-max-iter", type=int, default=0, help="0 = auto")
+    parser.add_argument("--cbs-timeout-s", type=float, default=0.0, help="CBS wall-clock limit (0=off)")
+    parser.add_argument("--pp-timeout-s", type=float, default=0.0, help="PP wall-clock limit (0=off)")
+    parser.add_argument("--resume", action="store_true", help="Skip completed trials in existing CSV")
+    parser.add_argument(
+        "--resume-partial",
+        action="store_true",
+        help="With --resume, skip any (num_agents, trial_id) that has any method row",
+    )
+    parser.add_argument(
+        "--reaggregate-only",
+        action="store_true",
+        help="Rebuild summary CSV from existing trials CSV without running solvers",
+    )
+    parser.add_argument(
+        "--no-fail-soft",
+        action="store_true",
+        help="Abort on first trial exception instead of recording failure rows",
+    )
     parser.add_argument(
         "--max-velocity",
         type=float,
@@ -456,6 +595,18 @@ def main(argv=None):
     milp_group.add_argument("--milp-astar-vanilla", action="store_true")
     milp_group.add_argument("--heatmap-prefix", default=None)
     milp_group.add_argument("--heatmap-file", default=None)
+    milp_group.add_argument(
+        "--sparse-graph-threshold",
+        type=float,
+        default=2.0,
+        help="Min directional heat for a sparse-graph edge when using --heatmap-prefix/file (default: 2.0).",
+    )
+    milp_group.add_argument(
+        "--sparse-min-component-size",
+        type=int,
+        default=15,
+        help="Prune heatmap graph components smaller than this many nodes (default: 15).",
+    )
     milp_group.add_argument(
         "--refresh-social-bank",
         action="store_true",
@@ -506,10 +657,15 @@ def main(argv=None):
     if cli.print_event_milp_constraints_every < 1:
         parser.error("--print-event-milp-constraints-every must be >= 1.")
 
+    num_agents_list = (
+        _parse_int_list(cli.num_agents_list) if cli.num_agents_list else None
+    )
+
     run_mapf_ensemble(
         scenario_name=cli.scenario,
         pool_size=cli.pool_size,
         num_agents=cli.num_agents,
+        num_agents_list=num_agents_list,
         num_trials=cli.num_trials,
         benchmark_seed=cli.benchmark_seed,
         trial_seed=cli.trial_seed,
@@ -527,6 +683,8 @@ def main(argv=None):
         milp_astar_mode=cli.milp_astar_mode,
         heatmap_prefix=cli.heatmap_prefix,
         heatmap_file=cli.heatmap_file,
+        sparse_graph_threshold=cli.sparse_graph_threshold,
+        sparse_min_component_size=cli.sparse_min_component_size,
         refresh_social_bank=cli.refresh_social_bank,
         pregen_only=cli.pregen_only,
         milp_stride=cli.milp_stride,
@@ -535,6 +693,12 @@ def main(argv=None):
         print_event_milp_constraints=cli.print_event_milp_constraints,
         print_event_milp_constraints_every=cli.print_event_milp_constraints_every,
         print_event_milp_constraints_on_error=not cli.no_print_event_milp_constraints_on_error,
+        resume=cli.resume,
+        resume_partial=cli.resume_partial,
+        reaggregate_only=cli.reaggregate_only,
+        fail_soft=not cli.no_fail_soft,
+        cbs_timeout_s=cli.cbs_timeout_s,
+        pp_timeout_s=cli.pp_timeout_s,
     )
     return 0
 

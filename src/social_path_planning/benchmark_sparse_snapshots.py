@@ -358,6 +358,8 @@ def astar_path_cache_meta(
     heatmap_prefix=None,
     heatmap_file=None,
     rrt_config=None,
+    sparse_graph_threshold: float | None = None,
+    sparse_min_component_size: int | None = None,
 ):
     """Metadata describing how cached ``paths_by_mode`` polylines were produced."""
     if mode == "vanilla":
@@ -373,6 +375,12 @@ def astar_path_cache_meta(
             "solver": "heatmap_graph",
             "heatmap_prefix": heatmap_prefix,
             "heatmap_file": str(heatmap_file) if heatmap_file is not None else None,
+            "sparse_graph_threshold": float(sparse_graph_threshold)
+            if sparse_graph_threshold is not None
+            else None,
+            "sparse_min_component_size": int(sparse_min_component_size)
+            if sparse_min_component_size is not None
+            else None,
         }
     return {"mode": mode, "solver": "rightness_penalty"}
 
@@ -471,6 +479,8 @@ def get_or_compute_astar_paths(
     max_resample_attempts=500,
     resample_seed=None,
     rrt_kwargs=None,
+    sparse_graph_threshold: float | None = None,
+    sparse_min_component_size: int | None = None,
 ):
     """
     Use path-bank polylines for ``vanilla``; load or compute other modes and cache them
@@ -489,6 +499,8 @@ def get_or_compute_astar_paths(
         heatmap_prefix=heatmap_prefix,
         heatmap_file=heatmap_file,
         rrt_config=rrt_config,
+        sparse_graph_threshold=sparse_graph_threshold,
+        sparse_min_component_size=sparse_min_component_size,
     )
 
     if not refresh:
