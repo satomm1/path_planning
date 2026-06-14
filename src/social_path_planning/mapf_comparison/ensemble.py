@@ -16,7 +16,7 @@ from social_path_planning.benchmark_sparse_snapshots import (
 from social_path_planning.benchmark_sparse_snapshots import (
     _try_load_cached_astar_paths as try_load_cached_astar_paths,
 )
-from social_path_planning.mapf_comparison.metrics import aggregate_mapf_metrics, aggregate_milp_metrics
+from social_path_planning.mapf_comparison.checkpoint import coerce_bool, normalize_trial_row
 from social_path_planning.mapf_comparison.motion import MotionConfig
 from social_path_planning.mapf_comparison.pipeline import (
     MapfRunConfig,
@@ -26,13 +26,7 @@ from social_path_planning.mapf_comparison.pipeline import (
     run_mapf_solvers,
 )
 
-METHODS = (
-    "cbs",
-    "pp_path_length",
-    "event_milp_soc",
-)
-
-MAPF_METHODS = ("cbs", "pp_path_length")
+from social_path_planning.mapf_comparison.constants import MAPF_METHODS, METHODS
 
 
 def sample_route_subset(
@@ -234,72 +228,96 @@ def run_ensemble_trial(
     fail_soft: bool = True,
     sparse_graph_threshold: float | None = None,
     sparse_min_component_size: int | None = None,
+    methods_to_run: set[str] | None = None,
     *,
     social_graph=None,
     heatmap_prefix=None,
     heatmap_file=None,
 ) -> List[dict]:
     """Run one ensemble trial; return detailed rows for all methods."""
+    active_methods = set(METHODS) if methods_to_run is None else set(methods_to_run)
+    run_cbs = "cbs" in active_methods
+    run_pp = "pp_path_length" in active_methods
+    run_event = run_event_milp and "event_milp_soc" in active_methods
+
     rng = np.random.default_rng(trial_seed)
     stage_records, route_ids = sample_route_subset(pool, num_agents, rng)
     rows: List[dict] = []
 
-    try:
-        grid_config, starts, goals, budget = prepare_mapf_problem(
-            occ_grid, stage_records, mapf_cfg
+    if run_cbs or run_pp:
+        trial_mapf_cfg = MapfRunConfig(
+            downsample=mapf_cfg.downsample,
+            crop_padding_cells=mapf_cfg.crop_padding_cells,
+            coarse_block_policy=mapf_cfg.coarse_block_policy,
+            pp_low_level_max_iter=mapf_cfg.pp_low_level_max_iter,
+            cbs_low_level_max_iter=mapf_cfg.cbs_low_level_max_iter,
+            cbs_max_iter=mapf_cfg.cbs_max_iter,
+            cbs_max_process=mapf_cfg.cbs_max_process,
+            motion=mapf_cfg.motion,
+            run_cbs=run_cbs,
+            run_pp=run_pp,
+            crop=mapf_cfg.crop,
+            cbs_timeout_s=mapf_cfg.cbs_timeout_s,
+            pp_timeout_s=mapf_cfg.pp_timeout_s,
         )
-        solver_results = run_mapf_solvers(
-            occ_grid,
-            stage_records,
-            grid_config,
-            starts,
-            goals,
-            budget,
-            mapf_cfg,
-            verbose=False,
-        )
-    except Exception as exc:
-        if not fail_soft:
-            raise
-        print(
-            f"MAPF setup/solve failed for trial_id={trial_id}: "
-            f"{type(exc).__name__}: {exc}",
-            flush=True,
-        )
-        traceback.print_exception(type(exc), exc, exc.__traceback__)
-        for method in MAPF_METHODS:
-            metrics = _error_metrics_for_method(method, exc, motion=motion)
-            metrics["error_type"] = type(exc).__name__
-            metrics["error_message"] = str(exc)
-            rows.append(
-                _trial_row(trial_id, trial_seed, route_ids, method, metrics)
+        try:
+            grid_config, starts, goals, budget = prepare_mapf_problem(
+                occ_grid, stage_records, trial_mapf_cfg
             )
-        solver_results = {}
-    else:
-        if "cbs" in solver_results:
-            rows.append(
-                _trial_row(
-                    trial_id,
-                    trial_seed,
-                    route_ids,
-                    "cbs",
-                    solver_results["cbs"]["metrics"],
+            solver_results = run_mapf_solvers(
+                occ_grid,
+                stage_records,
+                grid_config,
+                starts,
+                goals,
+                budget,
+                trial_mapf_cfg,
+                verbose=False,
+            )
+        except Exception as exc:
+            if not fail_soft:
+                raise
+            print(
+                f"MAPF setup/solve failed for trial_id={trial_id}: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
+            for method in MAPF_METHODS:
+                if method not in active_methods:
+                    continue
+                metrics = _error_metrics_for_method(method, exc, motion=motion)
+                metrics["error_type"] = type(exc).__name__
+                metrics["error_message"] = str(exc)
+                rows.append(
+                    _trial_row(trial_id, trial_seed, route_ids, method, metrics)
                 )
-            )
-        if "pp" in solver_results:
-            pp_entry = solver_results["pp"]
-            rows.append(
-                _trial_row(
-                    trial_id,
-                    trial_seed,
-                    route_ids,
-                    "pp_path_length",
-                    pp_entry["metrics"],
-                    extra={"priority_order": pp_entry.get("priority_order")},
+            solver_results = {}
+        else:
+            if run_cbs and "cbs" in solver_results:
+                rows.append(
+                    _trial_row(
+                        trial_id,
+                        trial_seed,
+                        route_ids,
+                        "cbs",
+                        solver_results["cbs"]["metrics"],
+                    )
                 )
-            )
+            if run_pp and "pp" in solver_results:
+                pp_entry = solver_results["pp"]
+                rows.append(
+                    _trial_row(
+                        trial_id,
+                        trial_seed,
+                        route_ids,
+                        "pp_path_length",
+                        pp_entry["metrics"],
+                        extra={"priority_order": pp_entry.get("priority_order")},
+                    )
+                )
 
-    if run_event_milp:
+    if run_event:
         event_context = {
             "trial_id": trial_id,
             "trial_seed": trial_seed,
@@ -375,10 +393,11 @@ def run_ensemble_trial(
 
 
 def _aggregate_group(rows: Sequence[dict]) -> dict:
-    num_trials = len(rows)
-    successes = [r for r in rows if r.get("success")]
-    failures = [r for r in rows if not r.get("success")]
-    timeouts = [r for r in rows if r.get("status") == "timeout"]
+    normalized = [normalize_trial_row(row) for row in rows]
+    num_trials = len(normalized)
+    successes = [r for r in normalized if coerce_bool(r.get("success"))]
+    failures = [r for r in normalized if not coerce_bool(r.get("success"))]
+    timeouts = [r for r in normalized if r.get("status") == "timeout"]
     success_count = len(successes)
     failure_count = len(failures)
     timeout_count = len(timeouts)
@@ -438,6 +457,7 @@ def aggregate_ensemble_metrics(trial_rows: Sequence[dict]) -> List[dict]:
     """
     groups: Dict[Tuple[int, str], List[dict]] = {}
     for row in trial_rows:
+        row = normalize_trial_row(row)
         method = row.get("method")
         if method not in METHODS:
             continue

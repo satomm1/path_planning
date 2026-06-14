@@ -77,7 +77,7 @@ python3 -m social_path_planning.benchmark_mapf_ensemble \
 
 1. **Pool prep (once, cached):** generates `pool_size` random start/goal routes and caches modified A* polylines in `{prefix}_path_pool.json`. Use `--pregen-only` to build the pool without running trials.
 2. **Each trial:** samples `num_agents` routes without replacement; runs **CBS**, **PP**, and **event MILP SOC** on the same endpoints. MILP uses cached polylines (no per-trial social A*).
-3. **Outputs:** `{prefix}_trials.csv` (append/checkpoint per trial), `{prefix}_summary.csv` (aggregated by `num_agents` × method), `{prefix}_manifest.json`. Use `--resume` to continue a sweep; `--reaggregate-only` to rebuild summary from trials CSV.
+3. **Outputs:** `{prefix}_trials.csv` (append/checkpoint per trial), `{prefix}_summary.csv` (aggregated by `num_agents` × method), `{prefix}_manifest.json`. Use `--resume` to continue a sweep (skips trials where every method succeeded). Use `--retry-failures` to rerun only CBS/PP/event rows that failed or are missing (after fixing dependencies such as `cbs-mapf`). Use `--reaggregate-only` to rebuild summary from trials CSV without running solvers.
 
 | Summary field | Meaning |
 |---------------|---------|

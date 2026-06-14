@@ -22,7 +22,9 @@ from social_path_planning.utils import snap_to_grid
 _MODULE_DIR = Path(__file__).resolve().parent
 from social_path_planning.mapf_comparison.checkpoint import (
     append_trial_rows,
+    compact_trial_rows,
     load_completed_keys,
+    load_methods_to_retry,
     load_trial_rows,
     write_csv as checkpoint_write_csv,
 )
@@ -289,6 +291,7 @@ def run_mapf_ensemble(
     num_agents_list: list[int] | None = None,
     resume: bool = False,
     resume_partial: bool = False,
+    retry_failures: bool = False,
     reaggregate_only: bool = False,
     fail_soft: bool = True,
     cbs_timeout_s: float = 0.0,
@@ -311,12 +314,13 @@ def run_mapf_ensemble(
     manifest_json = Path(f"{output_prefix}_manifest.json")
 
     if reaggregate_only:
-        trial_rows = load_trial_rows(trials_csv)
+        trial_rows = compact_trial_rows(trials_csv, _trial_fieldnames())
         if not trial_rows:
             raise FileNotFoundError(f"No trial rows found at {trials_csv}")
         summary_rows = aggregate_ensemble_metrics(trial_rows)
         checkpoint_write_csv(summary_csv, summary_rows, _summary_fieldnames())
         print(f"Reaggregated {len(trial_rows)} trial rows -> {summary_csv}")
+        print_ensemble_summary(summary_rows, pool_astar_build_s=0.0)
         return trial_rows, summary_rows
 
     motion = (
@@ -398,18 +402,24 @@ def run_mapf_ensemble(
         f"trials{num_trials}_seed{benchmark_seed}_trial{trial_seed}"
     )
 
-    completed = (
-        load_completed_keys(
+    retry_map: dict[tuple[int, int], set[str]] = {}
+    completed: set[tuple[int, int]] = set()
+    if retry_failures:
+        if not trials_csv.is_file():
+            raise FileNotFoundError(
+                f"--retry-failures requires an existing trials CSV at {trials_csv}"
+            )
+        retry_map = load_methods_to_retry(trials_csv)
+        print(f"Retry failures: {len(retry_map)} trial(s) have methods to rerun")
+    elif resume:
+        completed = load_completed_keys(
             trials_csv,
             require_all_methods=not resume_partial,
+            require_success=not resume_partial,
         )
-        if resume
-        else set()
-    )
-    if resume and completed:
-        print(f"Resume: skipping {len(completed)} completed (num_agents, trial_id) pairs")
+        if completed:
+            print(f"Resume: skipping {len(completed)} successful trial(s)")
 
-    existing_rows = load_trial_rows(trials_csv) if resume else []
     new_rows: list[dict] = []
     t_loop_start = time.perf_counter()
 
@@ -417,7 +427,12 @@ def run_mapf_ensemble(
         print(f"\n=== Agent count N={num_agents} ===")
         for trial_id in range(num_trials):
             key = (int(num_agents), int(trial_id))
-            if key in completed:
+            methods_to_run = None
+            if retry_failures:
+                methods_to_run = retry_map.get(key)
+                if not methods_to_run:
+                    continue
+            elif resume and key in completed:
                 continue
             this_trial_seed = int(trial_seed + trial_id)
             if (trial_id + 1) % 10 == 0 or trial_id == 0:
@@ -462,6 +477,7 @@ def run_mapf_ensemble(
                 fail_soft=fail_soft,
                 sparse_graph_threshold=sparse_graph_threshold,
                 sparse_min_component_size=sparse_min_component_size,
+                methods_to_run=methods_to_run,
                 social_graph=social_graph,
                 heatmap_prefix=heatmap_prefix,
                 heatmap_file=heatmap_file,
@@ -470,9 +486,11 @@ def run_mapf_ensemble(
             append_trial_rows(trials_csv, rows, _trial_fieldnames())
 
     trial_loop_s = float(time.perf_counter() - t_loop_start)
-    trial_rows = existing_rows + new_rows if resume else new_rows
-    if resume and not new_rows:
-        trial_rows = load_trial_rows(trials_csv)
+    trial_rows = compact_trial_rows(
+        trials_csv,
+        _trial_fieldnames(),
+        extra_rows=new_rows if new_rows else None,
+    )
 
     summary_rows = aggregate_ensemble_metrics(trial_rows)
     checkpoint_write_csv(summary_csv, summary_rows, _summary_fieldnames())
@@ -505,6 +523,7 @@ def run_mapf_ensemble(
         "fail_soft": bool(fail_soft),
         "resume": bool(resume),
         "resume_partial": bool(resume_partial),
+        "retry_failures": bool(retry_failures),
         "wall_distance_cache_path": str(wall_cache_path.resolve()),
         "wall_distance_cache_used": bool(wall_cache_path.is_file()),
     }
@@ -557,11 +576,20 @@ def main(argv=None):
     parser.add_argument("--pp-low-level-max-iter", type=int, default=0, help="0 = auto")
     parser.add_argument("--cbs-timeout-s", type=float, default=0.0, help="CBS wall-clock limit (0=off)")
     parser.add_argument("--pp-timeout-s", type=float, default=0.0, help="PP wall-clock limit (0=off)")
-    parser.add_argument("--resume", action="store_true", help="Skip completed trials in existing CSV")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip trials where every method already succeeded (requires trials CSV)",
+    )
     parser.add_argument(
         "--resume-partial",
         action="store_true",
-        help="With --resume, skip any (num_agents, trial_id) that has any method row",
+        help="With --resume, skip trials that already have any method row (ignore success)",
+    )
+    parser.add_argument(
+        "--retry-failures",
+        action="store_true",
+        help="Rerun only methods that failed or are missing; keeps successful rows",
     )
     parser.add_argument(
         "--reaggregate-only",
@@ -657,6 +685,11 @@ def main(argv=None):
     if cli.print_event_milp_constraints_every < 1:
         parser.error("--print-event-milp-constraints-every must be >= 1.")
 
+    if cli.retry_failures and cli.resume_partial:
+        parser.error("Use only one of --retry-failures or --resume-partial.")
+    if cli.retry_failures and cli.resume:
+        parser.error("Use --retry-failures alone (it replaces --resume for failed rows).")
+
     num_agents_list = (
         _parse_int_list(cli.num_agents_list) if cli.num_agents_list else None
     )
@@ -695,6 +728,7 @@ def main(argv=None):
         print_event_milp_constraints_on_error=not cli.no_print_event_milp_constraints_on_error,
         resume=cli.resume,
         resume_partial=cli.resume_partial,
+        retry_failures=cli.retry_failures,
         reaggregate_only=cli.reaggregate_only,
         fail_soft=not cli.no_fail_soft,
         cbs_timeout_s=cli.cbs_timeout_s,
