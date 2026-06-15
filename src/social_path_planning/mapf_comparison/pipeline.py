@@ -90,9 +90,13 @@ def _run_with_timeout(func, timeout_s: float, *args, **kwargs):
     """Run ``func`` in a worker thread; raise ``FuturesTimeoutError`` on expiry."""
     if timeout_s <= 0:
         return func(*args, **kwargs)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(func, *args, **kwargs)
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(func, *args, **kwargs)
+    try:
         return future.result(timeout=float(timeout_s))
+    finally:
+        # Do not wait for a stuck CBS/PP call after timeout; otherwise the sweep hangs.
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def resolve_downsample(occ_grid, cfg: MapfRunConfig, demo_open: bool = False) -> int:
