@@ -225,7 +225,10 @@ def _write_manifest(
         "summary": summary_rows,
         "libraries": {"cbs_mapf": cbs_version},
         "comparison_notes": {
-            "cbs_pp": "Discrete space-time MAPF (library-default STA*, unit cost per timestep).",
+            "cbs_pp": (
+                "Discrete space-time MAPF on full-resolution grid "
+                "(mapf_downsample=1, library-default STA*, unit cost per timestep)."
+            ),
             "event_milp_soc": "Continuous-time coordination with max-velocity kinematic constraints.",
             "cross_method_cost": (
                 "Use soc_timesteps/makespan_timesteps for CBS/PP and "
@@ -272,7 +275,7 @@ def run_mapf_ensemble(
     cbs_max_process: int = 1,
     pp_low_level_max_iter: int = 0,
     max_velocity_mps: float | None = None,
-    mapf_downsample: int | None = None,
+    mapf_downsample: int = 1,
     crop_padding_cells: int = 40,
     coarse_block_policy: str = "fine_center",
     milp_astar_mode: str = "modified",
@@ -607,7 +610,12 @@ def main(argv=None):
         default=None,
         help="Max speed cap (m/s) for MAPF schedules and MILP; default 0.7",
     )
-    parser.add_argument("--mapf-downsample", type=int, default=None)
+    parser.add_argument(
+        "--mapf-downsample",
+        type=int,
+        default=1,
+        help="MAPF grid downsample for CBS/PP only (default 1 = full resolution, fair vs MILP paths)",
+    )
     parser.add_argument("--crop-padding", type=int, default=40)
     parser.add_argument(
         "--mapf-coarse-block-policy",
@@ -680,6 +688,8 @@ def main(argv=None):
         parser.error("Use only one of --heatmap-prefix or --heatmap-file.")
     if cli.milp_stride < 1:
         parser.error("--milp-stride must be >= 1.")
+    if cli.mapf_downsample < 1:
+        parser.error("--mapf-downsample must be >= 1.")
     if cli.viz_event_every < 1:
         parser.error("--viz-event-every must be >= 1.")
     if cli.print_event_milp_constraints_every < 1:

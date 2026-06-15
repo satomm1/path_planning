@@ -530,12 +530,16 @@ def run_event_milp_solver(
     encounter_count = len(analysis.encounters) if analysis is not None else 0
     binary_z_count = int(planner.num_z) if planner is not None else 0
 
+    metric_paths = stage_paths
+    if analysis is not None:
+        metric_paths = [list(agent.original_path) for agent in analysis.agents]
+
     metrics = aggregate_milp_metrics(
         time_lists,
         runtime_s,
         status,
         norm=norm,
-        world_paths=stage_paths,
+        world_paths=metric_paths,
         motion=motion_cfg,
         solver_runtime_s=solver_runtime_s,
     )

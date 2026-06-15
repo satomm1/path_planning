@@ -490,9 +490,9 @@ def print_ensemble_summary(summary_rows: Sequence[dict], pool_astar_build_s: flo
         print(f"\n--- num_agents={num_agents} ---")
         print(
             f"{'Method':<18} {'Success%':>9} {'Timeouts':>9} {'Avg solver s':>13} "
-            f"{'Avg cost':>12}"
+            f"{'Avg cost':>12} {'Avg path m':>11}"
         )
-        print("-" * 72)
+        print("-" * 84)
         for row in by_n[num_agents]:
             sr = row.get("success_rate")
             sr_pct = f"{100.0 * sr:.1f}" if sr is not None else "n/a"
@@ -505,7 +505,9 @@ def print_ensemble_summary(summary_rows: Sequence[dict], pool_astar_build_s: flo
             else:
                 cost = row.get("avg_makespan_seconds")
                 cost_str = f"{cost:.3f} s" if cost is not None else "n/a"
+            path_len = row.get("avg_total_path_length_m")
+            path_str = f"{path_len:.1f}" if path_len is not None else "n/a"
             print(
                 f"{method:<18} {sr_pct:>8}% {row.get('timeout_count', 0):>9} "
-                f"{rt_str:>13} {cost_str:>12}"
+                f"{rt_str:>13} {cost_str:>12} {path_str:>11}"
             )

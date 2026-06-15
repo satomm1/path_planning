@@ -155,11 +155,12 @@ def aggregate_milp_metrics(
 
     if success and world_paths is not None:
         time_lists = [list(t) for t in agent_times]
-        sol = compute_solution_metrics(world_paths, time_lists)
-        soc = sol["soc_seconds"]
-        makespan = sol["makespan_seconds"]
-        total_path_length_m = sol["total_path_length_m"]
-        per_agent_path_length_m = sol["per_agent_path_length_m"]
+        if all(len(p) == len(t) for p, t in zip(world_paths, time_lists)):
+            sol = compute_solution_metrics(world_paths, time_lists)
+            soc = sol["soc_seconds"]
+            makespan = sol["makespan_seconds"]
+            total_path_length_m = sol["total_path_length_m"]
+            per_agent_path_length_m = sol["per_agent_path_length_m"]
 
     norm_value: int | str
     if norm == np.inf or norm == float("inf"):

@@ -71,13 +71,16 @@ python3 -m social_path_planning.benchmark_mapf_ensemble \
   --num-agents-list 3,4,5,6,7,8,9,10 \
   --num-trials 50 \
   --output-prefix results/mapf_ensemble/sample2_sweep \
+  --mapf-downsample 1 \
   --cbs-timeout-s 120 --pp-timeout-s 60 \
   --resume
 ```
 
+CBS/PP default to **`--mapf-downsample 1`** (full-resolution MAPF grid, same fine cell size as the occupancy map). Event MILP always uses full-resolution path-bank geometry. Use `--mapf-downsample 2` (or higher) only if CBS/PP is too slow; coarser grids change CBS/PP routes and `cell_size` for timestep→seconds conversion in plots.
+
 1. **Pool prep (once, cached):** generates `pool_size` random start/goal routes and caches modified A* polylines in `{prefix}_path_pool.json`. Use `--pregen-only` to build the pool without running trials.
-2. **Each trial:** samples `num_agents` routes without replacement; runs **CBS**, **PP**, and **event MILP SOC** on the same endpoints. MILP uses cached polylines (no per-trial social A*).
-3. **Outputs:** `{prefix}_trials.csv` (append/checkpoint per trial), `{prefix}_summary.csv` (aggregated by `num_agents` × method), `{prefix}_manifest.json`. Use `--resume` to continue a sweep (skips trials where every method succeeded). Use `--retry-failures` to rerun only CBS/PP/event rows that failed or are missing (after fixing dependencies such as `cbs-mapf`). Use `--reaggregate-only` to rebuild summary from trials CSV without running solvers.
+2. **Each trial:** samples `num_agents` routes without replacement; runs **CBS**, **PP**, and **event MILP SOC** on the same endpoints. CBS/PP replan on the full-resolution MAPF grid (`mapf_downsample=1` by default). MILP uses cached polylines (no per-trial social A*).
+3. **Outputs:** `{prefix}_trials.csv` (append/checkpoint per trial), `{prefix}_summary.csv` (aggregated by `num_agents` × method), `{prefix}_manifest.json`. Use `--resume` to continue a sweep (skips trials where every method succeeded). Use `--retry-failures` to rerun only CBS/PP/event rows that failed or are missing (after fixing dependencies such as `cbs-mapf`). Use `--reaggregate-only` to rebuild summary from trials CSV without running solvers. Plot a 3-panel scaling figure (success, runtime, makespan) with `python3 -m social_path_planning.plot_mapf_ensemble --output-prefix results/mapf_ensemble/sample2_sweep`; CBS/PP makespan is converted to seconds as `timesteps × sqrt(2) × cell_size / v_max` from the manifest.
 
 | Summary field | Meaning |
 |---------------|---------|
@@ -85,7 +88,8 @@ python3 -m social_path_planning.benchmark_mapf_ensemble \
 | `success_rate` / `failure_count` / `timeout_count` | Trial outcome counts |
 | `avg_solver_runtime_s` | Mean planning time over **successful** trials only |
 | `avg_makespan_timesteps` | CBS/PP discrete makespan (primary cost metric) |
-| `avg_makespan_seconds` | Event MILP continuous makespan (primary cost metric) |
+| `avg_makespan_seconds` | Event MILP max completion time [s] (not SOC); `avg_soc_seconds` is sum of completions |
+| `avg_total_path_length_m` | Mean sum of per-agent path lengths [m] over successful trials |
 | `pool_astar_build_s` (manifest) | One-time social/modified A* cost during pool prep |
 
 Outputs go under `results/mapf_comparison/` (detailed/summary CSV, manifest JSON, metrics bar chart, example map overlay). Re-plot from a prior run:
@@ -100,7 +104,7 @@ python3 -m social_path_planning.plot_mapf_comparison --summary-csv results/mapf_
 python3 -m social_path_planning.visualize_mapf --scenario sample2_default --num-agents 4 --output-dir results/mapf_comparison/verify --max-velocity 0.7
 ```
 
-Use `--mapf-downsample 2` (or `1`) for finer CBS/PP geometry; keep `--pp-low-level-max-iter 0` and `--cbs-max-iter 0` so limits **auto-scale** with downsample (finer grids need more STA* expansions and wider crop padding). Example: `--mapf-downsample 2 --crop-padding 40`.
+Use `--mapf-downsample 1` (ensemble default) for fairest CBS/PP vs MILP geometry. For faster but coarser CBS/PP, use `--mapf-downsample 2` or higher; keep `--pp-low-level-max-iter 0` and `--cbs-max-iter 0` so limits **auto-scale** with downsample.
 
 Coarse obstacle merge (when `downsample` > 1): default `--mapf-coarse-block-policy fine_center` matches vanilla A* passability at fine cell centers; use `any` for the strictest (corner-based) merge.
 

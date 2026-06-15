@@ -244,7 +244,7 @@ def run_visualization(
     if make_snapshots:
         end_times = []
         viz_methods = ("milp", "event_milp", "cbs", "pp")
-    for method in viz_methods:
+        for method in viz_methods:
             if method not in results:
                 continue
             if results[method].get("time_lists") and results[method]["time_lists"][0]:
