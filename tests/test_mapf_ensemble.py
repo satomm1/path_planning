@@ -1,12 +1,19 @@
 """Tests for MAPF ensemble benchmark helpers."""
 
+import math
+
 import numpy as np
 import pytest
 
 from social_path_planning.mapf_comparison.checkpoint import (
     append_trial_rows,
+    coerce_bool,
+    compact_trial_rows,
+    dedupe_trial_rows,
     load_completed_keys,
+    load_methods_to_retry,
     load_trial_rows,
+    normalize_trial_row,
 )
 from social_path_planning.mapf_comparison.ensemble import (
     METHODS,
@@ -64,6 +71,7 @@ def test_aggregate_ensemble_metrics_groups_by_num_agents_and_method():
             "solver_runtime_s": 1.0,
             "makespan_seconds": 10.0,
             "makespan_timesteps": 10,
+            "total_path_length_m": 30.0,
         },
         {
             "num_agents": 4,
@@ -81,6 +89,7 @@ def test_aggregate_ensemble_metrics_groups_by_num_agents_and_method():
             "solver_runtime_s": 3.0,
             "makespan_seconds": 20.0,
             "makespan_timesteps": 20,
+            "total_path_length_m": 50.0,
         },
         {
             "num_agents": 4,
@@ -89,6 +98,7 @@ def test_aggregate_ensemble_metrics_groups_by_num_agents_and_method():
             "status": "ok",
             "solver_runtime_s": 0.5,
             "makespan_seconds": 8.0,
+            "total_path_length_m": 42.0,
         },
         {
             "num_agents": 8,
@@ -112,9 +122,11 @@ def test_aggregate_ensemble_metrics_groups_by_num_agents_and_method():
     assert cbs4["success_rate"] == pytest.approx(2 / 3)
     assert cbs4["avg_solver_runtime_s"] == pytest.approx(2.0)
     assert cbs4["avg_makespan_timesteps"] == pytest.approx(15.0)
+    assert cbs4["avg_total_path_length_m"] == pytest.approx(40.0)
 
     event4 = summary[(4, "event_milp_soc")]
     assert event4["avg_makespan_seconds"] == pytest.approx(8.0)
+    assert event4["avg_total_path_length_m"] == pytest.approx(42.0)
 
     cbs8 = summary[(8, "cbs")]
     assert cbs8["timeout_count"] == 1
@@ -170,5 +182,112 @@ def test_run_with_timeout_raises_on_slow_call():
         _run_with_timeout(_slow, 0.05)
 
 
+def test_run_with_timeout_returns_without_waiting_for_worker():
+    import time as time_mod
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+    t0 = time_mod.perf_counter()
+    with pytest.raises(FuturesTimeoutError):
+        _run_with_timeout(lambda: time_mod.sleep(5.0), 0.05)
+    assert time_mod.perf_counter() - t0 < 1.0
+
+
 def test_run_with_timeout_passes_through_when_disabled():
     assert _run_with_timeout(lambda: 42, 0.0) == 42
+
+
+def test_coerce_bool_parses_csv_strings():
+    assert coerce_bool("True") is True
+    assert coerce_bool("False") is False
+    assert coerce_bool("") is False
+
+
+def test_aggregate_ensemble_metrics_treats_csv_false_as_failure():
+    trial_rows = [
+        {
+            "num_agents": 4,
+            "method": "cbs",
+            "success": "False",
+            "status": "error:ImportError",
+            "solver_runtime_s": "0.0",
+        },
+        {
+            "num_agents": 4,
+            "method": "event_milp_soc",
+            "success": "True",
+            "status": "ok",
+            "solver_runtime_s": "1.5",
+            "makespan_seconds": "9.0",
+        },
+    ]
+    summary = {
+        (row["num_agents"], row["method"]): row
+        for row in aggregate_ensemble_metrics(trial_rows)
+    }
+    assert summary[(4, "cbs")]["success_count"] == 0
+    assert summary[(4, "cbs")]["failure_count"] == 1
+    assert summary[(4, "event_milp_soc")]["success_count"] == 1
+
+
+def test_load_methods_to_retry_only_failed_methods(tmp_path):
+    trials_csv = tmp_path / "trials.csv"
+    fieldnames = ["trial_id", "num_agents", "method", "success", "status"]
+    rows = [
+        {"trial_id": 0, "num_agents": 4, "method": "cbs", "success": False, "status": "err"},
+        {"trial_id": 0, "num_agents": 4, "method": "pp_path_length", "success": False, "status": "err"},
+        {"trial_id": 0, "num_agents": 4, "method": "event_milp_soc", "success": True, "status": "ok"},
+    ]
+    append_trial_rows(trials_csv, rows, fieldnames)
+    retry = load_methods_to_retry(trials_csv)
+    assert retry[(4, 0)] == {"cbs", "pp_path_length"}
+
+
+def test_resume_skips_only_fully_successful_trials(tmp_path):
+    trials_csv = tmp_path / "trials.csv"
+    fieldnames = ["trial_id", "num_agents", "method", "success", "status"]
+    append_trial_rows(
+        trials_csv,
+        [
+            {"trial_id": 0, "num_agents": 4, "method": m, "success": True, "status": "ok"}
+            for m in METHODS
+        ],
+        fieldnames,
+    )
+    append_trial_rows(
+        trials_csv,
+        [
+            {"trial_id": 1, "num_agents": 4, "method": "cbs", "success": False, "status": "err"},
+            {"trial_id": 1, "num_agents": 4, "method": "pp_path_length", "success": False, "status": "err"},
+            {"trial_id": 1, "num_agents": 4, "method": "event_milp_soc", "success": True, "status": "ok"},
+        ],
+        fieldnames,
+    )
+    completed = load_completed_keys(trials_csv, require_success=True)
+    assert (4, 0) in completed
+    assert (4, 1) not in completed
+
+
+def test_compact_trial_rows_replaces_duplicates(tmp_path):
+    trials_csv = tmp_path / "trials.csv"
+    fieldnames = ["trial_id", "num_agents", "method", "success", "status", "solver_runtime_s"]
+    append_trial_rows(
+        trials_csv,
+        [{"trial_id": 0, "num_agents": 4, "method": "cbs", "success": False, "status": "err", "solver_runtime_s": 0.0}],
+        fieldnames,
+    )
+    merged = compact_trial_rows(
+        trials_csv,
+        fieldnames,
+        extra_rows=[
+            {"trial_id": 0, "num_agents": 4, "method": "cbs", "success": True, "status": "ok", "solver_runtime_s": 2.0}
+        ],
+    )
+    assert len(merged) == 1
+    assert normalize_trial_row(merged[0])["success"] is True
+    assert float(merged[0]["solver_runtime_s"]) == 2.0
+
+
+def test_mapf_timestep_dt_step_diagonal_cap():
+    from social_path_planning.mapf_comparison.motion import mapf_timestep_duration_s
+
+    assert mapf_timestep_duration_s(0.05, 2, 0.7) == pytest.approx(math.sqrt(2) * 0.1 / 0.7)

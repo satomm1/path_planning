@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 DEFAULT_MAX_VELOCITY_MPS = 0.7
@@ -10,6 +11,15 @@ DEFAULT_MAX_VELOCITY_MPS = 0.7
 def cell_size_m(resolution: float, downsample: int = 1) -> float:
     """World meters per coarse MAPF grid step."""
     return float(resolution) * max(1, int(downsample))
+
+
+def mapf_timestep_duration_s(
+    resolution: float,
+    downsample: int = 1,
+    max_velocity_mps: float = DEFAULT_MAX_VELOCITY_MPS,
+) -> float:
+    """Seconds per STA* timestep if each step moves at most one diagonal cell at v_max."""
+    return math.sqrt(2) * cell_size_m(resolution, downsample) / max(max_velocity_mps, 1e-9)
 
 
 @dataclass(frozen=True)

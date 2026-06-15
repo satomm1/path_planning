@@ -323,7 +323,22 @@ def run_mapf_ensemble(
         summary_rows = aggregate_ensemble_metrics(trial_rows)
         checkpoint_write_csv(summary_csv, summary_rows, _summary_fieldnames())
         print(f"Reaggregated {len(trial_rows)} trial rows -> {summary_csv}")
-        print_ensemble_summary(summary_rows, pool_astar_build_s=0.0)
+        map_res = 0.2
+        mapf_ds = 1
+        vmax = MotionConfig().max_velocity_mps
+        if manifest_json.is_file():
+            with manifest_json.open(encoding="utf-8") as f:
+                mcfg = json.load(f)["config"]
+            map_res = float(mcfg["map_resolution"])
+            mapf_ds = int(mcfg.get("mapf_downsample") or 1)
+            vmax = float(mcfg["motion"]["max_velocity_mps"])
+        print_ensemble_summary(
+            summary_rows,
+            pool_astar_build_s=0.0,
+            map_resolution=map_res,
+            mapf_downsample=mapf_ds,
+            max_velocity_mps=vmax,
+        )
         return trial_rows, summary_rows
 
     motion = (
@@ -545,7 +560,13 @@ def run_mapf_ensemble(
     print(f"\nSaved {trials_csv}")
     print(f"Saved {summary_csv}")
     print(f"Saved {manifest_json}")
-    print_ensemble_summary(summary_rows, pool_astar_build_s)
+    print_ensemble_summary(
+        summary_rows,
+        pool_astar_build_s,
+        map_resolution=map_resolution,
+        mapf_downsample=mapf_downsample,
+        max_velocity_mps=motion.max_velocity_mps,
+    )
 
     return trial_rows, summary_rows
 

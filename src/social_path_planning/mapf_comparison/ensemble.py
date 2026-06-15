@@ -27,6 +27,10 @@ from social_path_planning.mapf_comparison.pipeline import (
 )
 
 from social_path_planning.mapf_comparison.constants import MAPF_METHODS, METHODS
+from social_path_planning.mapf_comparison.motion import (
+    DEFAULT_MAX_VELOCITY_MPS,
+    mapf_timestep_duration_s,
+)
 
 
 def sample_route_subset(
@@ -475,8 +479,16 @@ def aggregate_ensemble_metrics(trial_rows: Sequence[dict]) -> List[dict]:
     return summary
 
 
-def print_ensemble_summary(summary_rows: Sequence[dict], pool_astar_build_s: float) -> None:
+def print_ensemble_summary(
+    summary_rows: Sequence[dict],
+    pool_astar_build_s: float,
+    *,
+    map_resolution: float,
+    mapf_downsample: int = 1,
+    max_velocity_mps: float = DEFAULT_MAX_VELOCITY_MPS,
+) -> None:
     """Print a compact grid: agent count blocks with per-method stats."""
+    dt_mapf = mapf_timestep_duration_s(map_resolution, mapf_downsample, max_velocity_mps)
     print(f"\nPool A* build time (excluded from event MILP trial averages): {pool_astar_build_s:.2f}s")
     if not summary_rows:
         print("No summary rows.")
@@ -490,7 +502,7 @@ def print_ensemble_summary(summary_rows: Sequence[dict], pool_astar_build_s: flo
         print(f"\n--- num_agents={num_agents} ---")
         print(
             f"{'Method':<18} {'Success%':>9} {'Timeouts':>9} {'Avg solver s':>13} "
-            f"{'Avg cost':>12} {'Avg path m':>11}"
+            f"{'Avg mkspn s':>12} {'Avg path m':>11}"
         )
         print("-" * 84)
         for row in by_n[num_agents]:
@@ -500,14 +512,14 @@ def print_ensemble_summary(summary_rows: Sequence[dict], pool_astar_build_s: flo
             rt_str = f"{avg_rt:.3f}" if avg_rt is not None else "n/a"
             method = row["method"]
             if method in MAPF_METHODS:
-                cost = row.get("avg_makespan_timesteps")
-                cost_str = f"{cost:.1f} steps" if cost is not None else "n/a"
+                steps = row.get("avg_makespan_timesteps")
+                mkspn_s = float(steps) * dt_mapf if steps is not None else None
             else:
-                cost = row.get("avg_makespan_seconds")
-                cost_str = f"{cost:.3f} s" if cost is not None else "n/a"
+                mkspn_s = row.get("avg_makespan_seconds")
+            mkspn_str = f"{mkspn_s:.3f}" if mkspn_s is not None else "n/a"
             path_len = row.get("avg_total_path_length_m")
             path_str = f"{path_len:.1f}" if path_len is not None else "n/a"
             print(
                 f"{method:<18} {sr_pct:>8}% {row.get('timeout_count', 0):>9} "
-                f"{rt_str:>13} {cost_str:>12} {path_str:>11}"
+                f"{rt_str:>13} {mkspn_str:>12} {path_str:>11}"
             )

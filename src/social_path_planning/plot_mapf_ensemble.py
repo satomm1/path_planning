@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -13,7 +12,7 @@ import numpy as np
 
 from social_path_planning.mapf_comparison.checkpoint import coerce_bool, load_trial_rows
 from social_path_planning.mapf_comparison.constants import MAPF_METHODS, METHODS
-from social_path_planning.mapf_comparison.motion import cell_size_m
+from social_path_planning.mapf_comparison.motion import mapf_timestep_duration_s
 from social_path_planning.mapf_comparison.plot import METHOD_LABELS
 
 ENSEMBLE_METHOD_LABELS = {
@@ -24,7 +23,7 @@ ENSEMBLE_METHOD_LABELS = {
 
 
 def _dt_step(map_resolution: float, mapf_downsample: int, max_velocity_mps: float) -> float:
-    return math.sqrt(2) * cell_size_m(map_resolution, mapf_downsample) / max(max_velocity_mps, 1e-9)
+    return mapf_timestep_duration_s(map_resolution, mapf_downsample, max_velocity_mps)
 
 
 def _load_rows(summary_csv: Path) -> list[dict]:
