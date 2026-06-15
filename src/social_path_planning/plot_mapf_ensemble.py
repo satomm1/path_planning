@@ -16,6 +16,12 @@ from social_path_planning.mapf_comparison.constants import MAPF_METHODS, METHODS
 from social_path_planning.mapf_comparison.motion import cell_size_m
 from social_path_planning.mapf_comparison.plot import METHOD_LABELS
 
+ENSEMBLE_METHOD_LABELS = {
+    **METHOD_LABELS,
+    "pp_path_length": "PP",
+    "event_milp_soc": "MICP",
+}
+
 
 def _dt_step(map_resolution: float, mapf_downsample: int, max_velocity_mps: float) -> float:
     return math.sqrt(2) * cell_size_m(map_resolution, mapf_downsample) / max(max_velocity_mps, 1e-9)
@@ -36,6 +42,40 @@ def _event_makespan_avg_by_n(trials_csv: Path) -> dict[int, float]:
             continue
         by_n.setdefault(int(row["num_agents"]), []).append(float(val))
     return {n: float(np.mean(vals)) for n, vals in by_n.items() if vals}
+
+
+def _pad_axes_for_labels(ax, *, log_y: bool = False) -> None:
+    xmin, xmax = ax.get_xlim()
+    xspan = xmax - xmin if xmax > xmin else 1.0
+    ax.set_xlim(xmin - 0.02 * xspan, xmax + 0.08 * xspan)
+
+    ymin, ymax = ax.get_ylim()
+    if ymax <= ymin:
+        return
+    if log_y and ymin > 0:
+        ax.set_ylim(ymin, ymax * 1.25)
+    else:
+        pad = (ymax - ymin) * 0.2
+        ax.set_ylim(ymin - pad * 0.1, ymax + pad)
+
+
+def _annotate_line_end(ax, xs: list[int], ys: list[float], label: str, color) -> None:
+    y_arr = np.asarray(ys, dtype=float)
+    valid = np.isfinite(y_arr)
+    if not valid.any():
+        return
+    idx = int(np.where(valid)[0][-1])
+    ax.annotate(
+        label,
+        xy=(xs[idx], y_arr[idx]),
+        xytext=(0, 5),
+        textcoords="offset points",
+        va="bottom",
+        ha="center",
+        color=color,
+        fontsize=8,
+        clip_on=False,
+    )
 
 
 def _series(
@@ -93,23 +133,36 @@ def plot_scaling(
 
     fig, axes = plt.subplots(1, 3, figsize=(10, 3.5))
     panels = [
-        ("success", "Success rate [%]"),
-        ("runtime", "Solver runtime [s]"),
-        ("makespan", "Makespan [s]"),
+        ("success", "Success Rate (%)"),
+        ("runtime", "Solver Runtime (s)"),
+        ("makespan", "Makespan (s)"),
     ]
+    panel_titles = {
+        "success": "Solver Success",
+        "runtime": "Solver Runtime",
+        "makespan": "Solution Makespan"
+    }
     for ax, (field, ylabel) in zip(axes, panels):
         for method in methods:
             y = _series(rows, method, agents, field, dt=dt, event_makespan_by_n=event_makespan_by_n)
-            ax.plot(agents, y, marker="o", label=METHOD_LABELS.get(method, method))
-        ax.set_xlabel("Number of agents")
+            (line,) = ax.plot(agents, y, marker="o")
+            _annotate_line_end(
+                ax,
+                agents,
+                y,
+                ENSEMBLE_METHOD_LABELS.get(method, method),
+                line.get_color(),
+            )
+        ax.set_xlabel("Number of Agents")
         ax.set_ylabel(ylabel)
         ax.grid(True, linestyle="--", alpha=0.4)
+        ax.set_title(panel_titles.get(field, field.capitalize()))
         if field == "runtime":
             ax.set_yscale("log")
-    axes[0].legend(loc="best", fontsize=8)
-    fig.tight_layout()
+        _pad_axes_for_labels(ax, log_y=(field == "runtime"))
+    fig.tight_layout(pad=1.2)
     output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=dpi)
+    fig.savefig(output, dpi=dpi, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved {output}")
 
