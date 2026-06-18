@@ -1715,31 +1715,77 @@ def create_event_video(
     create_video(paths, times, output_file=output_file, occ_grid=occ_grid)
 
 
-def _load_or_plan_path(occ_grid, map_size, map_resolution, pickle_name, x_init, x_goal):
+_DEFAULT_GRID2_HEATMAP = "../../outputs_temp_obstacles/baseline_permanent_heatmap.npy"
+_social_graph_cache: dict[str, object] = {}
+
+
+def _social_graph_from_heatmap(occ_grid, heatmap_file):
+    """Build (or return cached) sparse social graph from a directional heatmap file."""
+    key = str(Path(heatmap_file).resolve())
+    if key not in _social_graph_cache:
+        from social_path_planning.compare_astar import build_sparse_graph_from_heatmap
+
+        _social_graph_cache[key] = build_sparse_graph_from_heatmap(
+            occ_grid,
+            heatmap_path=key,
+        )
+    return _social_graph_cache[key]
+
+
+def _load_or_plan_path(
+    occ_grid,
+    map_size,
+    map_resolution,
+    pickle_name,
+    x_init,
+    x_goal,
+    *,
+    social_graph=None,
+    heatmap_file=_DEFAULT_GRID2_HEATMAP,
+):
     """Load a cached A* path or plan and pickle it (grid2 demo helper)."""
     import pickle
 
-    from social_path_planning.a_star import AStar
+    from social_path_planning.a_star import AStar, AStar_With_Graph
     from social_path_planning.utils import snap_to_grid
+
+    if social_graph is None and heatmap_file is not None:
+        social_graph = _social_graph_from_heatmap(occ_grid, heatmap_file)
 
     try:
         with open(pickle_name, "rb") as handle:
             return pickle.load(handle)
     except FileNotFoundError:
+        pass
+
+    statespace_hi = snap_to_grid(map_size, map_resolution)
+    x_init_snapped = snap_to_grid(x_init, map_resolution)
+    x_goal_snapped = snap_to_grid(x_goal, map_resolution)
+    if social_graph is not None:
+        problem = AStar_With_Graph(
+            [0, 0],
+            statespace_hi,
+            x_init_snapped,
+            x_goal_snapped,
+            occ_grid,
+            social_graph,
+            resolution=map_resolution,
+        )
+    else:
         problem = AStar(
             [0, 0],
-            snap_to_grid(map_size, map_resolution),
-            snap_to_grid(x_init, map_resolution),
-            snap_to_grid(x_goal, map_resolution),
+            statespace_hi,
+            x_init_snapped,
+            x_goal_snapped,
             occ_grid,
             resolution=map_resolution,
         )
-        if not problem.solve():
-            raise RuntimeError(f"A* failed for {pickle_name}")
-        path = problem.path
-        with open(pickle_name, "wb") as handle:
-            pickle.dump(path, handle)
-        return path
+    if not problem.solve():
+        raise RuntimeError(f"A* failed for {pickle_name}")
+    path = problem.path
+    with open(pickle_name, "wb") as handle:
+        pickle.dump(path, handle)
+    return path
 
 
 if __name__ == "__main__":
@@ -1762,25 +1808,25 @@ if __name__ == "__main__":
     )
 
     path1 = _load_or_plan_path(
-        occ_grid, map_size, map_resolution, "path1.pkl", [2, 25], [97, 65]
+        occ_grid, map_size, map_resolution, "path1.pkl", [2, 25], [97, 40]
     )
     path2 = _load_or_plan_path(
-        occ_grid, map_size, map_resolution, "path2.pkl", [46, 80], [46, 20]
+        occ_grid, map_size, map_resolution, "path2.pkl", [2, 40], [97, 50]
     )
     path3 = _load_or_plan_path(
-        occ_grid, map_size, map_resolution, "path3.pkl", [75, 48], [65, 45.5]
+        occ_grid, map_size, map_resolution, "path3.pkl", [85, 50], [50, 80]
     )
     path4 = _load_or_plan_path(
-        occ_grid, map_size, map_resolution, "path4.pkl", [50, 20], [99, 60]
+        occ_grid, map_size, map_resolution, "path4.pkl", [50, 20], [50, 65]
     )
 
     stride = 1
     stage_paths = [path1[::stride], path2[::stride], path3[::stride], path4[::stride]]
     velocities = [
         MAX_VELOCITY,
-        MAX_VELOCITY / 1.5,
-        MAX_VELOCITY / 1.5,
-        MAX_VELOCITY / 1.65,
+        MAX_VELOCITY / 1.2,
+        MAX_VELOCITY / 3.2,
+        MAX_VELOCITY / 3.0,
     ]
 
     ############## Simultaneous event MILP (all four agents) ##############
@@ -1809,16 +1855,17 @@ if __name__ == "__main__":
         sim_anim_paths,
         sim_anim_times,
         output_file=str(output_dir / "grid2_space_time_event_simultaneous.png"),
-        title="Event MILP Space-Time Plot (simultaneous)",
+        title="Simultaneous Trajectory Planning",
     )
-    snapshot_time = 0.35 * max(t_seq[-1] for t_seq in sim_anim_times)
+    snapshot_time = 120 # 0.35 * max(t_seq[-1] for t_seq in sim_anim_times)
     create_map_context_plot(
         sim_anim_paths,
         occ_grid=occ_grid,
         times=sim_anim_times,
         snapshot_time=snapshot_time,
         output_file=str(output_dir / "grid2_map_context_event_simultaneous.png"),
-        title="Event MILP Paths on Grid2 (simultaneous)",
+        title="Simultaneous Planning",
+        dpi=600
     )
     create_event_video(
         sim_analysis,

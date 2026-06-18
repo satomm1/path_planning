@@ -205,7 +205,7 @@ def build_sparse_graph_from_heatmap(
         heatmap_path = os.path.abspath(heatmap_path)
         if not os.path.exists(heatmap_path):
             raise FileNotFoundError(f"Heatmap file not found: {heatmap_path}")
-        hm.heatmap = np.load(heatmap_path)
+        frequent.set_heat_map(np.load(heatmap_path))
         print(f"Loaded heatmap from {heatmap_path}")
     else:
         frequent = FrequentSubgraph(occ_grid, heat_map_filename=heatmap_prefix)
@@ -240,7 +240,7 @@ def build_sparse_graph_from_heatmap(
     # Save the figure
     fig = ax.figure
     fig.tight_layout()
-    fig.savefig("outputs_timeline/env3.png", dpi=600)
+    # fig.savefig("outputs_timeline/env3.png", dpi=600)
 
     return frequent.graph
 

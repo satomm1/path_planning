@@ -1057,64 +1057,67 @@ def create_map_context_plot(
     Create and save a static map plot with robot paths.
     Optionally overlays robot positions at snapshot_time.
     """
-    fig, ax = plt.subplots(figsize=(8, 6))
-    title_fs = 18
-    label_fs = 15
-    tick_fs = 15
-    legend_fs = 15
+    fig, ax = plt.subplots(figsize=(6.75, 6))
+    title_fs = 26
+    label_fs = 20
+    tick_fs = 18
+    legend_fs = 20
 
     if occ_grid is not None:
         occ_grid.plot_grid(ax=ax)
 
-    colors = plt.cm.brg(np.linspace(0, 0.9, len(paths)))
+    colors = plt.cm.brg(np.linspace(0, 0.7, len(paths)))
     path_handles = []
     path_labels = []
     for i, (path, color) in enumerate(zip(paths, colors)):
         xs = [p[0] for p in path]
         ys = [p[1] for p in path]
-        path_line, = ax.plot(xs, ys, color=color, linewidth=2, alpha=0.9, label=f"Robot {i + 1}")
+        path_line, = ax.plot(xs, ys, color=color, linewidth=3, alpha=0.9, label=f"Robot {i + 1}")
         path_handles.append(path_line)
         path_labels.append(f"Robot {i + 1}")
 
         # Start/goal markers for context in the paper figure.
-        ax.scatter(xs[0], ys[0], marker="o", s=70, color=color, edgecolors=color, linewidths=0.8)
-        ax.scatter(xs[-1], ys[-1], marker="*", s=180, color=color, edgecolors=color, linewidths=0.8)
+        ax.scatter(xs[0], ys[0], marker="s", s=100, color=color, edgecolors="black",
+                   linewidths=1.75, zorder=9)
+        ax.scatter(xs[-1], ys[-1], marker="*", s=180, color=color, edgecolors="black",
+                   linewidths=1.75, zorder=9)
 
         if times is not None and snapshot_time is not None:
             rx, ry = get_position_at_time(snapshot_time, path, times[i])
-            ax.scatter(rx, ry, marker="s", s=75, color=color, edgecolors=color, linewidths=1.0)
+            ax.scatter(rx, ry, marker="o", s=100, color=color, edgecolors="black", linewidths=1.75,
+                       zorder=10)
 
-    if snapshot_time is not None:
-        ax.text(
-            0.02,
-            0.98,
-            f"Robot positions at t = {snapshot_time:.2f}s",
-            transform=ax.transAxes,
-            ha="left",
-            va="top",
-            bbox=dict(facecolor="white", alpha=0.9, edgecolor="none"),
-            fontsize=legend_fs,
-        )
+    # if snapshot_time is not None:
+    #     ax.text(
+    #         0.02,
+    #         0.98,
+    #         f"Robot positions at t = {snapshot_time:.2f}s",
+    #         transform=ax.transAxes,
+    #         ha="left",
+    #         va="top",
+    #         bbox=dict(facecolor="white", alpha=0.9, edgecolor="none"),
+    #         fontsize=legend_fs,
+    #     )
 
     ax.set_title(title, fontsize=title_fs)
-    ax.set_xlabel("x [m]", fontsize=label_fs)
-    ax.set_ylabel("y [m]", fontsize=label_fs)
+    ax.set_xlabel("X(m)", fontsize=label_fs)
+    ax.set_ylabel("Y (m)", fontsize=label_fs)
     ax.tick_params(axis="both", labelsize=tick_fs)
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, linestyle="--", alpha=0.35)
     path_legend = ax.legend(path_handles, path_labels, loc="upper right", fontsize=legend_fs)
     marker_handles = [
-        Line2D([0], [0], marker="o", color="none", markerfacecolor="green",
-               markeredgecolor="gray", markersize=8, label="Start"),
-        Line2D([0], [0], marker="s", color="none", markerfacecolor="blue",
-               markeredgecolor="gray", markersize=8, label="Current"),
-        Line2D([0], [0], marker="*", color="none", markerfacecolor="gold",
-               markeredgecolor="gray", markersize=12, label="Goal"),
+        # Line2D([0], [0], marker="s", color="none", markerfacecolor="green",
+        #        markeredgecolor="gray", markersize=8, label="Start"),
+        Line2D([0], [0], marker="o", color="none", markerfacecolor="gray",
+               markeredgecolor="black", markersize=8, label="Robot Position"),
+        # Line2D([0], [0], marker="*", color="none", markerfacecolor="gold",
+        #        markeredgecolor="gray", markersize=12, label="Goal"),
     ]
-    marker_legend = ax.legend(handles=marker_handles, loc="lower right", fontsize=legend_fs)
+    marker_legend = ax.legend(handles=marker_handles, loc="upper right", fontsize=legend_fs)
     path_legend.get_title().set_fontsize(legend_fs)
     marker_legend.get_title().set_fontsize(legend_fs)
-    ax.add_artist(path_legend)
+    # ax.add_artist(path_legend)
     ax.add_artist(marker_legend)
     fig.tight_layout()
     fig.savefig(output_file, dpi=dpi)
