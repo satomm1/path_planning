@@ -43,7 +43,7 @@ def _event_makespan_avg_by_n(trials_csv: Path) -> dict[int, float]:
     return {n: float(np.mean(vals)) for n, vals in by_n.items() if vals}
 
 
-def _pad_axes_for_labels(ax, *, log_y: bool = False) -> None:
+def _pad_axes_for_labels(ax, *, log_y: bool = False, success_pct: bool = False) -> None:
     xmin, xmax = ax.get_xlim()
     xspan = xmax - xmin if xmax > xmin else 1.0
     ax.set_xlim(xmin - 0.02 * xspan, xmax + 0.08 * xspan)
@@ -51,25 +51,44 @@ def _pad_axes_for_labels(ax, *, log_y: bool = False) -> None:
     ymin, ymax = ax.get_ylim()
     if ymax <= ymin:
         return
-    if log_y and ymin > 0:
+    if success_pct:
+        ax.set_ylim(ymin - 1.0, min(105.0, ymax + 4.0))
+    elif log_y and ymin > 0:
         ax.set_ylim(ymin, ymax * 1.25)
     else:
         pad = (ymax - ymin) * 0.2
         ax.set_ylim(ymin - pad * 0.1, ymax + pad)
 
 
-def _annotate_line_end(ax, xs: list[int], ys: list[float], label: str, color) -> None:
+def _annotate_line_end(
+    ax,
+    xs: list[int],
+    ys: list[float],
+    label: str,
+    color,
+    *,
+    point_index: int = -1,
+    below: bool = False,
+) -> None:
     y_arr = np.asarray(ys, dtype=float)
     valid = np.isfinite(y_arr)
     if not valid.any():
         return
-    idx = int(np.where(valid)[0][-1])
+    idx = point_index if point_index >= 0 else len(xs) + point_index
+    if idx < 0 or idx >= len(xs) or not np.isfinite(y_arr[idx]):
+        idx = int(np.where(valid)[0][-1])
+    if below:
+        xytext = (0, -5)
+        va = "top"
+    else:
+        xytext = (0, 5)
+        va = "bottom"
     ax.annotate(
         label,
-        xy=(xs[idx], y_arr[idx]),
-        xytext=(0, 5),
+        xy=(xs[idx], float(y_arr[idx])),
+        xytext=xytext,
         textcoords="offset points",
-        va="bottom",
+        va=va,
         ha="center",
         color=color,
         fontsize=8,
@@ -145,20 +164,39 @@ def plot_scaling(
         for method in methods:
             y = _series(rows, method, agents, field, dt=dt, event_makespan_by_n=event_makespan_by_n)
             (line,) = ax.plot(agents, y, marker="o")
-            _annotate_line_end(
-                ax,
-                agents,
-                y,
-                ENSEMBLE_METHOD_LABELS.get(method, method),
-                line.get_color(),
-            )
+            label = ENSEMBLE_METHOD_LABELS.get(method, method)
+            if field == "success" and method == "cbs":
+                _annotate_line_end(
+                    ax,
+                    agents,
+                    y,
+                    label,
+                    line.get_color(),
+                    point_index=-3,
+                    below=True,
+                )
+            elif field == "runtime" and method == "pp_path_length":
+                _annotate_line_end(
+                    ax,
+                    agents,
+                    y,
+                    label,
+                    line.get_color(),
+                    below=True,
+                )
+            else:
+                _annotate_line_end(ax, agents, y, label, line.get_color())
         ax.set_xlabel("Number of Agents")
         ax.set_ylabel(ylabel)
         ax.grid(True, linestyle="--", alpha=0.4)
         ax.set_title(panel_titles.get(field, field.capitalize()))
         if field == "runtime":
             ax.set_yscale("log")
-        _pad_axes_for_labels(ax, log_y=(field == "runtime"))
+        _pad_axes_for_labels(
+            ax,
+            log_y=(field == "runtime"),
+            success_pct=(field == "success"),
+        )
     fig.tight_layout(pad=1.2)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=dpi, bbox_inches="tight")
