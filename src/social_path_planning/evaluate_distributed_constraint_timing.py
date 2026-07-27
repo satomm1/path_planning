@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument(
         "--plot-path",
         type=str,
-        default="results/distributed_eval/distributed_eval_times.png",
+        default="results/distributed_eval/distributed_eval_times.svg",
         help="Output plot path for centralized vs distributed times.",
     )
     return parser.parse_args()
@@ -193,22 +193,23 @@ def write_time_comparison_plot(summary_rows, plot_path):
     for row in summary_rows:
         grouped[row["run_id"]].append(row)
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(3.4, 2.5))
     for run_id, rows in grouped.items():
         ordered = sorted(rows, key=lambda r: int(r["stage_size"]))
         stage_sizes = [int(r["stage_size"]) for r in ordered]
         centralized = [float(r["centralized_total_constraint_time_s"]) for r in ordered]
         distributed = [float(r["distributed_makespan_time_s"]) for r in ordered]
-        ax.plot(stage_sizes, centralized, marker="o", linewidth=2, label=f"Centralized")
-        ax.plot(stage_sizes, distributed, marker="s", linewidth=2, linestyle="--",
-                label=f"Distributed")
+        ax.plot(stage_sizes, centralized, marker="o", linewidth=1.2, label=f"Centralized",
+                markersize=4)
+        ax.plot(stage_sizes, distributed, marker="s", linewidth=1.2, linestyle="--",
+                label=f"Distributed", markersize=4)
 
-    ax.set_xlabel("Number of Robots", fontsize=16)
-    ax.set_ylabel("Constraint Computation Time (s)", fontsize=16)
-    ax.set_title("Centralized vs Distributed Constraint Times", fontsize=18)
+    ax.set_xlabel("Number of Robots", fontsize=8)
+    ax.set_ylabel("Constraint Computation Time (s)", fontsize=8)
+    ax.set_title("Centralized vs Distributed Constraint Times", fontsize=10)
     ax.grid(True, alpha=0.3)
-    ax.tick_params(axis="both", which="major", labelsize=14)
-    ax.legend(loc="best", fontsize=14)
+    ax.tick_params(axis="both", which="major", labelsize=7.5)
+    ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
 
     plot_path = Path(plot_path)

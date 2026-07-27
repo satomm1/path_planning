@@ -54,7 +54,7 @@ def _pad_axes_for_labels(ax, *, log_y: bool = False, success_pct: bool = False) 
     if success_pct:
         ax.set_ylim(ymin - 1.0, min(105.0, ymax + 4.0))
     elif log_y and ymin > 0:
-        ax.set_ylim(ymin, ymax * 1.25)
+        ax.set_ylim(ymin, ymax * 1.80)
     else:
         pad = (ymax - ymin) * 0.2
         ax.set_ylim(ymin - pad * 0.1, ymax + pad)
@@ -149,7 +149,7 @@ def plot_scaling(
     methods = [m for m in METHODS if any(r["method"] == m for r in rows)]
     event_makespan_by_n = _event_makespan_avg_by_n(trials_csv) if trials_csv and trials_csv.is_file() else None
 
-    fig, axes = plt.subplots(1, 3, figsize=(10, 3.5))
+    fig, axes = plt.subplots(1, 3, figsize=(7, 2.45))
     panels = [
         ("success", "Success Rate (%)"),
         ("runtime", "Solver Runtime (s)"),
@@ -163,7 +163,7 @@ def plot_scaling(
     for ax, (field, ylabel) in zip(axes, panels):
         for method in methods:
             y = _series(rows, method, agents, field, dt=dt, event_makespan_by_n=event_makespan_by_n)
-            (line,) = ax.plot(agents, y, marker="o")
+            (line,) = ax.plot(agents, y, marker="o", markersize=3, linewidth=1.2)
             label = ENSEMBLE_METHOD_LABELS.get(method, method)
             if field == "success" and method == "cbs":
                 _annotate_line_end(
@@ -186,10 +186,11 @@ def plot_scaling(
                 )
             else:
                 _annotate_line_end(ax, agents, y, label, line.get_color())
-        ax.set_xlabel("Number of Agents")
-        ax.set_ylabel(ylabel)
+        ax.set_xlabel("Number of Agents", fontsize=8)
+        ax.set_ylabel(ylabel, fontsize=8)
+        ax.tick_params(axis="both", which="major", labelsize=7.5)
         ax.grid(True, linestyle="--", alpha=0.4)
-        ax.set_title(panel_titles.get(field, field.capitalize()))
+        ax.set_title(panel_titles.get(field, field.capitalize()), fontsize=10)
         if field == "runtime":
             ax.set_yscale("log")
         _pad_axes_for_labels(

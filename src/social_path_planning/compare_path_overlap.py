@@ -919,7 +919,7 @@ def plot_overlap_agent_sweep(
     if not agent_counts:
         raise ValueError("No trial rows to plot.")
 
-    fig, ax = plt.subplots(figsize=(8, 5))
+    fig, ax = plt.subplots(figsize=(3.4, 2.75))
     x = np.asarray(agent_counts, dtype=float)
 
     for mode in solver_modes:
@@ -943,9 +943,10 @@ def plot_overlap_agent_sweep(
                 x,
                 means,
                 marker="o",
-                linewidth=2.2,
+                linewidth=1.2,
                 # linestyle=linestyle,
                 color=color,
+                markersize=4,
             )
 
     legend_handles = []
@@ -960,26 +961,26 @@ def plot_overlap_agent_sweep(
                     [0],
                     [0],
                     color=color,
-                    linewidth=2.2,
+                    linewidth=1.2,
                     # linestyle=linestyle,
                     label=f"{solver_label}",
                     # label=f"{solver_label} ({metric_suffix})",
                 )
             )
 
-    ax.set_xlabel("Number of Robots", fontsize=16)
-    ax.set_ylabel("Unique Overlapping Path Segments", fontsize=16)
+    ax.set_xlabel("Number of Robots", fontsize=8)
+    ax.set_ylabel("Unique Overlapping Path Segments", fontsize=8)
     # ax.set_title("Path Overlap vs. Number of Agents", fontsize=20)
-    ax.set_title("Environment 1 Path Overlap Comparison", fontsize=18)
+    ax.set_title("Environment 1 Path Overlap Comparison", fontsize=10)
     ax.set_xticks(np.arange(min(agent_counts), max(agent_counts) + 1, step=2))
-    ax.tick_params(axis='both', labelsize=14)
-    ax.legend(handles=legend_handles, loc="best", fontsize=16)
+    ax.tick_params(axis='both', labelsize=7.5)
+    ax.legend(handles=legend_handles, loc="best", fontsize=8)
     fig.tight_layout()
 
     if plot_output:
         plot_output = Path(plot_output)
         plot_output.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(plot_output, dpi=450, bbox_inches="tight")
+        fig.savefig(plot_output, dpi=600, bbox_inches="tight")
         print(f"Saved plot to: {plot_output.resolve()}")
 
     if show_plot:
