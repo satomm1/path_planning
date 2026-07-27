@@ -13,7 +13,7 @@ _SUPPORTED_OPS = [
     "rotated_square_set",
 ]
 _PLOT_FIGSIZE = (8, 8)
-_PLOT_DPI = 300
+_PLOT_DPI = 600
 
 # ``occupancy_encoding: ros_int8`` PGM bytes (costmap-style; PGM cannot store int8 -1).
 ROS_PGM_INT8_UNKNOWN_BYTE = 205
@@ -726,18 +726,19 @@ def load_grid_scenario(
             if isinstance(plot_title, str) and plot_title.strip()
             else f"Scenario Occupancy Grid: {scenario_name}"
         )
-        ax.set_title(title, fontsize=24)
-        ax.set_xlabel("X (m)", fontsize=20)
-        ax.set_ylabel("Y (m)", fontsize=20)
+        ax.set_title(title, fontsize=32)
+        ax.set_xlabel("X (m)", fontsize=26)
+        ax.set_ylabel("Y (m)", fontsize=26)
 
         # Set tick font size
-        ax.tick_params(axis="both", which="major", labelsize=20)
+        ax.tick_params(axis="both", which="major", labelsize=24)
 
+        fig.tight_layout()
         if save_path:
             save_target = Path(save_path)
             save_target.parent.mkdir(parents=True, exist_ok=True)
             # Keep output dimensions consistent across scenarios.
-            fig.savefig(str(save_target), dpi=_PLOT_DPI)
+            fig.savefig(str(save_target), dpi=_PLOT_DPI, bbox_inches="tight")
             print(f"Saved scenario figure to {save_target}")
         if show_plot:
             plt.show()

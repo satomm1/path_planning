@@ -92,7 +92,7 @@ class FrequentSubgraph:
         edge_color="red",
         edge_linewidth=2,
         edge_alpha=0.75,
-        figsize=(10, 10),
+        figsize=(2.33, 2.45),
         heatmap_layer=None,
         min_visible_intensity=5.0,
         heatmap_legend=False,
@@ -447,11 +447,11 @@ def plot_all_graph_snapshots(
     title="Social Graph",
     xlabel="X (m)",
     ylabel="Y (m)",
-    title_fontsize=16,
-    label_fontsize=16,
-    tick_fontsize=16,
+    title_fontsize=10,
+    label_fontsize=8,
+    tick_fontsize=8,
     edge_color="red",
-    edge_linewidth=2,
+    edge_linewidth=2.5,
     edge_alpha=0.75,
     figsize=(10, 10),
     heatmap_prefix=None,
@@ -476,7 +476,7 @@ def plot_all_graph_snapshots(
     results = []
     for graph_path in graph_paths:
         snapshot_idx = _extract_snapshot_idx(graph_path)
-        save_fig = os.path.join(save_dir, f"social_graph_{snapshot_idx:04d}.png")
+        save_fig = os.path.join(save_dir, f"social_graph_{snapshot_idx:04d}.svg")
         result = plot_graph_snapshot(
             timeline_dir=timeline_dir,
             graph_file=graph_path,
@@ -775,7 +775,7 @@ if __name__ == "__main__":
     plot_group.add_argument(
         "--edge-linewidth",
         type=float,
-        default=3,
+        default=4,
         help="Graph edge line width (plot-snapshot mode).",
     )
     plot_group.add_argument(

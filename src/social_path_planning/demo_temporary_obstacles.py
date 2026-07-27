@@ -90,10 +90,10 @@ TEMP_OBSTACLE_OVERLAY_ALPHA = 0.975
 
 # --- Standalone bottom-right (adapted graph) figure: edit these as needed ---
 SAVE_STANDALONE_ADAPTED_GRAPH = True
-ADAPTED_GRAPH_FIGSIZE = (10, 10)
+ADAPTED_GRAPH_FIGSIZE = (2.33, 2.45)
 ADAPTED_GRAPH_DPI = 450
 ADAPTED_GRAPH_EDGE_COLOR = "darkorange"
-ADAPTED_GRAPH_EDGE_LINEWIDTH = 2.0
+ADAPTED_GRAPH_EDGE_LINEWIDTH = 0.75
 ADAPTED_GRAPH_EDGE_ALPHA = 0.85
 ADAPTED_GRAPH_SHOW_TEMP_HEATMAP = True
 ADAPTED_GRAPH_HEATMAP_MIN_INTENSITY = 5.0
@@ -101,7 +101,7 @@ ADAPTED_GRAPH_HEATMAP_LEGEND = False
 ADAPTED_GRAPH_TITLE_FONTSIZE = 18
 ADAPTED_GRAPH_LABEL_FONTSIZE = 28
 ADAPTED_GRAPH_TICK_FONTSIZE = 28
-ADAPTED_GRAPH_LEGEND_FONTSIZE = 22
+ADAPTED_GRAPH_LEGEND_FONTSIZE = 8
 
 
 class _NumpyUniformRng:
@@ -414,6 +414,8 @@ def save_adapted_graph_figure(
             f"Adapted Graph Preview\n(threshold={adapted_threshold}, affected paths only)",
             fontsize=ADAPTED_GRAPH_TITLE_FONTSIZE,
         )
+    # Turn off ax ticks and x/y labels
+    ax.axis("off")
     fig.tight_layout()
     fig.savefig(output_path, dpi=ADAPTED_GRAPH_DPI, bbox_inches="tight")
     plt.close(fig)
