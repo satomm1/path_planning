@@ -658,7 +658,7 @@ def plot_sample_paths(
 
     solver_modes = list(SOLVER_MODES) if solver_modes is None else list(solver_modes)
     n = len(solver_modes)
-    fig, axes = plt.subplots(1, n, figsize=(6 * n, 6))
+    fig, axes = plt.subplots(1, n, figsize=(7, 2.45))
     if n == 1:
         axes = [axes]
 
@@ -670,21 +670,23 @@ def plot_sample_paths(
             path = sample[f"{solver}_path"]
             xs, ys = zip(*path)
             color = cmap(i % cmap.N)
-            ax.plot(xs, ys, color=color, linewidth=2.5, alpha=1)
-            ax.scatter(sample["x_init"][0], sample["x_init"][1], c=[color], s=40, zorder=5, marker="o")
-            ax.scatter(sample["x_goal"][0], sample["x_goal"][1], c=[color], marker="*", s=80, zorder=5)
+            ax.plot(xs, ys, color=color, linewidth=1.8, alpha=1)
+            ax.scatter(sample["x_init"][0], sample["x_init"][1], c=[color], s=20, zorder=5,
+                       marker="o")
+            ax.scatter(sample["x_goal"][0], sample["x_goal"][1], c=[color], marker="*", s=40,
+                       zorder=5)
 
         title = SOLVER_PLOT_TITLES[solver]
         if solver == "modified" and modified_title:
             title = modified_title
-        ax.set_title(title, fontsize=22)
+        ax.set_title(title, fontsize=10)
         ax.set_axis_off()
 
         handles = [
             Line2D([0], [0], marker="o", color="k", markerfacecolor="green", markersize=6, label="start"),
             Line2D([0], [0], marker="*", color="k", markerfacecolor="gold", markersize=10, label="goal"),
         ]
-        ax.legend(handles=handles, loc="best", fontsize=12)
+        ax.legend(handles=handles, loc="best", fontsize=8)
 
     fig.tight_layout()
     if plot_output:

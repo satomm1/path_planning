@@ -21,10 +21,10 @@ hallway_data = np.array([6.386896010005148,
 ])
 
 if __name__ == "__main__":
-    plt.figure(figsize=(8, 5))
+    plt.figure(figsize=(3.4, 2.5))
 
     # Plot horizontal line at y = 1
-    plt.axhline(y=1, color='black', linestyle='--', label='Vanilla A*', linewidth=2)
+    plt.axhline(y=1, color='black', linestyle='--', label='Vanilla A*', linewidth=1)
 
     grid2_speedups = grid2_data[1:] / grid2_data[0]
     hallway_speedups = hallway_data[1:] / hallway_data[0]
@@ -33,13 +33,17 @@ if __name__ == "__main__":
     plt.plot(range(50, 50*len(grid2_data), 50), grid2_speedups, marker='o', label='Environment 1')
     plt.plot(range(50, 50*len(hallway_data), 50), hallway_speedups, marker='o',
              label='Environment 2')
-    plt.xlabel("Number of Planned Paths in Social Graph", fontsize=18)
-    plt.ylabel("Relative Path Planning Time", fontsize=18)
-    plt.xticks(fontsize=16)
-    plt.yticks(fontsize=16)
-    plt.legend(fontsize=14, loc='upper right', )
-    plt.title("Computation Time Reduction With Social Graphs", fontsize=18)
+    plt.xlabel("Number of Planned Paths in Social Graph", fontsize=8)
+    plt.ylabel("Relative Path Planning Time", fontsize=8)
+    plt.xticks(fontsize=7.5)
+    plt.yticks(fontsize=7.5)
+    # plt.legend(fontsize=8, loc='upper right', )
+    plt.text(147, 0.864, "Environment 1", fontsize=7.5, color='tab:blue')
+    plt.text(128, 0.96, "Environment 2", fontsize=7.5, color='tab:orange')
+    plt.text(150, 1.001, "Vanilla A*", fontsize=7.5, color='black')
+    plt.ylim([0.855, 1.01])
+    plt.title("Social Graph Computation Reduction ", fontsize=10)
     plt.tight_layout()
-    plt.savefig("benchmarks/benchmark_plot.png", dpi=600)
+    plt.savefig("benchmarks/benchmark_plot.svg", dpi=600)
     plt.show()
 
