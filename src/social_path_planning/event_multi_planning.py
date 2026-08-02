@@ -1580,7 +1580,7 @@ def viz_event_waypoints(
     output_path = Path(output_path or (VIZ_EVENT_OUTPUT_DIR + "/waypoints.png"))
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, ax = plt.subplots(figsize=(10, 8))
+    fig, ax = plt.subplots(figsize=(3.4, 2.72))
     if occ_grid is not None:
         occ_grid.plot_grid(ax=ax)
     ax._event_labels = set()
@@ -1863,7 +1863,7 @@ if __name__ == "__main__":
         occ_grid=occ_grid,
         times=sim_anim_times,
         snapshot_time=snapshot_time,
-        output_file=str(output_dir / "grid2_map_context_event_simultaneous.png"),
+        output_file=str(output_dir / "grid2_map_context_event_simultaneous.svg"),
         title="Simultaneous Planning",
         dpi=600
     )

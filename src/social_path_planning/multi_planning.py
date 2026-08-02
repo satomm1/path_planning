@@ -706,7 +706,7 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         objective = cp.Minimize(t[-1])  # Minimize time to reach final point
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=verbose, solver=cp.GLPK_MI)
+        prob.solve(verbose=verbose, solver=cp.ECOS_BB)
         return _scalar_times_from_solver(prob, t, "MultiAgentSequentialPlanner")
 
 
@@ -851,7 +851,7 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
         objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=verbose, solver=cp.GLPK_MI)
+        prob.solve(verbose=verbose, solver=cp.ECOS_BB)
         return _multi_agent_times_from_solver(prob, agent_times, "MultiAgentSimultaneousPlanner")
 
     def plan_from_collision_pairs(self, collision_pairs, max_z, verbose=False):
@@ -973,7 +973,7 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
         objective = cp.Minimize(cp.norm(final_time_vars, p=self.norm))  # Minimize norm of final times
         prob = cp.Problem(objective, constraints)
         print("Starting to solve multi-agent planning problem...")
-        prob.solve(verbose=verbose, solver=cp.GLPK_MI)
+        prob.solve(verbose=verbose, solver=cp.ECOS_BB)
         return _multi_agent_times_from_solver(prob, agent_times, "MultiAgentCombinedPlanner")
 
 def get_position_at_time(t, path, time_points):
@@ -1057,11 +1057,11 @@ def create_map_context_plot(
     Create and save a static map plot with robot paths.
     Optionally overlays robot positions at snapshot_time.
     """
-    fig, ax = plt.subplots(figsize=(6.75, 6))
-    title_fs = 26
-    label_fs = 20
-    tick_fs = 18
-    legend_fs = 20
+    fig, ax = plt.subplots(figsize=(3, 3.1))
+    title_fs = 10
+    label_fs = 8
+    tick_fs = 8
+    legend_fs = 8
 
     if occ_grid is not None:
         occ_grid.plot_grid(ax=ax)
@@ -1072,19 +1072,19 @@ def create_map_context_plot(
     for i, (path, color) in enumerate(zip(paths, colors)):
         xs = [p[0] for p in path]
         ys = [p[1] for p in path]
-        path_line, = ax.plot(xs, ys, color=color, linewidth=3, alpha=0.9, label=f"Robot {i + 1}")
+        path_line, = ax.plot(xs, ys, color=color, linewidth=2, alpha=0.9, label=f"Robot {i + 1}")
         path_handles.append(path_line)
         path_labels.append(f"Robot {i + 1}")
 
         # Start/goal markers for context in the paper figure.
-        ax.scatter(xs[0], ys[0], marker="s", s=100, color=color, edgecolors="black",
-                   linewidths=1.75, zorder=9)
-        ax.scatter(xs[-1], ys[-1], marker="*", s=180, color=color, edgecolors="black",
-                   linewidths=1.75, zorder=9)
+        ax.scatter(xs[0], ys[0], marker="s", s=50, color=color, edgecolors="black",
+                   linewidths=1.4, zorder=9)
+        ax.scatter(xs[-1], ys[-1], marker="*", s=80, color=color, edgecolors="black",
+                   linewidths=1.4, zorder=9)
 
         if times is not None and snapshot_time is not None:
             rx, ry = get_position_at_time(snapshot_time, path, times[i])
-            ax.scatter(rx, ry, marker="o", s=100, color=color, edgecolors="black", linewidths=1.75,
+            ax.scatter(rx, ry, marker="o", s=25, color=color, edgecolors="black", linewidths=1.4,
                        zorder=10)
 
     # if snapshot_time is not None:
@@ -1100,9 +1100,12 @@ def create_map_context_plot(
     #     )
 
     ax.set_title(title, fontsize=title_fs)
-    ax.set_xlabel("X(m)", fontsize=label_fs)
-    ax.set_ylabel("Y (m)", fontsize=label_fs)
-    ax.tick_params(axis="both", labelsize=tick_fs)
+    # ax.set_xlabel("X(m)", fontsize=label_fs)
+    # ax.set_ylabel("Y (m)", fontsize=label_fs)
+    # ax.tick_params(axis="both", labelsize=tick_fs)
+    # Turn ticks off
+    ax.set_xticks([])
+    ax.set_yticks([])
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, linestyle="--", alpha=0.35)
     path_legend = ax.legend(path_handles, path_labels, loc="upper right", fontsize=legend_fs)
@@ -1110,7 +1113,7 @@ def create_map_context_plot(
         # Line2D([0], [0], marker="s", color="none", markerfacecolor="green",
         #        markeredgecolor="gray", markersize=8, label="Start"),
         Line2D([0], [0], marker="o", color="none", markerfacecolor="gray",
-               markeredgecolor="black", markersize=8, label="Robot Position"),
+               markeredgecolor="black", markersize=4, label="Robot Position"),
         # Line2D([0], [0], marker="*", color="none", markerfacecolor="gold",
         #        markeredgecolor="gray", markersize=12, label="Goal"),
     ]
