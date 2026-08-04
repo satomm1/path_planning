@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from queue import PriorityQueue
 from typing import TYPE_CHECKING
@@ -119,7 +120,8 @@ class AStar(object):
         Output:
             Float Euclidean distance
         """
-        return np.linalg.norm(np.array(x1) - np.array(x2))
+        # Scalar math avoids per-call NumPy array allocation in the expand loop.
+        return math.hypot(x1[0] - x2[0], x1[1] - x2[1])
 
     def manhattan_distance(self, x1, x2):
         """
@@ -130,7 +132,7 @@ class AStar(object):
         Output:
             Float Manhattan distance
         """
-        return np.sum(np.abs(np.array(x1) - np.array(x2)))
+        return abs(x1[0] - x2[0]) + abs(x1[1] - x2[1])
 
     def h(self, x):
         return self.manhattan_distance(x, self.x_goal)
@@ -235,10 +237,13 @@ class AStar(object):
         )
 
     def leftness_penalty(self, x1, x2):
-        travel_dir = (np.array(x2) - np.array(x1)) / np.linalg.norm(np.array(x2) - np.array(x1))
+        dx = x2[0] - x1[0]
+        dy = x2[1] - x1[1]
+        norm = math.hypot(dx, dy)
+        travel_dir = (dx / norm, dy / norm)
         dist_to_left = self.occupancy.dist_to_wall_left(x2, travel_dir)
         return dist_to_left
-    
+
     def snap_to_grid(self, x):
         """ Returns the closest point on a discrete state grid
         Input:
@@ -249,7 +254,10 @@ class AStar(object):
         return (self.resolution * round(x[0] / self.resolution), self.resolution * round(x[1] / self.resolution))
 
     def get_index(self, x):
-        return int(np.round((x[0] - self.occupancy.origin_x) / self.resolution)), int(np.round((x[1] - self.occupancy.origin_y) / self.resolution))
+        return (
+            int(round((x[0] - self.occupancy.origin_x) / self.resolution)),
+            int(round((x[1] - self.occupancy.origin_y) / self.resolution)),
+        )
 
     def get_neighbors(self, x, step_resolution=1):
         """
@@ -336,7 +344,7 @@ class AStar(object):
                 print(f"Social A* found a path in {elapsed:.2f} seconds.")
                 return self._emit_solve_return(True, elapsed, "modified", return_timing, return_telemetry, log_telemetry)
 
-            if time.time() - t_start > 240:
+            if time.time() - t_start > 750:
                 elapsed = time.time() - t_start
                 self.last_solve_time = elapsed
                 print("A* took too long.")
