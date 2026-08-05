@@ -1,0 +1,3 @@
+# Optional dependencies for MAPF baseline comparison (CBS + prioritized planning).
+cbs-mapf>=0.5
+space-time-astar>=0.8
