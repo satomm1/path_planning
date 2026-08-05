@@ -225,3 +225,6 @@ devel/
 logs/
 .catkin_workspace
 install/
+
+*.pem
+*.pkl
