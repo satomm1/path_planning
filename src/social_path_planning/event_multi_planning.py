@@ -26,8 +26,8 @@ from social_path_planning.multi_planning import (
     _multi_agent_times_from_solver,
     _scalar_times_from_solver,
     create_map_context_plot,
+    create_map_context_video,
     create_space_time_plot,
-    create_video,
     path_to_arc_length,
 )
 
@@ -1709,10 +1709,11 @@ def create_event_video(
     *,
     output_file="video_event.gif",
     occ_grid=None,
+    title="Path Context Map",
 ):
-    """Render a multi-agent animation from event MILP schedules."""
+    """Render a multi-agent animation from event MILP schedules (map-context styling)."""
     paths, times = build_constant_velocity_schedules(analysis, event_times_list)
-    create_video(paths, times, output_file=output_file, occ_grid=occ_grid)
+    create_map_context_video(paths, times, occ_grid=occ_grid, output_file=output_file, title=title)
 
 
 _DEFAULT_GRID2_HEATMAP = "../../outputs_temp_obstacles/baseline_permanent_heatmap.npy"
@@ -1872,6 +1873,7 @@ if __name__ == "__main__":
         sim_event_times,
         output_file=str(output_dir / "grid2_video_event_simultaneous.gif"),
         occ_grid=occ_grid,
+        title="Simultaneous Planning",
     )
     print(
         "Simultaneous event MILP demo complete: "
@@ -1928,6 +1930,7 @@ if __name__ == "__main__":
         seq_event_times_list,
         output_file=str(output_dir / "grid2_video_event_sequential.gif"),
         occ_grid=occ_grid,
+        title="Event MILP Paths on Grid2 (sequential: path1 active)",
     )
     print(
         "Sequential event MILP demo complete: "
@@ -1991,6 +1994,7 @@ if __name__ == "__main__":
         combined_event_times_list,
         output_file=str(output_dir / "grid2_video_event_combined.gif"),
         occ_grid=occ_grid,
+        title="Event MILP Paths on Grid2 (combined: paths 1 & 4 active)",
     )
     print(
         "Combined event MILP demo complete: "

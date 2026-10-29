@@ -1045,22 +1045,12 @@ def create_space_time_plot(paths, times, output_file="space_time_sequential.png"
     print(f"Saved space-time plot to {output_file}")
 
 
-def create_map_context_plot(
-        paths,
-        occ_grid=None,
-        times=None,
-        snapshot_time=None,
-        output_file="map_context.png",
-        title="Path Context Map",
-        dpi=300):
+def _draw_map_context(ax, paths, occ_grid=None, title="Path Context Map"):
     """
-    Create and save a static map plot with robot paths.
-    Optionally overlays robot positions at snapshot_time.
+    Draw the static map-context layers (grid, paths, start/goal markers, legend).
+    Returns the per-path colors so callers can overlay matching robot markers.
     """
-    fig, ax = plt.subplots(figsize=(3, 3.1))
     title_fs = 10
-    label_fs = 8
-    tick_fs = 8
     legend_fs = 8
 
     if occ_grid is not None:
@@ -1082,27 +1072,7 @@ def create_map_context_plot(
         ax.scatter(xs[-1], ys[-1], marker="*", s=80, color=color, edgecolors="black",
                    linewidths=1.4, zorder=9)
 
-        if times is not None and snapshot_time is not None:
-            rx, ry = get_position_at_time(snapshot_time, path, times[i])
-            ax.scatter(rx, ry, marker="o", s=25, color=color, edgecolors="black", linewidths=1.4,
-                       zorder=10)
-
-    # if snapshot_time is not None:
-    #     ax.text(
-    #         0.02,
-    #         0.98,
-    #         f"Robot positions at t = {snapshot_time:.2f}s",
-    #         transform=ax.transAxes,
-    #         ha="left",
-    #         va="top",
-    #         bbox=dict(facecolor="white", alpha=0.9, edgecolor="none"),
-    #         fontsize=legend_fs,
-    #     )
-
     ax.set_title(title, fontsize=title_fs)
-    # ax.set_xlabel("X(m)", fontsize=label_fs)
-    # ax.set_ylabel("Y (m)", fontsize=label_fs)
-    # ax.tick_params(axis="both", labelsize=tick_fs)
     # Turn ticks off
     ax.set_xticks([])
     ax.set_yticks([])
@@ -1110,22 +1080,93 @@ def create_map_context_plot(
     ax.grid(True, linestyle="--", alpha=0.35)
     path_legend = ax.legend(path_handles, path_labels, loc="upper right", fontsize=legend_fs)
     marker_handles = [
-        # Line2D([0], [0], marker="s", color="none", markerfacecolor="green",
-        #        markeredgecolor="gray", markersize=8, label="Start"),
         Line2D([0], [0], marker="o", color="none", markerfacecolor="gray",
                markeredgecolor="black", markersize=4, label="Robot Position"),
-        # Line2D([0], [0], marker="*", color="none", markerfacecolor="gold",
-        #        markeredgecolor="gray", markersize=12, label="Goal"),
     ]
     marker_legend = ax.legend(handles=marker_handles, loc="upper right", fontsize=legend_fs)
     path_legend.get_title().set_fontsize(legend_fs)
     marker_legend.get_title().set_fontsize(legend_fs)
-    # ax.add_artist(path_legend)
     ax.add_artist(marker_legend)
+    return colors
+
+
+def create_map_context_plot(
+        paths,
+        occ_grid=None,
+        times=None,
+        snapshot_time=None,
+        output_file="map_context.png",
+        title="Path Context Map",
+        dpi=300):
+    """
+    Create and save a static map plot with robot paths.
+    Optionally overlays robot positions at snapshot_time.
+    """
+    fig, ax = plt.subplots(figsize=(3, 3.1))
+    colors = _draw_map_context(ax, paths, occ_grid=occ_grid, title=title)
+
+    if times is not None and snapshot_time is not None:
+        for path, time_seq, color in zip(paths, times, colors):
+            rx, ry = get_position_at_time(snapshot_time, path, time_seq)
+            ax.scatter(rx, ry, marker="o", s=25, color=color, edgecolors="black", linewidths=1.4,
+                       zorder=10)
+
     fig.tight_layout()
     fig.savefig(output_file, dpi=dpi)
     plt.close(fig)
     print(f"Saved map context plot to {output_file}")
+
+
+def create_map_context_video(
+        paths,
+        times,
+        occ_grid=None,
+        output_file="map_context.gif",
+        title="Path Context Map",
+        total_frames=200,
+        fps=10,
+        dpi=200,
+        show_time=True):
+    """
+    Animated version of create_map_context_plot: same layout and coloring, with
+    robot position markers moving along their paths over time.
+    Saves .gif via Pillow, or .mp4 if ffmpeg is installed.
+    """
+    fig, ax = plt.subplots(figsize=(3, 3.1))
+    colors = _draw_map_context(ax, paths, occ_grid=occ_grid, title=title)
+
+    robot_markers = []
+    for path, time_seq, color in zip(paths, times, colors):
+        rx, ry = get_position_at_time(time_seq[0], path, time_seq)
+        marker = ax.scatter([rx], [ry], marker="o", s=25, color=color, edgecolors="black",
+                            linewidths=1.4, zorder=10)
+        robot_markers.append(marker)
+
+    time_text = None
+    if show_time:
+        time_text = ax.text(0.02, 0.98, "", transform=ax.transAxes, ha="left", va="top",
+                            fontsize=8, zorder=11,
+                            bbox=dict(facecolor="white", alpha=0.8, edgecolor="none", pad=1.5))
+    fig.tight_layout()
+
+    all_times = [t for time_seq in times for t in time_seq]
+    frames = np.linspace(min(all_times), max(all_times), total_frames)
+
+    def update(current_time):
+        for marker, path, time_seq in zip(robot_markers, paths, times):
+            marker.set_offsets([get_position_at_time(current_time, path, time_seq)])
+        artists = list(robot_markers)
+        if time_text is not None:
+            time_text.set_text(f"t = {current_time:.1f} s")
+            artists.append(time_text)
+        return artists
+
+    ani = animation.FuncAnimation(fig, update, frames=frames, blit=False, interval=1000 / fps)
+    writer = "ffmpeg" if str(output_file).lower().endswith(".mp4") else "pillow"
+    print(f"Saving map context animation to {output_file}...")
+    ani.save(output_file, writer=writer, fps=fps, dpi=dpi)
+    plt.close(fig)
+    print(f"Saved map context animation to {output_file}")
 
 
 def create_video(paths, times, output_file="video.gif", occ_grid=None):

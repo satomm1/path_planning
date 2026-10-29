@@ -285,8 +285,12 @@ class AStar(object):
                     if col < 0 or row < 0 or col >= occ.width or row >= occ.height:
                         continue
                     center = fine_cell_center_world(occ, col, row)
-                    if self.is_free(center):
-                        neighbors.append(state)
+                    if not self.is_free(center):
+                        continue
+                    if getattr(occ, "requires_segment_collision_check", False):
+                        if not occ.is_segment_free(x, center):
+                            continue
+                    neighbors.append(state)
         return neighbors
 
     def find_best_est_cost_through(self):

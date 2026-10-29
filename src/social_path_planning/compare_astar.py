@@ -645,6 +645,62 @@ def plot_debug_pair(
     plt.close(fig)
 
 
+SAMPLE_PANEL_WIDTH_IN = 2.0
+SAMPLE_TITLE_FONTSIZE = 10
+SAMPLE_LEGEND_FONTSIZE = 9
+
+
+def _make_sample_figure(occ_grid, sample_pairs, modified_title, solver_modes):
+    """Create the 1xN sample-path figure with grids, start/goal markers, titles and legends."""
+    n = len(solver_modes)
+    panel_h = SAMPLE_PANEL_WIDTH_IN * occ_grid.height / occ_grid.width + 0.35
+    fig, axes = plt.subplots(1, n, figsize=(SAMPLE_PANEL_WIDTH_IN * n, panel_h))
+    if n == 1:
+        axes = [axes]
+
+    cmap = plt.get_cmap("tab10", max(len(sample_pairs), 1))
+    colors = [cmap(i % cmap.N) for i in range(len(sample_pairs))]
+    for j, solver in enumerate(solver_modes):
+        ax = axes[j]
+        occ_grid.plot_grid(ax=ax)
+        for sample, color in zip(sample_pairs, colors):
+            ax.scatter(sample["x_init"][0], sample["x_init"][1], c=[color], s=20, zorder=5,
+                       marker="o")
+            ax.scatter(sample["x_goal"][0], sample["x_goal"][1], c=[color], marker="*", s=40,
+                       zorder=5)
+
+        title = SOLVER_PLOT_TITLES[solver]
+        if solver == "modified" and modified_title:
+            title = modified_title
+        ax.set_title(title, fontsize=SAMPLE_TITLE_FONTSIZE)
+        ax.set_axis_off()
+
+        handles = [
+            Line2D([0], [0], marker="o", color="k", markerfacecolor="green", markersize=6, label="start"),
+            Line2D([0], [0], marker="*", color="k", markerfacecolor="gold", markersize=10, label="goal"),
+        ]
+        # Opaque and on top so paths passing underneath don't show through or cover it.
+        legend = ax.legend(handles=handles, loc="lower right", fontsize=SAMPLE_LEGEND_FONTSIZE,
+                           framealpha=1.0)
+        legend.set_zorder(10)
+
+    fig.tight_layout()
+    return fig, axes, colors
+
+
+def _interpolate_along_path(path, cum_dists, d):
+    """Return the path prefix and the point at arc length ``d`` along ``path``."""
+    if d >= cum_dists[-1]:
+        return list(path), path[-1]
+    k = int(np.searchsorted(cum_dists, d, side="right"))
+    seg_len = cum_dists[k] - cum_dists[k - 1]
+    t = 0.0 if seg_len < 1e-9 else (d - cum_dists[k - 1]) / seg_len
+    p0 = np.asarray(path[k - 1], dtype=float)
+    p1 = np.asarray(path[k], dtype=float)
+    point = tuple(p0 + t * (p1 - p0))
+    return list(path[:k]) + [point], point
+
+
 def plot_sample_paths(
     occ_grid,
     sample_pairs,
@@ -657,38 +713,12 @@ def plot_sample_paths(
         return
 
     solver_modes = list(SOLVER_MODES) if solver_modes is None else list(solver_modes)
-    n = len(solver_modes)
-    fig, axes = plt.subplots(1, n, figsize=(7, 2.45))
-    if n == 1:
-        axes = [axes]
-
-    cmap = plt.get_cmap("tab10", max(len(sample_pairs), 1))
-    for j, solver in enumerate(solver_modes):
-        ax = axes[j]
-        occ_grid.plot_grid(ax=ax)
-        for i, sample in enumerate(sample_pairs):
-            path = sample[f"{solver}_path"]
-            xs, ys = zip(*path)
-            color = cmap(i % cmap.N)
+    fig, axes, colors = _make_sample_figure(occ_grid, sample_pairs, modified_title, solver_modes)
+    for ax, solver in zip(axes, solver_modes):
+        for sample, color in zip(sample_pairs, colors):
+            xs, ys = zip(*sample[f"{solver}_path"])
             ax.plot(xs, ys, color=color, linewidth=1.8, alpha=1)
-            ax.scatter(sample["x_init"][0], sample["x_init"][1], c=[color], s=20, zorder=5,
-                       marker="o")
-            ax.scatter(sample["x_goal"][0], sample["x_goal"][1], c=[color], marker="*", s=40,
-                       zorder=5)
 
-        title = SOLVER_PLOT_TITLES[solver]
-        if solver == "modified" and modified_title:
-            title = modified_title
-        ax.set_title(title, fontsize=10)
-        ax.set_axis_off()
-
-        handles = [
-            Line2D([0], [0], marker="o", color="k", markerfacecolor="green", markersize=6, label="start"),
-            Line2D([0], [0], marker="*", color="k", markerfacecolor="gold", markersize=10, label="goal"),
-        ]
-        ax.legend(handles=handles, loc="best", fontsize=8)
-
-    fig.tight_layout()
     if plot_output:
         plot_path = Path(plot_output)
         plot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -697,6 +727,96 @@ def plot_sample_paths(
         print(f"Saved sample path figure to: {plot_output}")
     else:
         plt.show()
+
+
+def animate_sample_paths(
+    occ_grid,
+    sample_pairs,
+    gif_output,
+    modified_title=None,
+    solver_modes=None,
+    fps=20,
+    duration_s=3.0,
+    pause_s=0.4,
+    hold_s=1.5,
+    dpi=200,
+):
+    """Save a GIF that plays the sample routes one after another across all panels.
+
+    Route i is drawn simultaneously in every solver panel; once all panels finish it, route
+    i + 1 starts. Agents move at one constant speed, set so the longest path in the whole
+    figure takes ``duration_s`` seconds; finished routes stay drawn.
+    """
+    from matplotlib.animation import FuncAnimation, PillowWriter
+    from PIL import Image
+
+    class SharedPaletteGifWriter(PillowWriter):
+        """PillowWriter quantizes each frame to its own palette, so static elements shimmer.
+        Quantize every frame to the final frame's palette (it contains all colors) instead."""
+
+        def finish(self):
+            frames = [f.convert("RGB") for f in self._frames]
+            palette = frames[-1].quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+            frames = [f.quantize(palette=palette, dither=Image.Dither.NONE) for f in frames]
+            frames[0].save(self.outfile, save_all=True, append_images=frames[1:],
+                           duration=int(1000 / self.fps), loop=0)
+
+    if not sample_pairs:
+        print("No sample paths available to animate.")
+        return
+
+    solver_modes = list(SOLVER_MODES) if solver_modes is None else list(solver_modes)
+    fig, axes, colors = _make_sample_figure(occ_grid, sample_pairs, modified_title, solver_modes)
+
+    # tracks_by_sample[i] holds one (path, cum_dists, trail, agent) entry per solver panel.
+    tracks_by_sample = [[] for _ in sample_pairs]
+    for ax, solver in zip(axes, solver_modes):
+        for i, (sample, color) in enumerate(zip(sample_pairs, colors)):
+            path = [tuple(map(float, p)) for p in sample[f"{solver}_path"]]
+            seg = [float(np.linalg.norm(np.subtract(path[k + 1], path[k]))) for k in range(len(path) - 1)]
+            cum_dists = np.concatenate([[0.0], np.cumsum(seg)])
+            (trail,) = ax.plot([], [], color=color, linewidth=1.8, alpha=1)
+            (agent,) = ax.plot([], [], marker="o", color=color, markeredgecolor="k",
+                               markeredgewidth=0.5, markersize=4, zorder=6, linestyle="none")
+            tracks_by_sample[i].append((path, cum_dists, trail, agent))
+
+    # Frame schedule: (active sample index, distance travelled along it). Each sample gets
+    # frames in proportion to its longest path across panels, then a short pause.
+    sample_lens = [max(t[1][-1] for t in tracks) for tracks in tracks_by_sample]
+    max_len = max(sample_lens)
+    pause_frames = int(round(fps * pause_s))
+    schedule = []
+    for i, sample_len in enumerate(sample_lens):
+        n_move = max(int(round(fps * duration_s * sample_len / max_len)), 2)
+        schedule.extend((i, sample_len * f / (n_move - 1)) for f in range(n_move))
+        schedule.extend([(i, sample_len)] * pause_frames)
+    schedule.extend([(len(sample_lens) - 1, sample_lens[-1])] * int(round(fps * hold_s)))
+
+    all_artists = [a for tracks in tracks_by_sample for t in tracks for a in t[2:]]
+
+    def update(frame):
+        active, d = schedule[frame]
+        for i, tracks in enumerate(tracks_by_sample):
+            for path, cum_dists, trail, agent in tracks:
+                if i > active:
+                    trail.set_data([], [])
+                    agent.set_data([], [])
+                    continue
+                prefix, point = _interpolate_along_path(path, cum_dists, d if i == active else np.inf)
+                xs, ys = zip(*prefix)
+                trail.set_data(xs, ys)
+                if i == active and d < cum_dists[-1]:
+                    agent.set_data([point[0]], [point[1]])
+                else:
+                    agent.set_data([], [])
+        return all_artists
+
+    anim = FuncAnimation(fig, update, frames=len(schedule), blit=True)
+    gif_path = Path(gif_output)
+    gif_path.parent.mkdir(parents=True, exist_ok=True)
+    anim.save(gif_path, writer=SharedPaletteGifWriter(fps=fps), dpi=dpi)
+    plt.close(fig)
+    print(f"Saved sample path animation to: {gif_output}")
 
 
 def _rrt_kwargs_from_config(
@@ -735,6 +855,9 @@ def run_experiment(
     resume_from=None,
     plot_samples=0,
     plot_output=None,
+    gif_output=None,
+    gif_fps=20,
+    gif_duration=3.0,
     debug_plot_each_run=False,
     heatmap_prefix=None,
     heatmap_file=None,
@@ -1015,6 +1138,18 @@ def run_experiment(
             modified_title=modified_plot_title,
             solver_modes=solver_modes,
         )
+        if gif_output is None and plot_output:
+            gif_output = Path(plot_output).with_suffix(".gif")
+        if gif_output:
+            animate_sample_paths(
+                occ_grid,
+                sample_pairs,
+                gif_output,
+                modified_title=modified_plot_title,
+                solver_modes=solver_modes,
+                fps=gif_fps,
+                duration_s=gif_duration,
+            )
 
 
 def parse_args():
@@ -1082,6 +1217,22 @@ def parse_args():
         type=str,
         default=None,
         help="Optional output image path for sample plot (e.g. samples.png); if omitted, shows figure",
+    )
+    parser.add_argument(
+        "--gif-output",
+        type=str,
+        default=None,
+        help="Output path for an animated GIF of the sample paths (default: --plot-output with .gif suffix)",
+    )
+    parser.add_argument("--gif-fps", type=int, default=20, help="Frames per second for the sample GIF")
+    parser.add_argument(
+        "--gif-duration",
+        type=float,
+        default=3.0,
+        help=(
+            "Seconds for the longest sample path to be traversed in the GIF; paths play one "
+            "after another, so total length is roughly this times --plot-samples"
+        ),
     )
     parser.add_argument(
         "--debug-plot-each-run",
@@ -1182,6 +1333,9 @@ if __name__ == "__main__":
         resume_from=cli.resume_from,
         plot_samples=cli.plot_samples,
         plot_output=cli.plot_output,
+        gif_output=cli.gif_output,
+        gif_fps=cli.gif_fps,
+        gif_duration=cli.gif_duration,
         debug_plot_each_run=cli.debug_plot_each_run,
         heatmap_prefix=cli.heatmap_prefix,
         heatmap_file=cli.heatmap_file,
