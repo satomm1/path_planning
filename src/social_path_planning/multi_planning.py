@@ -429,8 +429,35 @@ def _assign_z_to_segment_pairs(segment_pairs, opposite_pairs=None, start_z_index
     return assigned, z_index
 
 
-def _iter_conflicting_segment_pairs(path_a, path_b, threshold):
-    """Yield (segment_index_i, segment_index_j) for conflicting segment pairs."""
+_VECTOR_NORM_EXACT = None  # cached result of _vectorized_norm_is_exact()
+_CONFLICT_BLOCK_ELEMENTS = 4_000_000  # vertex pairs per vectorized block (bounds memory)
+
+
+def _vectorized_norm_is_exact():
+    """
+    True if ``sqrt(dx*dx + dy*dy)`` equals ``np.linalg.norm`` of the 2-vector on this
+    platform (it does unless numpy's BLAS fuses the multiply-add). The vectorized
+    conflict detection relies on it to reproduce ``_segment_endpoint_conflict`` exactly.
+    """
+    global _VECTOR_NORM_EXACT
+    if _VECTOR_NORM_EXACT is None:
+        rng = np.random.default_rng(12345)
+        res = 0.2
+        diffs = np.concatenate([
+            res * rng.integers(-3000, 3000, 4000) - res * rng.integers(-3000, 3000, 4000),
+            rng.uniform(-60.0, 60.0, 4000),
+        ])
+        dx, dy = diffs, np.roll(diffs, 1)
+        vectorized = np.sqrt(dx * dx + dy * dy)
+        _VECTOR_NORM_EXACT = all(
+            float(np.linalg.norm(np.array([x, y]))) == v
+            for x, y, v in zip(dx.tolist(), dy.tolist(), vectorized.tolist())
+        )
+    return _VECTOR_NORM_EXACT
+
+
+def _iter_conflicting_segment_pairs_scalar(path_a, path_b, threshold):
+    """Reference implementation: test every segment pair with ``_segment_endpoint_conflict``."""
     if len(path_a) < 2 or len(path_b) < 2:
         return
     for i in range(len(path_a) - 1):
@@ -439,6 +466,40 @@ def _iter_conflicting_segment_pairs(path_a, path_b, threshold):
                 path_a[i], path_a[i + 1], path_b[j], path_b[j + 1], threshold
             ):
                 yield i, j
+
+
+def _iter_conflicting_segment_pairs(path_a, path_b, threshold):
+    """
+    Yield (segment_index_i, segment_index_j) for conflicting segment pairs, i.e. pairs
+    where some endpoint of segment i of ``path_a`` is within ``threshold`` of some
+    endpoint of segment j of ``path_b``.
+
+    Vectorized over all vertex pairs with the same per-element arithmetic as the scalar
+    reference (:func:`_iter_conflicting_segment_pairs_scalar`), so the yielded pairs and
+    their order (i ascending, then j) are identical. Falls back to the scalar loop for
+    non-2-D points or if the platform's ``np.linalg.norm`` cannot be reproduced exactly.
+    """
+    if len(path_a) < 2 or len(path_b) < 2:
+        return
+    a = np.asarray(path_a, dtype=float)
+    b = np.asarray(path_b, dtype=float)
+    if a.ndim != 2 or b.ndim != 2 or a.shape[1] != 2 or b.shape[1] != 2 or not _vectorized_norm_is_exact():
+        yield from _iter_conflicting_segment_pairs_scalar(path_a, path_b, threshold)
+        return
+    bx, by = b[:, 0], b[:, 1]
+    rows_per_block = max(2, _CONFLICT_BLOCK_ELEMENTS // max(1, len(b)))
+    n_segments_a = len(a) - 1
+    start = 0
+    while start < n_segments_a:
+        stop = min(n_segments_a, start + rows_per_block - 1)
+        block = a[start:stop + 1]  # vertices start..stop (segments start..stop-1)
+        dx = block[:, 0:1] - bx[None, :]
+        dy = block[:, 1:2] - by[None, :]
+        close = np.sqrt(dx * dx + dy * dy) <= threshold
+        conflict = close[:-1, :-1] | close[:-1, 1:] | close[1:, :-1] | close[1:, 1:]
+        for i, j in np.argwhere(conflict).tolist():
+            yield start + i, j
+        start = stop
 
 
 def _collect_segment_collision_pairs(

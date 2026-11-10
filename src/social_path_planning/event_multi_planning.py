@@ -282,14 +282,22 @@ def _cluster_segment_pairs_into_encounters(segment_pairs):
         if root_left != root_right:
             parent[root_right] = root_left
 
-    for left in range(len(pairs)):
-        i_left, j_left = pairs[left]
-        for right in range(left + 1, len(pairs)):
-            i_right, j_right = pairs[right]
-            if i_left == i_right or j_left == j_right:
-                union(left, right)
-            elif abs(i_left - i_right) == 1 or abs(j_left - j_right) == 1:
-                union(left, right)
+    # Two pairs are linked when their i (or j) indices are equal or differ by one. Rather
+    # than testing every pair of pairs, link all pairs sharing an index value and then
+    # link adjacent index values; this yields the same components in near-linear time.
+    by_i: dict[int, list[int]] = {}
+    by_j: dict[int, list[int]] = {}
+    for idx, (i, j) in enumerate(pairs):
+        by_i.setdefault(i, []).append(idx)
+        by_j.setdefault(j, []).append(idx)
+    for groups in (by_i, by_j):
+        for value, members in groups.items():
+            first = members[0]
+            for other in members[1:]:
+                union(first, other)
+            neighbor = groups.get(value + 1)
+            if neighbor is not None:
+                union(first, neighbor[0])
 
     grouped: dict[int, list[tuple[int, int]]] = {}
     for idx, pair in enumerate(pairs):
