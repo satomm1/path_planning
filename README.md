@@ -14,8 +14,8 @@ https://github.com/user-attachments/assets/f108923d-3014-4092-9f27-f063c4e9d94e
 ## Layout
 
 - [`package.xml`](package.xml), [`CMakeLists.txt`](CMakeLists.txt), [`setup.py`](setup.py) — catkin + setuptools at the **repository root**.
-- Python sources live under [`src/path_planning/path_planning/`](src/path_planning/path_planning/) as the importable package `path_planning`.
-- Scenario data: [`src/path_planning/path_planning/environments/`](src/path_planning/path_planning/environments/).
+- Python sources live under [`src/social_path_planning/`](src/social_path_planning/) as the importable package `social_path_planning` (the ROS/catkin package itself is named `path_planning`).
+- Scenario data: [`src/social_path_planning/environments/`](src/social_path_planning/environments/).
 - Generated benchmark artifacts (JSON, CSV, GIF, and related plots) live under [`results/`](results/) so the repository root stays small:
   - `results/distributed_constraint_timing/` — outputs from `benchmark_sparse_snapshots.py` in distributed-constraints mode (pair timings, manifest, path bank).
   - `results/distributed_eval/` — CSV/JSON/plot from `evaluate_distributed_constraint_timing.py`.
@@ -33,7 +33,7 @@ catkin_make   # or: catkin build
 source devel/setup.bash
 ```
 
-`setup.py` uses `catkin_pkg`; that is provided in a ROS Noetic environment. After sourcing `devel/setup.bash`, Python should resolve `import path_planning`.
+`setup.py` uses `catkin_pkg`; that is provided in a ROS Noetic environment. After sourcing `devel/setup.bash`, Python should resolve `import social_path_planning`.
 
 ## Optional Python dependencies
 
@@ -127,20 +127,20 @@ python3 -m social_path_planning.visualize_mapf --demo-open --num-agents 3 --outp
 
 ## Tests
 
-From the repository root, point `PYTHONPATH` at the parent of the `path_planning` package:
+From the repository root, point `PYTHONPATH` at `src` (the parent of the `social_path_planning` package):
 
 ```bash
-export PYTHONPATH=/path/to/path_planning/src/path_planning:$PYTHONPATH
-python3 -m unittest discover -s tests -v
+export PYTHONPATH=/path/to/path_planning/src:$PYTHONPATH
+python3 -m pytest tests -v
 ```
 
 ## Demos
 
-Example entry point (was previously `path_planning.py` at repo root):
+Example entry point:
 
 ```bash
-export PYTHONPATH=/path/to/path_planning/src/path_planning:$PYTHONPATH
-python3 -m path_planning.demo_path_planning
+export PYTHONPATH=/path/to/path_planning/src:$PYTHONPATH
+python3 -m social_path_planning.demo_path_planning
 ```
 
 ### Y2E2 social A* (random routes)

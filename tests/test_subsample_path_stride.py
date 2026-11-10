@@ -2,7 +2,7 @@
 
 import unittest
 
-from social_path_planning.path_subsample import subsample_path_by_stride
+from social_path_planning.multi_planning import subsample_path_by_stride
 
 
 class TestSubsamplePathByStride(unittest.TestCase):

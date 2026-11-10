@@ -228,3 +228,5 @@ install/
 
 *.pem
 *.pkl
+
+CLAUDE.md
