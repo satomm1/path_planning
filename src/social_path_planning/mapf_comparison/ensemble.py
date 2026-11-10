@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 import traceback
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
@@ -17,6 +17,7 @@ from social_path_planning.benchmark_sparse_snapshots import (
     _try_load_cached_astar_paths as try_load_cached_astar_paths,
 )
 from social_path_planning.mapf_comparison.checkpoint import coerce_bool, normalize_trial_row
+from social_path_planning.mapf_comparison.metrics import aggregate_mapf_metrics, aggregate_milp_metrics
 from social_path_planning.mapf_comparison.motion import MotionConfig
 from social_path_planning.mapf_comparison.pipeline import (
     MapfRunConfig,

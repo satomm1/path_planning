@@ -832,7 +832,7 @@ def _add_opposite_encounter_mutex_constraints(
         times_a[i_exit] <= _time_at_index(times_b, j_enter) - DELTA + big_m * z_var[z_index]
     )
     constraints.append(
-        _time_at_index(times_b, j_exit) <= times_a[i_enter] - DELTA - big_m * (1 - z_var[z_index])
+        _time_at_index(times_b, j_exit) <= times_a[i_enter] - DELTA + big_m * (1 - z_var[z_index])
     )
     if lines is not None:
         m = f"{float(big_m):.4f}"
@@ -843,7 +843,7 @@ def _add_opposite_encounter_mutex_constraints(
         )
         lines.append(
             f"    (2) t_{b}[{j_exit}] <= t_{a}[{i_enter}] - {delta}"
-            f" - {m} * (1 - z_{z_index})"
+            f" + {m} * (1 - z_{z_index})"
             f"   # agent {b} clears before agent {a} enters"
         )
     return 2

@@ -23,7 +23,6 @@ from social_path_planning.mapf_comparison.checkpoint import (
     compact_trial_rows,
     load_completed_keys,
     load_methods_to_retry,
-    load_trial_rows,
     write_csv as checkpoint_write_csv,
 )
 from social_path_planning.mapf_comparison.ensemble import (

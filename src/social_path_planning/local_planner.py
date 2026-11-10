@@ -1,15 +1,11 @@
 import numpy as np
-import matplotlib.pyplot as plt
-from scipy.optimize import minimize
 import time
-import networkx as nx
-import cvxpy as cp
 
 from social_path_planning.simulate import Simulator, Visualizer
 from social_path_planning.grid_loader import load_grid_scenario
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 from social_path_planning.a_star import AStar
-from social_path_planning.utils import *
+from social_path_planning.utils import compute_smoothed_traj, snap_to_grid
 
 V_PREV_THRES = 0.0001
 EPS = 0.1

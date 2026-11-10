@@ -366,7 +366,7 @@ def _add_ordering_constraints(constraints, times_a, times_b, i, j, z_var, z_inde
     if mode in ("both", "a_first"):
         constraints.append(times_a[i + 1] <= times_b[j] - DELTA + M * z_var[z_index])
     if mode in ("both", "b_first"):
-        constraints.append(times_b[j + 1] <= times_a[i] - DELTA - M * (1 - z_var[z_index]))
+        constraints.append(times_b[j + 1] <= times_a[i] - DELTA + M * (1 - z_var[z_index]))
 
 
 def _parse_collision_entry(entry):
