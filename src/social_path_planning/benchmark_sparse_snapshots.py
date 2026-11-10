@@ -12,54 +12,19 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from social_path_planning.a_star import AStar, AStar_With_Graph
-from social_path_planning.grid_loader import load_grid_scenario
-from social_path_planning.mapf_comparison.grid_traversability import ROBOT_DIAMETER_M
-from social_path_planning.occupancy_grid import StochOccupancyGrid2D
-from social_path_planning.utils import snap_to_grid
+from social_path_planning.common import (
+    build_occ_grid as _common_build_occ_grid,
+    compute_path_length,
+    generate_random_free_point,
+    path_from_serializable as _path_from_serializable,
+    path_to_serializable as _path_to_serializable,
+    route_endpoint_key as _route_endpoint_key,
+)
 
 
 def build_occ_grid(scenario_name):
-    occ, map_size, map_resolution = load_grid_scenario(scenario_name, plot=False)
-    map_dim = [round(map_size[i] / map_resolution) for i in range(2)]
-    occ_grid = StochOccupancyGrid2D(
-        map_resolution,
-        map_dim[0],
-        map_dim[1],
-        0,
-        0,
-        10,
-        occ.T,
-        robot_d=ROBOT_DIAMETER_M,
-    )
-    statespace_hi = snap_to_grid(map_size, map_resolution)
-    return occ_grid, map_size, map_resolution, statespace_hi
-
-
-def compute_path_length(path):
-    if path is None or len(path) < 2:
-        return 0.0
-    total = 0.0
-    for i in range(len(path) - 1):
-        p0 = np.array(path[i], dtype=float)
-        p1 = np.array(path[i + 1], dtype=float)
-        total += float(np.linalg.norm(p1 - p0))
-    return total
-
-
-def generate_random_free_point(occ_grid, rng):
-    low = np.array([occ_grid.origin_x, occ_grid.origin_y], dtype=float)
-    high = np.array(
-        [
-            occ_grid.origin_x + occ_grid.width * occ_grid.resolution,
-            occ_grid.origin_y + occ_grid.height * occ_grid.resolution,
-        ],
-        dtype=float,
-    )
-    while True:
-        xy = rng.uniform(low=low, high=high)
-        x, y = occ_grid.snap_to_grid(xy)
-        if occ_grid.is_free((x, y)):
-            return (x, y)
+    """Occupancy grid without a wall-distance cache (runtime raycast)."""
+    return _common_build_occ_grid(scenario_name, wall_cache="none")
 
 
 def discover_graph_snapshots(timeline_dir):
@@ -110,29 +75,12 @@ def sample_fixed_routes(occ_grid, num_routes, rng_seed, max_attempts):
         x_goal = generate_random_free_point(occ_grid, rng)
         if x_init == x_goal:
             continue
-        key = (float(x_init[0]), float(x_init[1]), float(x_goal[0]), float(x_goal[1]))
+        key = _route_endpoint_key(x_init, x_goal)
         if key in seen:
             continue
         seen.add(key)
         routes.append((x_init, x_goal))
     return routes, attempts
-
-
-def _path_to_serializable(path):
-    return [[float(p[0]), float(p[1])] for p in path]
-
-
-def _path_from_serializable(path_data):
-    return [tuple(float(v) for v in point) for point in path_data]
-
-
-def _route_endpoint_key(x_init, x_goal):
-    return (
-        float(x_init[0]),
-        float(x_init[1]),
-        float(x_goal[0]),
-        float(x_goal[1]),
-    )
 
 
 def _collect_endpoint_keys(routes, *, exclude_route_id=None):
@@ -591,7 +539,7 @@ def load_or_generate_path_bank(
         x_goal = generate_random_free_point(occ_grid, rng)
         if x_init == x_goal:
             continue
-        route_key = (float(x_init[0]), float(x_init[1]), float(x_goal[0]), float(x_goal[1]))
+        route_key = _route_endpoint_key(x_init, x_goal)
         if route_key in seen:
             continue
 

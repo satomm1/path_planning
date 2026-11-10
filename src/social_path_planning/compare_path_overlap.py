@@ -13,10 +13,14 @@ from matplotlib.lines import Line2D
 from scipy.spatial.distance import cdist
 
 from social_path_planning.benchmark_sparse_snapshots import (
-    _path_from_serializable,
-    _path_to_serializable,
     astar_path_cache_meta,
     merge_astar_paths_into_path_bank,
+)
+from social_path_planning.common import (
+    modified_solver_config as _modified_solver_config,
+    path_from_serializable as _path_from_serializable,
+    path_to_serializable as _path_to_serializable,
+    route_endpoint_key as _route_endpoint_key,
 )
 from social_path_planning.compare_astar import (
     SOLVER_MODES,
@@ -316,18 +320,6 @@ def _plot_path_with_overlap_highlights(
             )
 
 
-def _modified_solver_config(heatmap_prefix, heatmap_file, sparse_graph_threshold, sparse_min_component_size):
-    if heatmap_prefix or heatmap_file:
-        return {
-            "modified_solver": "heatmap_graph",
-            "heatmap_prefix": heatmap_prefix,
-            "heatmap_file": heatmap_file,
-            "sparse_graph_threshold": sparse_graph_threshold,
-            "sparse_min_component_size": sparse_min_component_size,
-        }
-    return {"modified_solver": "rightness_penalty"}
-
-
 def _rrt_config_from_kwargs(rrt_kwargs):
     if not rrt_kwargs:
         return None
@@ -350,15 +342,6 @@ def _mode_cache_meta(mode, *, social_graph, heatmap_prefix, heatmap_file, rrt_kw
         heatmap_prefix=heatmap_prefix,
         heatmap_file=heatmap_file,
         rrt_config=_rrt_config_from_kwargs(rrt_kwargs) if mode == "rrt_vanilla" else None,
-    )
-
-
-def _route_endpoint_key(x_init, x_goal):
-    return (
-        float(x_init[0]),
-        float(x_init[1]),
-        float(x_goal[0]),
-        float(x_goal[1]),
     )
 
 

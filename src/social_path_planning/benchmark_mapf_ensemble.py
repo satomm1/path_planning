@@ -5,7 +5,6 @@ Multi-trial MAPF ensemble benchmark: pooled routes, random agent subsets, averag
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import sys
 import time
@@ -13,13 +12,12 @@ from pathlib import Path
 
 import numpy as np
 
-from social_path_planning.grid_loader import load_grid_scenario
+from social_path_planning.common import (
+    build_occ_grid as _common_build_occ_grid,
+    file_sha256 as _file_sha256,
+    wall_distance_cache_path as _wall_distance_cache_path,
+)
 from social_path_planning.mapf_comparison import MapfRunConfig, MotionConfig
-from social_path_planning.mapf_comparison.grid_traversability import ROBOT_DIAMETER_M
-from social_path_planning.occupancy_grid import StochOccupancyGrid2D
-from social_path_planning.utils import snap_to_grid
-
-_MODULE_DIR = Path(__file__).resolve().parent
 from social_path_planning.mapf_comparison.checkpoint import (
     append_trial_rows,
     compact_trial_rows,
@@ -38,10 +36,6 @@ from social_path_planning.mapf_comparison.ensemble import (
 )
 
 
-def _wall_distance_cache_path(scenario_name: str) -> Path:
-    return _MODULE_DIR / "environments" / f"{scenario_name}_wall_dist.npz"
-
-
 def build_occ_grid(scenario_name: str):
     """
     Build the occupancy grid for ensemble runs.
@@ -49,37 +43,7 @@ def build_occ_grid(scenario_name: str):
     Uses a precomputed ``{scenario}_wall_dist.npz`` when present; does not build one
     if the file is missing (modified A* falls back to raycast wall queries).
     """
-    occ, map_size, map_resolution = load_grid_scenario(scenario_name, plot=False)
-    map_dim = [round(map_size[i] / map_resolution) for i in range(2)]
-    cache_path = _wall_distance_cache_path(scenario_name)
-    wall_cache = cache_path if cache_path.is_file() else None
-    if wall_cache is None:
-        print(
-            f"No wall-distance cache at {cache_path}; "
-            "modified A* will use runtime raycast (slower)."
-        )
-    occ_grid = StochOccupancyGrid2D(
-        map_resolution,
-        map_dim[0],
-        map_dim[1],
-        0,
-        0,
-        10,
-        occ.T,
-        robot_d=ROBOT_DIAMETER_M,
-        wall_distance_cache_path=wall_cache,
-        auto_build_wall_distance_cache=False,
-    )
-    statespace_hi = snap_to_grid(map_size, map_resolution)
-    return occ_grid, map_size, map_resolution, statespace_hi
-
-
-def _file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    return _common_build_occ_grid(scenario_name, wall_cache="if_present")
 
 
 def _parse_int_list(text: str) -> list[int]:
@@ -164,7 +128,8 @@ def _viz_event_waypoints_for_trial(
     sparse_min_component_size: int | None = None,
 ):
     """Analyze and plot event interest waypoints for one trial's sampled MILP paths."""
-    from social_path_planning.event_multi_planning import analyze_event_paths, viz_event_waypoints
+    from social_path_planning.event_multi_planning import analyze_event_paths
+    from social_path_planning.trajectory_viz import viz_event_waypoints
     from social_path_planning.multi_planning import subsample_path_by_stride
 
     rng = np.random.default_rng(int(trial_seed))

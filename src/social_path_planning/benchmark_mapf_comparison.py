@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import hashlib
 import json
 import sys
 import time
@@ -19,6 +18,7 @@ from social_path_planning.benchmark_sparse_snapshots import (
     get_or_compute_astar_paths,
     load_or_generate_path_bank,
 )
+from social_path_planning.common import file_sha256 as _file_sha256
 from social_path_planning.mapf_comparison import MotionConfig
 from social_path_planning.mapf_comparison.metrics import aggregate_milp_metrics
 from social_path_planning.mapf_comparison.pipeline import (
@@ -27,14 +27,6 @@ from social_path_planning.mapf_comparison.pipeline import (
     run_event_milp_solver,
     run_mapf_solvers,
 )
-
-
-def _file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _run_milp(occ_grid, stage_paths, norm: int, motion: MotionConfig):

@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 
-from social_path_planning.compare_astar import build_occ_grid, generate_random_free_point
+from social_path_planning.common import build_occ_grid, generate_random_free_point
 from social_path_planning.rrt_star import RRTStar
 
 

@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from social_path_planning.a_star import AStar
-from social_path_planning.compare_astar import build_occ_grid, generate_random_free_point
+from social_path_planning.common import build_occ_grid, generate_random_free_point
 
 SCENARIO = "y2e2"
 _PATH_COLORS = plt.cm.tab10(np.linspace(0, 1, 10))

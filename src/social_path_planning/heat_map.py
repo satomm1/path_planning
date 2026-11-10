@@ -34,7 +34,7 @@ import numpy as np
 from matplotlib.colors import hsv_to_rgb
 
 from social_path_planning.a_star import AStar, AStar_With_Graph
-from social_path_planning.compare_astar import build_occ_grid, generate_random_free_point
+from social_path_planning.common import HEATMAP_DIRECTION_INDEX, build_occ_grid, generate_random_free_point
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 
 _CHECKPOINT_EVERY_N = 10  # save heatmap after this many successful paths (same file as final save)
@@ -135,16 +135,7 @@ class HeatMap2DVector(HeatMap2D):
         # 0: NW, 1: N, 2: NE, 3: E, 4: W, 5: SW, 6: S, 7: SE
 
     def add_path(self, path, increment=1.0):
-        direction_map = {
-            (-1, 1): 0,  # NW
-            (0, 1): 1,   # N
-            (1, 1): 2,   # NE
-            (1, 0): 3,   # E
-            (-1, 0): 4,  # W
-            (-1, -1): 5, # SW
-            (0, -1): 6,  # S
-            (1, -1): 7   # SE
-        }
+        direction_map = HEATMAP_DIRECTION_INDEX
 
         for ii in range(len(path)-1):
             state = path[ii]
@@ -204,68 +195,6 @@ class HeatMap2DVector(HeatMap2D):
             ax.legend(handles, dir_labels, title='Direction (hue)', bbox_to_anchor=(1.35, 1.0))
 
         ax.set_title("Heat Map (HSV: hue=direction, value=intensity)")
-        ax.set_xlabel("X (m)")
-        ax.set_ylabel("Y (m)")
-        if show:
-            plt.show()
-        return ax
-
-    def save_heatmap(self, filename_prefix):
-        super().save_heatmap(filename_prefix)
-        ros_path = f"{filename_prefix}_heatmap_ros.npy"
-        np.save(ros_path, heatmap_array_to_ros_pgm_layout(self.heatmap))
-        print("Successfully saved heatmap (ROS PGM layout) to ", ros_path)
-
-
-class HeatMap2DVectorField(HeatMap2D):
-    def __init__(self, occ_grid: StochOccupancyGrid2D):
-        super().__init__(occ_grid)
-
-        self.heatmap = np.zeros((self.height, self.width, 2))  # 2 for vector field (x and y components)
-
-    def add_path(self, path, increment=1.0):
-        for ii in range(len(path)-2):
-            prev_state = path[ii]
-            state = path[ii+1]
-            next_state = path[ii+2]
-            x_idx, y_idx = self.get_index(state)
-            if 0 <= x_idx < self.width and 0 <= y_idx < self.height:
-                direction = np.array(next_state) - np.array(prev_state)
-                norm = np.linalg.norm(direction)
-                if norm > 0:
-                    direction = direction / norm  # Normalize
-                    self.heatmap[y_idx, x_idx, 0] += direction[0] * increment
-                    self.heatmap[y_idx, x_idx, 1] += direction[1] * increment
-
-    def plot_heatmap(self, ax=None, show=True):
-        if ax is None:
-            _, ax = plt.subplots()
-        self.occ_grid.plot_grid(ax=ax)
-        X, Y = np.meshgrid(np.arange(self.origin_x, self.origin_x + self.width * self.resolution, self.resolution),
-                           np.arange(self.origin_y, self.origin_y + self.height * self.resolution, self.resolution))
-        U = self.heatmap[:, :, 0]
-        V = self.heatmap[:, :, 1]
-        M = np.sqrt(U**2 + V**2)
-        C = M.copy()
-        zero_mask = M < 4
-        C[zero_mask] = np.nan
-        quiver = ax.quiver(X, Y, U, V, C, cmap='viridis', zorder=2, scale=200)
-        ax.set_title("Heat Map Vector Field")
-        ax.set_xlabel("X (m)")
-        ax.set_ylabel("Y (m)")
-        plt.colorbar(quiver, ax=ax, label='Vector Magnitude')
-        if show:
-            plt.show()
-        return ax
-
-    def plot_heatmap_no_vectors(self, ax=None, show=True):
-        if ax is None:
-            _, ax = plt.subplots()
-        self.occ_grid.plot_grid(ax=ax)
-        magnitude = np.sqrt(self.heatmap[:, :, 0] ** 2 + self.heatmap[:, :, 1] ** 2)
-        im = ax.imshow(magnitude, cmap='hot', origin='lower', extent=self.extent, aspect='equal', alpha=0.6, zorder=2)
-        plt.colorbar(im, ax=ax, label='Heat Intensity')
-        ax.set_title("Heat Map Magnitude")
         ax.set_xlabel("X (m)")
         ax.set_ylabel("Y (m)")
         if show:

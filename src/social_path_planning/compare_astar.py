@@ -4,18 +4,19 @@ import json
 import os
 from pathlib import Path
 
-_MODULE_DIR = Path(__file__).resolve().parent
-
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 
 from social_path_planning.a_star import AStar, AStar_With_Graph
-from social_path_planning.grid_loader import load_grid_scenario
-from social_path_planning.mapf_comparison.grid_traversability import ROBOT_DIAMETER_M
-from social_path_planning.occupancy_grid import StochOccupancyGrid2D
+from social_path_planning.common import (
+    build_occ_grid as _common_build_occ_grid,
+    compute_path_length,
+    generate_random_free_point,
+    modified_solver_config as _modified_solver_config,
+    route_endpoint_key as route_pair_key,
+)
 from social_path_planning.rrt_star import RRTStar
-from social_path_planning.utils import snap_to_grid
 
 
 SOLVER_MODES = ("vanilla", "rrt_vanilla", "modified")
@@ -62,60 +63,9 @@ def parse_solver_modes(solvers_arg, *, rrt_only=False):
     return sorted(modes, key=lambda m: canonical[m])
 
 
-def route_pair_key(x_init, x_goal):
-    return (
-        float(x_init[0]),
-        float(x_init[1]),
-        float(x_goal[0]),
-        float(x_goal[1]),
-    )
-
-
 def build_occ_grid(scenario_name):
-    occ, map_size, map_resolution = load_grid_scenario(scenario_name, plot=False)
-    map_dim = [round(map_size[i] / map_resolution) for i in range(2)]
-    cache_path = _MODULE_DIR / "environments" / f"{scenario_name}_wall_dist.npz"
-    occ_grid = StochOccupancyGrid2D(
-        map_resolution,
-        map_dim[0],
-        map_dim[1],
-        0,
-        0,
-        10,
-        occ.T,
-        robot_d=ROBOT_DIAMETER_M,
-        wall_distance_cache_path=cache_path if cache_path.is_file() else None,
-        auto_build_wall_distance_cache=True,
-    )
-    statespace_hi = snap_to_grid(map_size, map_resolution)
-    return occ_grid, map_size, map_resolution, statespace_hi
-
-
-def generate_random_free_point(occ_grid, rng):
-    low = np.array([occ_grid.origin_x, occ_grid.origin_y], dtype=float)
-    high = np.array(
-        [
-            occ_grid.origin_x + occ_grid.width * occ_grid.resolution,
-            occ_grid.origin_y + occ_grid.height * occ_grid.resolution,
-        ],
-        dtype=float,
-    )
-    while True:
-        xy = rng.uniform(low=low, high=high)
-        x, y = occ_grid.snap_to_grid(xy)
-        if occ_grid.is_free((x, y)):
-            return (x, y)
-
-
-def compute_path_length(path):
-    if path is None or len(path) < 2:
-        return 0.0
-    total = 0.0
-    for i in range(len(path) - 1):
-        p0 = np.array(path[i], dtype=float)
-        p1 = np.array(path[i + 1], dtype=float)
-        total += float(np.linalg.norm(p1 - p0))
-    return total
+    """Occupancy grid that uses (and rebuilds if stale) an existing wall-distance cache."""
+    return _common_build_occ_grid(scenario_name, wall_cache="auto_build")
 
 
 def compute_right_wall_distance_analysis(path, occ_grid, dist_thresh=15.0):
@@ -440,18 +390,6 @@ def load_resume_payload(path):
     if not isinstance(payload["routes"], list):
         raise ValueError("Resume file 'routes' must be a list")
     return payload
-
-
-def _modified_solver_config(heatmap_prefix, heatmap_file, sparse_graph_threshold, sparse_min_component_size):
-    if heatmap_prefix or heatmap_file:
-        return {
-            "modified_solver": "heatmap_graph",
-            "heatmap_prefix": heatmap_prefix,
-            "heatmap_file": heatmap_file,
-            "sparse_graph_threshold": sparse_graph_threshold,
-            "sparse_min_component_size": sparse_min_component_size,
-        }
-    return {"modified_solver": "rightness_penalty"}
 
 
 def validate_resume_compatibility(

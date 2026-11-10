@@ -8,11 +8,11 @@ import glob
 import re
 import pickle
 
-from social_path_planning.compare_astar import build_occ_grid, generate_random_free_point
+from social_path_planning.common import HEATMAP_DIRECTIONS, build_occ_grid, generate_random_free_point
 from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 from social_path_planning.heat_map import HeatMap2DVector
 from social_path_planning.a_star import AStar, AStar_With_Graph
-from social_path_planning.utils import *
+from social_path_planning.utils import snap_to_grid
 
 CHECKPOINT_FILENAME = "heatmap_checkpoint.npy"
 METADATA_FILENAME = "run_metadata.json"
@@ -47,16 +47,7 @@ class FrequentSubgraph:
         if reset_graph:
             self.graph = nx.DiGraph()
 
-        directions = [
-            (-1,  1),  # NW
-            (0,   1),  # N
-            (1,   1),  # NE
-            (1,   0),  # E
-            (-1,  0),  # W
-            (-1, -1),  # SW
-            (0,  -1),  # S
-            (1,  -1)   # SE
-        ]
+        directions = HEATMAP_DIRECTIONS
 
         for x in range(self.occ_grid.width):
             for y in range(self.occ_grid.height):
@@ -131,9 +122,6 @@ class FrequentSubgraph:
         if show:
             plt.show()
         return ax
-
-def heuristic(a, b):
-    return np.linalg.norm(np.array(a) - np.array(b), ord=1)
 
 def _latest_frame_index(output_dir: str) -> int:
     frame_paths = glob.glob(os.path.join(output_dir, "frame_*.png"))

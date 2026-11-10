@@ -74,6 +74,7 @@ from social_path_planning.compare_astar import (
     run_solver,
 )
 from social_path_planning.compare_path_overlap import resample_polyline_by_spacing
+from social_path_planning.common import HEATMAP_DIRECTION_INDEX
 
 PLANNERS = ("vanilla", "rrt_vanilla", "modified_nograph", "modified_graph")
 PLANNER_LABELS = {
@@ -91,16 +92,7 @@ NUM_DIRECTIONS = 8
 H_MAX_BITS = float(np.log2(NUM_DIRECTIONS))  # 3.0
 
 # Same indexing as heat_map.HeatMap2DVector: 0 NW … 7 SE
-DIRECTION_MAP = {
-    (-1, 1): 0,  # NW
-    (0, 1): 1,   # N
-    (1, 1): 2,   # NE
-    (1, 0): 3,   # E
-    (-1, 0): 4,  # W
-    (-1, -1): 5, # SW
-    (0, -1): 6,  # S
-    (1, -1): 7,  # SE
-}
+DIRECTION_MAP = HEATMAP_DIRECTION_INDEX
 
 MASTER_CSV_FIELDNAMES = [
     "environment",

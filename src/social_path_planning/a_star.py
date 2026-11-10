@@ -76,9 +76,7 @@ class AStar(object):
         self.desired_dist_right_extra = desired_dist_right_extra  # added to robot_d/2 for desired standoff from right wall (m)
 
         self.closed_set = set()  # the set containing the states that have been visited
-        self.open_set = set()  # the set containing the states that are condidate for future expension
         self.came_from = {}  # dictionary keeping track of each state's parent to reconstruct the path
-        self.est_cost_through = {}
         self.cost_to_arrive = {}
         self.dist_to_right = {}
         self.dist_to_right[self.x_init] = 0
@@ -86,13 +84,10 @@ class AStar(object):
         self.priority_queue = PriorityQueue()
         self.priority_queue.put((self.manhattan_distance(self.x_init, self.x_goal), self.x_init))
 
-        self.open_set.add(self.x_init)
         self.cost_to_arrive[self.x_init] = 0
-        self.est_cost_through[self.x_init] = self.manhattan_distance(self.x_init, self.x_goal)
 
         self.path = None  # the final path as a list of states
         self.smoothed_path = None
-        self.pp_plan = None  # the post-processed plan
         self.last_solve_time = None
         self.last_solve_telemetry = _empty_solve_telemetry()
         self._telemetry_collecting = False
@@ -293,13 +288,6 @@ class AStar(object):
                     neighbors.append(state)
         return neighbors
 
-    def find_best_est_cost_through(self):
-        """
-        Gets the state in open_set that has the lowest est_cost_through
-        Output: A tuple, the state found in open_set that has the lowest est_cost_through
-        """
-        return min(self.open_set, key=lambda x: self.est_cost_through[x])
-
     def reconstruct_path(self):
         """
         Use the came_from map to reconstruct a path from the initial location to
@@ -421,90 +409,6 @@ class AStar(object):
         elapsed = time.time() - t_start
         self.last_solve_time = elapsed
         return self._emit_solve_return(False, elapsed, "vanilla", return_timing, return_telemetry, log_telemetry)
-
-    def postprocess(self):
-        """
-        Function for postprocessing the planned path. It examines each planned point, computes the nearest point to the right,
-        and if close enough, moves the point to the right. The post-processed plan is placed into the self.pp_plan variable.
-        Input: 
-            None
-        Output: 
-            None
-        """
-        self.pp_path = []
-        self.pp_path.append(self.path[0])
-
-        for ii in range(len(self.path)-1):
-            dist_to_right = self.rightness_penalty(self.path[ii], self.path[ii+1])
-            if dist_to_right < 10.1:
-                # 1. Get the start and end points of the segment
-                p1 = np.array(self.path[ii])
-                p2 = np.array(self.path[ii+1]) # The point we are conceptually moving
-        
-                # 2. Calculate the direction vector of the path segment
-                direction_vec = p2 - p1
-                
-                # Avoid division by zero if points are identical
-                dir_magnitude = np.linalg.norm(direction_vec)
-                if dir_magnitude < 1e-6:
-                    continue
-
-                # 3. Get the perpendicular "RIGHT" vector
-                # If direction is (dx, dy), the vector to the right is (dy, -dx)
-                right_vec = np.array([direction_vec[1], -direction_vec[0]])
-                
-                # 4. Normalize the "right" vector to get a pure direction (unit vector)
-                unit_right_vec = right_vec / np.linalg.norm(right_vec)
-                
-                # 5. Calculate the new point by shifting the original point to the right
-                new_point = p2 + unit_right_vec * dist_to_right
-                
-                self.pp_path.append(self.snap_to_grid((new_point[0], new_point[1])))
-            else:
-                self.pp_path.append(self.path[ii+1])
-        return 
-
-    def postprocess2(self):
-        """
-        Function for postprocessing the planned path. It examines each planned point, computes the nearest point to the right,
-        and if close enough, moves the point to the right. The post-processed plan is placed into the self.pp_plan variable.
-        Input: 
-            None
-        Output: 
-            None
-        """
-        self.pp_path = []
-        self.pp_path.append(self.path[0])
-
-        for ii in range(len(self.path)-1):
-            dist_to_right = self.rightness_penalty(self.path[ii], self.path[ii+1])
-            if dist_to_right < 10.1:
-                # 1. Get the start and end points of the segment
-                p1 = np.array(self.path[ii])
-                p2 = np.array(self.path[ii+1]) # The point we are conceptually moving
-        
-                # 2. Calculate the direction vector of the path segment
-                direction_vec = p2 - p1
-                
-                # Avoid division by zero if points are identical
-                dir_magnitude = np.linalg.norm(direction_vec)
-                if dir_magnitude < 1e-6:
-                    continue
-
-                # 3. Get the perpendicular "RIGHT" vector
-                # If direction is (dx, dy), the vector to the right is (dy, -dx)
-                right_vec = np.array([direction_vec[1], -direction_vec[0]])
-                
-                # 4. Normalize the "right" vector to get a pure direction (unit vector)
-                unit_right_vec = right_vec / np.linalg.norm(right_vec)
-                
-                # 5. Calculate the new point by shifting the original point to the right
-                new_point = p2 + unit_right_vec * dist_to_right
-                
-                self.pp_path.append((new_point[0], new_point[1]))
-            else:
-                self.pp_path.append(self.path[ii+1])
-        return
 
     def smooth_path(self):
         """

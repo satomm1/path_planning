@@ -24,7 +24,7 @@ import sys
 import matplotlib.pyplot as plt
 
 from social_path_planning.a_star import AStar_With_Graph, _telemetry_json_safe
-from social_path_planning.compare_astar import build_occ_grid
+from social_path_planning.common import build_occ_grid
 from social_path_planning.sparse_graph import FrequentSubgraph
 from social_path_planning.utils import snap_to_grid
 

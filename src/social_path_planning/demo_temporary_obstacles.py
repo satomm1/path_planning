@@ -60,7 +60,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 from social_path_planning.a_star import AStar, AStar_With_Graph
-from social_path_planning.compare_astar import build_occ_grid, generate_random_free_point
+from social_path_planning.common import build_occ_grid, generate_random_free_point
 from social_path_planning.heat_map import HeatMap2DVector
 from social_path_planning.planning_grid import PlanningGrid
 from social_path_planning.social_knowledge import SocialKnowledgeStore

@@ -1,19 +1,22 @@
-import cvxpy as cp
+"""Dense-waypoint multi-robot timing MILP (sequential / simultaneous / combined).
+
+Also hosts the segment-conflict detection and z-assignment helpers that the
+event-waypoint planner (``event_multi_planning``) reuses.
+"""
+
+from __future__ import annotations
+
 import time
-import pickle
-import matplotlib.animation as animation
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 from collections import defaultdict
-import random
+from typing import TYPE_CHECKING
+
+import cvxpy as cp
 import numpy as np
 
-from social_path_planning.occupancy_grid import StochOccupancyGrid2D
-from social_path_planning.a_star import AStar
-from social_path_planning.grid_loader import load_grid_scenario
-from social_path_planning.utils import *
-
 from social_path_planning.mapf_comparison.motion import DEFAULT_MAX_VELOCITY_MPS
+
+if TYPE_CHECKING:
+    from social_path_planning.occupancy_grid import StochOccupancyGrid2D
 
 NOMINAL_VELOCITY = 0.35  # m/s
 TIME_STEP = 5  # seconds
@@ -84,6 +87,17 @@ def _add_velocity_change_constraints(constraints, time_var, path, k):
         dt_ip1 = time_var[i + 2] - time_var[i + 1]
         constraints += [d_i * dt_ip1 - k * d_ip1 * dt_i <= 0]
         constraints += [d_ip1 * dt_i - k * d_i * dt_ip1 <= 0]
+
+
+def _add_max_velocity_constraints(constraints, time_var, path, v):
+    """
+    Per-segment speed cap ``t_{i+1} - t_i >= |p_{i+1} - p_i| / v`` (which also keeps
+    times non-decreasing), followed by the consecutive speed-change limits.
+    """
+    for i in range(len(path) - 1):
+        delta_pos = np.linalg.norm(np.array(path[i + 1]) - np.array(path[i]))
+        constraints += [time_var[i + 1] - time_var[i] >= delta_pos / v]
+    _add_velocity_change_constraints(constraints, time_var, path, MAX_VELOCITY_CHANGE_FACTOR)
 
 
 def _segment_endpoint_conflict(p0, p1, q0, q1, threshold):
@@ -466,68 +480,6 @@ def _group_collision_pairs_by_agent_pair(collision_pairs):
     return dict(grouped)
 
 
-def _viz_milp_z_assignments(paths, collision_pairs, occ_grid=None, output_dir=VIZ_MILP_Z_OUTPUT_DIR):
-    """Save one PNG per agent pair showing conflict chords colored by z index."""
-    from pathlib import Path
-
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    grouped = _group_collision_pairs_by_agent_pair(collision_pairs)
-
-    for (a1, a2), constraints in sorted(grouped.items()):
-        if not constraints:
-            continue
-        path_a, path_b = paths[a1], paths[a2]
-        unique_z = sorted({z for _, _, z, _ in constraints})
-        cmap = plt.colormaps["tab10"].resampled(max(1, len(unique_z)))
-        z_colors = {z: cmap(idx % 10) for idx, z in enumerate(unique_z)}
-
-        fig, ax = plt.subplots(figsize=(10, 8))
-        if occ_grid is not None:
-            occ_grid.plot_grid(ax=ax)
-        ax.plot(*zip(*path_a), color="steelblue", linewidth=2.5, label=f"agent {a1}")
-        ax.plot(*zip(*path_b), color="darkorange", linewidth=2.5, label=f"agent {a2}")
-
-        opp_partial = defaultdict(dict)
-        for i, j, z, mode in constraints:
-            if mode == "a_first":
-                opp_partial[z].update(i_end=i, j_start=j)
-            elif mode == "b_first":
-                opp_partial[z].update(i_start=i, j_end=j)
-        for z, row in opp_partial.items():
-            if len(row) != 4:
-                continue
-            i0, i1, j0, j1 = row["i_start"], row["i_end"], row["j_start"], row["j_end"]
-            for seg in range(i0, i1 + 1):
-                ax.plot(*zip(path_a[seg], path_a[seg + 1]), color=z_colors[z], linewidth=5, alpha=0.35)
-            for seg in range(j0, j1 + 1):
-                ax.plot(*zip(path_b[seg], path_b[seg + 1]), color=z_colors[z], linewidth=5, alpha=0.35)
-
-        drawn = set()
-        for i, j, z, mode in constraints:
-            ma = (np.array(path_a[i]) + np.array(path_a[i + 1])) / 2.0
-            mb = (np.array(path_b[j]) + np.array(path_b[j + 1])) / 2.0
-            ax.plot(
-                [ma[0], mb[0]],
-                [ma[1], mb[1]],
-                color=z_colors[z],
-                linestyle="--" if mode in ("a_first", "b_first") else "-",
-                linewidth=1.8,
-                label=f"z{z}" if z not in drawn else None,
-            )
-            drawn.add(z)
-
-        ax.set_title(
-            f"MILP z agents ({a1},{a2}): {len(unique_z)} z, {len(constraints)} constraints"
-        )
-        ax.set_aspect("equal", adjustable="box")
-        ax.legend(loc="upper right", fontsize=8)
-        out = output_dir / f"z_pair_{a1}_{a2}.png"
-        fig.savefig(out, dpi=150)
-        plt.close(fig)
-        print(f"Saved MILP z visualization: {out.resolve()}")
-
-
 def _append_segment_pairs_with_z(
     collision_pairs, path_a, path_b, segment_pairs, prefix=(), start_z_index=0
 ):
@@ -687,11 +639,7 @@ class MultiAgentSequentialPlanner(MultiAgentPlanner):
         constraints = []
         constraints += [t[0] == 0]  # Start at time 0
 
-        # Max velocity constraints (also enforces t_i+1 >= t_i)
-        for i in range(n - 1):
-            delta_pos = np.linalg.norm(np.array(self.path[i + 1]) - np.array(self.path[i]))
-            constraints += [t[i + 1] - t[i] >= delta_pos / self.v]
-        _add_velocity_change_constraints(constraints, t, self.path, MAX_VELOCITY_CHANGE_FACTOR)
+        _add_max_velocity_constraints(constraints, t, self.path, self.v)
 
         # Collision Avoiding Constraints using Big-M method (segment occupancy intervals)
         collision_pairs, max_z = self.find_collision_pairs()
@@ -787,7 +735,9 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
 
         _print_compressed_z_pair_summary(collision_pairs, len(self.paths), max_z)
         if VIZ_MILP_Z_ASSIGNMENT:
-            _viz_milp_z_assignments(
+            from social_path_planning.trajectory_viz import viz_milp_z_assignments
+
+            viz_milp_z_assignments(
                 self.paths,
                 collision_pairs,
                 occ_grid=self.occupancy_grid,
@@ -800,17 +750,7 @@ class MultiAgentSimultaneousPlanner(MultiAgentPlanner):
             constraints += [agent_time[0] == 0]
 
         for agent_idx, path in enumerate(self.paths):
-            for i in range(len(path) - 1):
-                delta_pos = np.linalg.norm(np.array(path[i + 1]) - np.array(path[i]))
-                constraints += [
-                    agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / self.v[agent_idx]
-                ]
-            _add_velocity_change_constraints(
-                constraints,
-                agent_times[agent_idx],
-                path,
-                MAX_VELOCITY_CHANGE_FACTOR,
-            )
+            _add_max_velocity_constraints(constraints, agent_times[agent_idx], path, self.v[agent_idx])
 
         z = cp.Variable(max_z, boolean=True) if max_z > 0 else None
         pair_constraint_build_time = defaultdict(float)
@@ -934,18 +874,8 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
         for agent_time in agent_times:
             constraints += [agent_time[0] == 0]  # All agents start at same time (t=0)
 
-        # Max velocity constraints (also enforces t_i+1 >= t_i)
         for agent_idx, path in enumerate(self.paths):
-            for i in range(len(path) - 1):
-                delta_pos = np.linalg.norm(np.array(path[i + 1]) - np.array(path[i]))
-                constraints += [
-                    agent_times[agent_idx][i + 1] - agent_times[agent_idx][i] >= delta_pos / self.v[agent_idx]]
-            _add_velocity_change_constraints(
-                constraints,
-                agent_times[agent_idx],
-                path,
-                MAX_VELOCITY_CHANGE_FACTOR,
-            )
+            _add_max_velocity_constraints(constraints, agent_times[agent_idx], path, self.v[agent_idx])
 
         # Collision Avoiding Constraints using Big-M method
         collision_pairs, max_z = self.find_collision_pairs()  # Get all the collision pairs
@@ -976,28 +906,6 @@ class MultiAgentCombinedPlanner(MultiAgentPlanner):
         prob.solve(verbose=verbose, solver=cp.ECOS_BB)
         return _multi_agent_times_from_solver(prob, agent_times, "MultiAgentCombinedPlanner")
 
-def get_position_at_time(t, path, time_points):
-    """
-    Returns (x, y) at time t using linear interpolation.
-    If t is outside the range of time_points, it returns the start or end pos.
-    """
-    # Extract x and y lists
-    xs = [p[0] for p in path]
-    ys = [p[1] for p in path]
-
-    # Check if the path hasn't started or has finished
-    # (Optional: return None if you want points to disappear)
-    if t < time_points[0]:
-        return xs[0], ys[0]
-    if t > time_points[-1]:
-        return xs[-1], ys[-1]
-
-    # Interpolate
-    x = np.interp(t, time_points, xs)
-    y = np.interp(t, time_points, ys)
-    return x, y
-
-
 def path_to_arc_length(path):
     """
     Convert a path [(x0, y0), (x1, y1), ...] to cumulative distance values.
@@ -1012,386 +920,29 @@ def path_to_arc_length(path):
     return arc_lengths
 
 
-def create_space_time_plot(paths, times, output_file="space_time_sequential.png", title="Space-Time Plot", dpi=300):
-    """
-    Create and save a static space-time plot for multiple agents.
-    x-axis: time [s], y-axis: distance along path [m].
-    """
-    fig, ax = plt.subplots(figsize=(8, 6))
-    colors = plt.cm.brg(np.linspace(0, 0.9, len(paths)))
-    title_fs = 22
-    label_fs = 20
-    tick_fs = 20
-    legend_fs = 20
-
-    for i, (path, time_seq, color) in enumerate(zip(paths, times, colors)):
-        s_values = path_to_arc_length(path)
-        if len(s_values) != len(time_seq):
-            raise ValueError(
-                f"Length mismatch for path {i + 1}: "
-                f"{len(s_values)} arc-length points vs {len(time_seq)} time points."
-            )
-        ax.plot(time_seq, s_values, color=color, linewidth=4, label=f"Robot {i + 1}")
-
-    ax.set_xlabel("Time [s]", fontsize=label_fs)
-    ax.set_ylabel("Distance Along Path [m]", fontsize=label_fs)
-    ax.set_title(title, fontsize=title_fs)
-    ax.tick_params(axis="both", labelsize=tick_fs)
-    ax.grid(True, linestyle="--", alpha=0.5)
-    ax.legend(loc="best", fontsize=legend_fs)
-    fig.tight_layout()
-    fig.savefig(output_file, dpi=dpi)
-    plt.close(fig)
-    print(f"Saved space-time plot to {output_file}")
+# Plotting helpers now live in ``trajectory_viz``; keep the old names importable
+# from here without importing matplotlib when this module loads.
+_MOVED_TO_TRAJECTORY_VIZ = {
+    "get_position_at_time": "get_position_at_time",
+    "create_space_time_plot": "create_space_time_plot",
+    "_draw_map_context": "_draw_map_context",
+    "create_map_context_plot": "create_map_context_plot",
+    "create_map_context_video": "create_map_context_video",
+    "create_video": "create_video",
+    "_viz_milp_z_assignments": "viz_milp_z_assignments",
+}
 
 
-def _draw_map_context(ax, paths, occ_grid=None, title="Path Context Map"):
-    """
-    Draw the static map-context layers (grid, paths, start/goal markers, legend).
-    Returns the per-path colors so callers can overlay matching robot markers.
-    """
-    title_fs = 10
-    legend_fs = 8
+def __getattr__(name):
+    target = _MOVED_TO_TRAJECTORY_VIZ.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from social_path_planning import trajectory_viz
 
-    if occ_grid is not None:
-        occ_grid.plot_grid(ax=ax)
+    return getattr(trajectory_viz, target)
 
-    colors = plt.cm.brg(np.linspace(0, 0.7, len(paths)))
-    path_handles = []
-    path_labels = []
-    for i, (path, color) in enumerate(zip(paths, colors)):
-        xs = [p[0] for p in path]
-        ys = [p[1] for p in path]
-        path_line, = ax.plot(xs, ys, color=color, linewidth=2, alpha=0.9, label=f"Robot {i + 1}")
-        path_handles.append(path_line)
-        path_labels.append(f"Robot {i + 1}")
-
-        # Start/goal markers for context in the paper figure.
-        ax.scatter(xs[0], ys[0], marker="s", s=50, color=color, edgecolors="black",
-                   linewidths=1.4, zorder=9)
-        ax.scatter(xs[-1], ys[-1], marker="*", s=80, color=color, edgecolors="black",
-                   linewidths=1.4, zorder=9)
-
-    ax.set_title(title, fontsize=title_fs)
-    # Turn ticks off
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_aspect("equal", adjustable="box")
-    ax.grid(True, linestyle="--", alpha=0.35)
-    path_legend = ax.legend(path_handles, path_labels, loc="upper right", fontsize=legend_fs)
-    marker_handles = [
-        Line2D([0], [0], marker="o", color="none", markerfacecolor="gray",
-               markeredgecolor="black", markersize=4, label="Robot Position"),
-    ]
-    marker_legend = ax.legend(handles=marker_handles, loc="upper right", fontsize=legend_fs)
-    path_legend.get_title().set_fontsize(legend_fs)
-    marker_legend.get_title().set_fontsize(legend_fs)
-    ax.add_artist(marker_legend)
-    return colors
-
-
-def create_map_context_plot(
-        paths,
-        occ_grid=None,
-        times=None,
-        snapshot_time=None,
-        output_file="map_context.png",
-        title="Path Context Map",
-        dpi=300):
-    """
-    Create and save a static map plot with robot paths.
-    Optionally overlays robot positions at snapshot_time.
-    """
-    fig, ax = plt.subplots(figsize=(3, 3.1))
-    colors = _draw_map_context(ax, paths, occ_grid=occ_grid, title=title)
-
-    if times is not None and snapshot_time is not None:
-        for path, time_seq, color in zip(paths, times, colors):
-            rx, ry = get_position_at_time(snapshot_time, path, time_seq)
-            ax.scatter(rx, ry, marker="o", s=25, color=color, edgecolors="black", linewidths=1.4,
-                       zorder=10)
-
-    fig.tight_layout()
-    fig.savefig(output_file, dpi=dpi)
-    plt.close(fig)
-    print(f"Saved map context plot to {output_file}")
-
-
-def create_map_context_video(
-        paths,
-        times,
-        occ_grid=None,
-        output_file="map_context.gif",
-        title="Path Context Map",
-        total_frames=200,
-        fps=10,
-        dpi=200,
-        show_time=True):
-    """
-    Animated version of create_map_context_plot: same layout and coloring, with
-    robot position markers moving along their paths over time.
-    Saves .gif via Pillow, or .mp4 if ffmpeg is installed.
-    """
-    fig, ax = plt.subplots(figsize=(3, 3.1))
-    colors = _draw_map_context(ax, paths, occ_grid=occ_grid, title=title)
-
-    robot_markers = []
-    for path, time_seq, color in zip(paths, times, colors):
-        rx, ry = get_position_at_time(time_seq[0], path, time_seq)
-        marker = ax.scatter([rx], [ry], marker="o", s=25, color=color, edgecolors="black",
-                            linewidths=1.4, zorder=10)
-        robot_markers.append(marker)
-
-    time_text = None
-    if show_time:
-        time_text = ax.text(0.02, 0.98, "", transform=ax.transAxes, ha="left", va="top",
-                            fontsize=8, zorder=11,
-                            bbox=dict(facecolor="white", alpha=0.8, edgecolor="none", pad=1.5))
-    fig.tight_layout()
-
-    all_times = [t for time_seq in times for t in time_seq]
-    frames = np.linspace(min(all_times), max(all_times), total_frames)
-
-    def update(current_time):
-        for marker, path, time_seq in zip(robot_markers, paths, times):
-            marker.set_offsets([get_position_at_time(current_time, path, time_seq)])
-        artists = list(robot_markers)
-        if time_text is not None:
-            time_text.set_text(f"t = {current_time:.1f} s")
-            artists.append(time_text)
-        return artists
-
-    ani = animation.FuncAnimation(fig, update, frames=frames, blit=False, interval=1000 / fps)
-    writer = "ffmpeg" if str(output_file).lower().endswith(".mp4") else "pillow"
-    print(f"Saving map context animation to {output_file}...")
-    ani.save(output_file, writer=writer, fps=fps, dpi=dpi)
-    plt.close(fig)
-    print(f"Saved map context animation to {output_file}")
-
-
-def create_video(paths, times, output_file="video.gif", occ_grid=None):
-    """
-    Create a video visualizing the multi-agent paths over time.
-    """
-    # --- 1. Determine global time bounds ---
-    all_times = [t for sublist in times for t in sublist]
-    start_time = min(all_times)
-    end_time = max(all_times)
-
-    # --- 2. Setup Figure ---
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.set_title(f"Path Visualization")
-    ax.grid(True, linestyle='--', alpha=0.6)
-    if occ_grid is not None:
-        occ_grid.plot_grid(ax=ax)
-
-    # Determine axis limits automatically based on all coordinates
-    all_coords = [p for sublist in paths for p in sublist]
-    all_xs = [p[0] for p in all_coords]
-    all_ys = [p[1] for p in all_coords]
-    pad = 1
-
-    # --- 3. Initialize lines (trails) and points ---
-    colors = plt.cm.jet(np.linspace(0, 1, len(paths)))
-    lines = []
-    points = []
-
-    for i, color in enumerate(colors):
-        # The trail line
-        line, = ax.plot([], [], color=color, alpha=0.5, linewidth=1)
-        lines.append(line)
-
-        # The current head point
-        point, = ax.plot([], [], marker='o', color=color, markersize=8, label=f'Path {i + 1}')
-        points.append(point)
-
-    ax.legend(loc='upper right')
-    time_text = ax.text(0.02, 0.95, '', transform=ax.transAxes)
-
-    # --- 4. Define Animation Update Functions ---
-    def init():
-        for line, point in zip(lines, points):
-            line.set_data([], [])
-            point.set_data([], [])
-        time_text.set_text('')
-        return lines + points + [time_text]
-
-    def update(frame):
-        current_time = frame
-
-        for i, (path, time_seq) in enumerate(zip(paths, times)):
-            # Get current head position
-            curr_x, curr_y = get_position_at_time(current_time, path, time_seq)
-            points[i].set_data([curr_x], [curr_y])
-
-            # Draw trail (history up to current time)
-            history_x = []
-            history_y = []
-
-            # Add past fixed waypoints
-            for (px, py), pt in zip(path, time_seq):
-                if pt <= current_time:
-                    history_x.append(px)
-                    history_y.append(py)
-
-            # Add current interpolated position to connect the line smoothly
-            history_x.append(curr_x)
-            history_y.append(curr_y)
-
-            lines[i].set_data(history_x, history_y)
-
-        time_text.set_text(f'Time: {current_time:.2f}')
-        return lines + points + [time_text]
-
-    # --- 5. Run Animation ---
-    total_frames = 200
-    interval_ms = 100
-    frames = np.linspace(start_time, end_time, total_frames)
-
-    ani = animation.FuncAnimation(
-        fig,
-        update,
-        frames=frames,
-        init_func=init,
-        blit=True,
-        interval=interval_ms
-    )
-
-    if output_file:
-        print(f"Saving animation to {output_file}...")
-        # Note: Saving as .mp4 requires ffmpeg to be installed.
-        # Saving as .gif requires Pillow.
-        try:
-            ani.save(output_file, fps=1000 / interval_ms)
-            print("Save complete.")
-        except Exception as e:
-            print(f"Could not save file: {e}")
-            print("Ensure ffmpeg is installed for video, or try saving as .gif")
 
 if __name__ == "__main__":
+    from social_path_planning.demo_multi_planning import main
 
-    # Test the MultiAgentPlanner with dummy data
-    scenario_name = "sample2_default"
-    occ, map_size, map_resolution = load_grid_scenario(scenario_name, plot=False)
-    occ_grid = StochOccupancyGrid2D(map_resolution, round(map_size[0]/map_resolution), round(map_size[1]/map_resolution), 0, 0, 10, occ.T)
-
-    # Load path1.pkl if it exists
-    try:
-        with open("path1.pkl", "rb") as f:
-            path1 = pickle.load(f)
-    except FileNotFoundError:
-        # Generate a path for the agent 1
-        x_init = snap_to_grid([2, 25], map_resolution)
-        x_goal = snap_to_grid([97, 50], map_resolution)
-        problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
-        problem_status = problem.solve()
-        path1 = problem.path if problem_status else None
-        with open("path1.pkl", "wb") as f:
-            pickle.dump(path1, f)
-        # occ_grid.plot_grid_and_path(path1)
-        # plt.show()
-
-    # Load path2.pkl if it exists
-    try:
-        with open("path2.pkl", "rb") as f:
-            path2 = pickle.load(f)
-    except FileNotFoundError:
-        # Agent 2 paths and times
-        # x_init = snap_to_grid([25, 2], map_resolution)
-        # x_goal = snap_to_grid([50, 97], map_resolution)
-        x_init = snap_to_grid([2, 40], map_resolution)
-        x_goal = snap_to_grid([97, 50], map_resolution)
-        problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
-        problem_status = problem.solve()
-        path2 = problem.path if problem_status else None
-        with open("path2.pkl", "wb") as f:
-            pickle.dump(path2, f)
-        # occ_grid.plot_grid_and_path(path2)
-        # plt.show()
-
-    # Load path3.pkl if it exists
-    try:
-        with open("path3.pkl", "rb") as f:
-            path3 = pickle.load(f)
-    except FileNotFoundError:
-        # Agent 3 paths and times
-        x_init = snap_to_grid([50, 80], map_resolution)
-        x_goal = snap_to_grid([97, 20], map_resolution)
-        problem = AStar([0,0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid, resolution=map_resolution)
-        problem_status = problem.solve()
-        path3 = problem.path if problem_status else None
-        with open("path3.pkl", "wb") as f:
-            pickle.dump(path3, f)
-        occ_grid.plot_grid_and_path(path3)
-        plt.show()
-
-    # Load path4.pkl if it exists
-    try:
-        with open("path4.pkl", "rb") as f:
-            path4 = pickle.load(f)
-    except FileNotFoundError:
-        # Agent 4 paths and times
-        x_init = snap_to_grid([50, 20], map_resolution)
-        x_goal = snap_to_grid([97, 75], map_resolution)
-        problem = AStar([0, 0], snap_to_grid(map_size, map_resolution), x_init, x_goal, occ_grid,
-                        resolution=map_resolution)
-        problem_status = problem.solve()
-        path4 = problem.path if problem_status else None
-        with open("path4.pkl", "wb") as f:
-            pickle.dump(path4, f)
-        occ_grid.plot_grid_and_path(path4)
-        plt.show()
-
-    ############## Sequential Path Planning Example ##############
-    # Assign uniform time steps for the other agent (path2)
-    path2_times = [i * map_resolution * (1 / NOMINAL_VELOCITY) for i in range(len(path2))]
-    path3_times = [i * map_resolution * (1 / (NOMINAL_VELOCITY/1.5)) for i in range(len(path3))]
-    path4_times = [i * map_resolution * (1 / (NOMINAL_VELOCITY)) for i in range(len(path4))]
-
-    # Create the planner
-    planner = MultiAgentSequentialPlanner(occ_grid, [path2, path3, path4], [path2_times, path3_times, path4_times], path=path1)
-
-    # Plan and visualize
-    # times = planner.plan()
-    # create_video([path1, path2, path3, path4], [times, path2_times, path3_times, path4_times], occ_grid=occ_grid, output_file="video_sequential.gif")
-
-    ############## Simultaneous Path Planning Example ##############
-    # Reduce granularity of paths for faster solving
-    # path1 = path1[::5]
-    # path2 = path2[::5]
-
-    # Make the planner
-    planner = MultiAgentSimultaneousPlanner(occ_grid, paths=[path1, path2, path3, path4])
-    planner.assign_velocities([MAX_VELOCITY, MAX_VELOCITY/1.2, MAX_VELOCITY/1.5, MAX_VELOCITY/1.65])
-
-    # Plan and visualize
-    times = planner.plan()
-    create_space_time_plot(
-        [path1, path2, path3, path4],
-        times,
-        output_file="space_time_simultaneous.png",
-        title="Simultaneous Planning Space-Time Plot"
-    )
-    snapshot_time = 0.345 * max(t_seq[-1] for t_seq in times)
-    create_map_context_plot(
-        [path1, path2, path3, path4],
-        occ_grid=occ_grid,
-        times=times,
-        snapshot_time=snapshot_time,
-        output_file="map_context_simultaneous.png",
-        title="Simultaneous Planning Paths on Map"
-    )
-    # create_video([path1, path2, path3, path4], times, occ_grid=occ_grid, output_file="video_simultaneous.gif")
-
-    ############## Combined Path Planning Example ##############
-    # Assign uniform time steps for the already planned paths (path2/path3)
-    path2_times = [i * map_resolution * (1 / (1.3*NOMINAL_VELOCITY)) for i in range(len(path2))]
-    path3_times = [i * map_resolution * (1 / (NOMINAL_VELOCITY / 1.2)) for i in range(len(path3))]
-
-    # Create the planner
-    planner = MultiAgentCombinedPlanner(occ_grid, [path2, path3], [path2_times, path3_times], paths=[path1, path4])
-    planner.assign_velocities([MAX_VELOCITY, MAX_VELOCITY / 2])
-
-    # Plan and visualize
-    # times = planner.plan()
-    # create_video([path1, path2, path3, path4], [times[0], path2_times, path3_times, times[1]], occ_grid=occ_grid, output_file="video_combined.gif")
+    main()
