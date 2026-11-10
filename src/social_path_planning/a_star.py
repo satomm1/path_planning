@@ -11,6 +11,7 @@ import networkx as nx
 import numpy as np
 from scipy.interpolate import CubicSpline
 
+from social_path_planning import astar_kernel
 from social_path_planning.mapf_comparison.grid_traversability import fine_cell_center_world
 from social_path_planning.social_cost import rightness_penalty as compute_rightness_penalty
 
@@ -55,6 +56,9 @@ def _telemetry_json_safe(obj):
 class AStar(object):
     """Represents a motion planning problem to be solved using A*"""
     SUPPORTED_SOLVER_MODES = {"modified", "vanilla"}
+    # Use the numba kernel (astar_kernel) when available; it gives identical results.
+    # Set to False (or SOCIAL_ASTAR_NUMBA=0) to force the pure-Python loop.
+    use_compiled = True
 
     def __init__(
         self,
@@ -320,8 +324,15 @@ class AStar(object):
         raise ValueError(f"Unsupported solver mode '{mode}'. Supported modes: {sorted(self.SUPPORTED_SOLVER_MODES)}")
 
     def modified_solve(self, return_timing=False, return_telemetry=False, log_telemetry=False):
+        compiled = self._compiled_inputs("modified")
         self._begin_solve_telemetry("modified")
         t_start = time.time()
+        if compiled is not None:
+            result = self._solve_compiled(
+                compiled, "modified", t_start, 750, "Social A*", return_timing, return_telemetry, log_telemetry
+            )
+            if result is not None:
+                return result
         while self.priority_queue:
             current_cost, x_current = heappop(self.priority_queue)
 
@@ -372,8 +383,15 @@ class AStar(object):
         return self._emit_solve_return(False, elapsed, "modified", return_timing, return_telemetry, log_telemetry)
 
     def vanilla_solve(self, return_timing=False, return_telemetry=False, log_telemetry=False):
+        compiled = self._compiled_inputs("vanilla")
         self._begin_solve_telemetry("vanilla")
         t_start = time.time()
+        if compiled is not None:
+            result = self._solve_compiled(
+                compiled, "vanilla", t_start, 150, "Vanilla A*", return_timing, return_telemetry, log_telemetry
+            )
+            if result is not None:
+                return result
         while self.priority_queue:
             current_cost, x_current = heappop(self.priority_queue)
 
@@ -418,6 +436,139 @@ class AStar(object):
         self.last_solve_time = elapsed
         return self._emit_solve_return(False, elapsed, "vanilla", return_timing, return_telemetry, log_telemetry)
 
+    # ------------------------------------------------------------------
+    # Compiled search (astar_kernel)
+    # ------------------------------------------------------------------
+
+    def _kernel_mode(self, mode):
+        if mode == "vanilla":
+            return astar_kernel.MODE_VANILLA
+        return astar_kernel.MODE_MODIFIED
+
+    def _kernel_graph_tables(self, width, height):
+        return np.zeros((1, 1, 9), dtype=np.bool_), np.zeros((1, 1, 9))
+
+    def _compiled_inputs(self, mode):
+        """Arguments for ``astar_kernel._solve``, or None to use the Python loop."""
+        if not (self.use_compiled and astar_kernel.AVAILABLE):
+            return None
+        if type(self) not in (AStar, AStar_With_Graph):
+            return None  # subclasses may override cost or neighbor methods
+        from social_path_planning.occupancy_grid import StochOccupancyGrid2D
+
+        occ = self.occupancy
+        if type(occ) is not StochOccupancyGrid2D:
+            return None  # e.g. PlanningGrid overlays with segment checks
+        if self.closed_set or self.came_from or len(self.priority_queue) != 1:
+            return None  # only a fresh problem
+        if not astar_kernel.kernel_ready():
+            return None
+        res = self.resolution
+        start_i = astar_kernel.lattice_index(self.x_init[0], res)
+        start_j = astar_kernel.lattice_index(self.x_init[1], res)
+        goal_i = astar_kernel.lattice_index(self.x_goal[0], res)
+        goal_j = astar_kernel.lattice_index(self.x_goal[1], res)
+        if None in (start_i, start_j, goal_i, goal_j):
+            return None
+        width, height = int(occ.width), int(occ.height)
+        if np.shape(occ.probs) != (height, width):
+            return None
+        i0, j0, ni_size, nj_size = astar_kernel.lattice_bounds(occ, res)
+        if not (i0 <= start_i < i0 + ni_size and j0 <= start_j < j0 + nj_size):
+            return None
+
+        kmode = self._kernel_mode(mode)
+        if kmode == astar_kernel.MODE_GRAPH:
+            tables = self._kernel_graph_tables(width, height)
+            if tables is None:
+                return None
+        else:
+            tables = AStar._kernel_graph_tables(self, width, height)
+        edge_has, edge_w = tables
+
+        # Per-grid tables, cached on the occupancy grid (rebuilt if probs is reassigned).
+        lo = tuple(float(v) for v in self.statespace_lo)
+        hi = tuple(float(v) for v in self.statespace_hi)
+        cache = occ.__dict__.setdefault("_astar_kernel_cache", {})
+        key = (lo, hi, occ.robot_d, occ.resolution)
+        entry = cache.get(key)
+        if entry is None or entry[0] is not occ.probs:
+            entry = (
+                occ.probs,
+                np.ascontiguousarray(occ.probs, dtype=np.float64),
+                astar_kernel.center_ok_table(occ, self.statespace_lo, self.statespace_hi),
+            )
+            cache[key] = entry
+        _, probs, center_ok = entry
+
+        d_right = getattr(occ, "_d_right", None)
+        use_cache = d_right is not None
+        if use_cache:
+            d_right = np.ascontiguousarray(d_right, dtype=np.float64)
+        else:
+            d_right = np.zeros((1, 1, 8))
+        from social_path_planning.wall_distance_cache import _UNIT_TRAVEL_DIRS
+
+        return (
+            kmode, start_i, start_j, goal_i, goal_j, float(res), i0, j0, ni_size, nj_size,
+            float(occ.origin_x), float(occ.origin_y), width, height, center_ok,
+            float(occ.resolution), probs, float(occ.thresh), use_cache, d_right,
+            np.ascontiguousarray(_UNIT_TRAVEL_DIRS, dtype=np.float64),
+            float(self.robot_d), float(self.desired_dist_right_extra),
+            edge_has, edge_w,
+        )
+
+    def _solve_compiled(self, inputs, mode, t_start, time_limit, label,
+                        return_timing, return_telemetry, log_telemetry):
+        """Run the kernel and load its result into this object; None means use the Python loop."""
+        status, closed, cost, parent_i, parent_j, d2r, tel = astar_kernel._solve(
+            *inputs, float(t_start), float(time_limit)
+        )
+        if status == astar_kernel.STATUS_ABORT:
+            return None
+        elapsed = time.time() - t_start
+        self.last_solve_time = elapsed
+
+        kmode, i0, j0 = inputs[0], inputs[6], inputs[7]
+        res = self.resolution
+
+        closed_a, closed_b = np.nonzero(closed)
+        self.closed_set = {
+            (res * (a + i0), res * (b + j0)) for a, b in zip(closed_a.tolist(), closed_b.tolist())
+        }
+        relaxed = parent_i != astar_kernel.NO_PARENT
+        rel_a, rel_b = np.nonzero(relaxed)
+        track_d2r = kmode != astar_kernel.MODE_VANILLA
+        for a, b, pi, pj, c, d in zip(
+            rel_a.tolist(), rel_b.tolist(), parent_i[relaxed].tolist(), parent_j[relaxed].tolist(),
+            cost[relaxed].tolist(), d2r[relaxed].tolist(),
+        ):
+            s = (res * (a + i0), res * (b + j0))
+            self.came_from[s] = (res * pi, res * pj)
+            self.cost_to_arrive[s] = c
+            if track_d2r:
+                self.dist_to_right[s] = d
+        self.priority_queue = []
+
+        t = self.last_solve_telemetry
+        t["cost_eval_count"] = int(tel[0])
+        t["social_cost_sum"] = float(tel[1])
+        t["social_cost_max"] = float(tel[2])
+        t["social_nonzero_edges"] = int(tel[3])
+        t["graph_edge_cost_evals"] = int(tel[4])
+        t["off_graph_social_evals"] = int(tel[5])
+        t["graph_weight_sum"] = float(tel[6])
+        t["off_graph_edge_cost_sum"] = float(tel[7])
+
+        if status == astar_kernel.STATUS_FOUND:
+            self.path = self.reconstruct_path()
+            self.smooth_path()
+            print(f"{label} found a path in {elapsed:.2f} seconds.")
+            return self._emit_solve_return(True, elapsed, mode, return_timing, return_telemetry, log_telemetry)
+        if status == astar_kernel.STATUS_TIMED_OUT:
+            print("A* took too long.")
+        return self._emit_solve_return(False, elapsed, mode, return_timing, return_telemetry, log_telemetry)
+
     def smooth_path(self):
         """
         Function for smoothing the planned path by interpolating between points using a spline
@@ -455,6 +606,14 @@ class AStar_With_Graph(AStar):
             desired_dist_right_extra,
         )
         self.graph = graph
+
+    def _kernel_mode(self, mode):
+        if mode == "vanilla":
+            return astar_kernel.MODE_VANILLA
+        return astar_kernel.MODE_GRAPH
+
+    def _kernel_graph_tables(self, width, height):
+        return astar_kernel.graph_tables(self.graph, width, height)
 
     def cost(self, x1, x2, dist2right_prev=0):
         """

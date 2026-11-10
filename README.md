@@ -43,6 +43,12 @@ Some scripts use **cvxpy** (for example multi-agent / optimization demos). It is
 pip3 install cvxpy
 ```
 
+**numba** (optional, recommended) compiles the A* search loop (`astar_kernel.py`), making social A* roughly 100x faster with identical results. Without it, or with `SOCIAL_ASTAR_NUMBA=0`, `AStar` uses the pure-Python loop. The first run compiles for a few seconds and caches the result in `__pycache__`.
+
+```bash
+pip3 install numba
+```
+
 **MAPF baselines (CBS + prioritized planning)** for comparing grid MAPF against the MILP timing coordinator:
 
 ```bash
