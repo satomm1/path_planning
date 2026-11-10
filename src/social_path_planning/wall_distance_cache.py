@@ -220,11 +220,14 @@ def _attempt_load_wall_distance_cache(
     except (KeyError, ValueError, TypeError):
         return None, f"invalid cache metadata in {path} (missing {NPZ_PROBS_SHA256})"
 
-    # if stored != expected_sha:
-    #     return None, (
-    #         "occupancy fingerprint mismatch: grid.probs does not match the map used to "
-    #         "build this cache (rebuild with python -m social_path_planning.precompute_wall_distances --force)"
-    #     )
+    # The fingerprint is of the planner-layout probs used to build the cache. In ROS layout
+    # grid.probs comes from the ROS map (different row layout / encoding), so it cannot be
+    # compared and only the grid metadata below is checked.
+    if not use_ros_cache_layout and stored != expected_sha:
+        return None, (
+            "occupancy fingerprint mismatch: grid.probs does not match the map used to "
+            "build this cache (rebuild with python -m social_path_planning.precompute_wall_distances --force)"
+        )
 
     try:
         dt = float(np.asarray(data[NPZ_DIST_THRESH]).item())
@@ -339,6 +342,9 @@ def load_wall_distance_cache_into_grid(
         If True, print a short message to stderr when the cache is loaded.
     use_ros_cache_layout : bool
         If True, load ``D_right_ros`` when present (ROS/PGM layout aligned with ``grid.probs``).
+        In this mode the occupancy fingerprint is not checked, because ``grid.probs``
+        comes from the ROS map rather than the planner-layout map the cache was built
+        from; only resolution, origin and size are validated.
 
     Returns
     -------

@@ -171,6 +171,29 @@ class TestWallDistanceCache(unittest.TestCase):
             self.assertIsNotNone(msg)
             self.assertIn("fingerprint", msg)
 
+    def test_ros_layout_load_does_not_check_fingerprint(self):
+        """ROS-layout probs come from the ROS map, so only grid metadata is validated."""
+        import tempfile
+
+        probs, res, width, height = _tiny_free_grid()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "c.npz"
+            g0 = StochOccupancyGrid2D(res, width, height, 0.0, 0.0, 10, probs)
+            save_wall_distance_cache(path, g0, precompute_d_right(g0))
+
+            ros_probs = probs.copy()
+            ros_probs[5, 5] = 1.0  # different array than the one the cache was built from
+            g_ros = StochOccupancyGrid2D(
+                res, width, height, 0.0, 0.0, 10, ros_probs,
+                wall_distance_cache_path=None,
+                auto_build_wall_distance_cache=False,
+            )
+            ok = load_wall_distance_cache_into_grid(
+                g_ros, path, strict=True, verbose=False, use_ros_cache_layout=True
+            )
+            self.assertTrue(ok)
+            self.assertIsNone(diagnose_wall_distance_cache(path, g_ros, use_ros_cache_layout=True))
+
     def test_diagnose_returns_none_when_compatible(self):
         import tempfile
 

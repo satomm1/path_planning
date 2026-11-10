@@ -130,13 +130,12 @@ def load_social_graph(
         return graph
     if not heatmap_file:
         raise ValueError("Provide --graph-snapshot or --heatmap-file to obtain the social graph.")
-    frequent = build_sparse_graph_from_heatmap(
+    graph = build_sparse_graph_from_heatmap(  # returns the pruned nx.DiGraph itself
         occ_grid,
         heatmap_path=heatmap_file,
         sparse_graph_threshold=sparse_graph_threshold,
         sparse_min_component_size=sparse_min_component_size,
     )
-    graph = frequent.graph
     print(f"Built social graph from {heatmap_file} "
           f"({graph.number_of_nodes()} nodes, {graph.number_of_edges()} edges)")
     return graph
