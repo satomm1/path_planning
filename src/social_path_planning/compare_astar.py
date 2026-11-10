@@ -147,11 +147,8 @@ def build_sparse_graph_from_heatmap(
     if not heatmap_prefix and not heatmap_path:
         raise ValueError("build_sparse_graph_from_heatmap requires heatmap_prefix or heatmap_path")
 
-    frequent = FrequentSubgraph(occ_grid)
-    hm = frequent.heat_map_object
-    expected = (hm.height, hm.width, 8)
-
     if heatmap_path:
+        frequent = FrequentSubgraph(occ_grid)
         heatmap_path = os.path.abspath(heatmap_path)
         if not os.path.exists(heatmap_path):
             raise FileNotFoundError(f"Heatmap file not found: {heatmap_path}")
@@ -159,6 +156,8 @@ def build_sparse_graph_from_heatmap(
         print(f"Loaded heatmap from {heatmap_path}")
     else:
         frequent = FrequentSubgraph(occ_grid, heat_map_filename=heatmap_prefix)
+    hm = frequent.heat_map_object
+    expected = (hm.height, hm.width, 8)
 
     if frequent.heat_map.shape != expected:
         raise ValueError(
@@ -173,24 +172,6 @@ def build_sparse_graph_from_heatmap(
         f"{frequent.graph.number_of_edges()} edges "
         f"(threshold={sparse_graph_threshold}, min_component_size={sparse_min_component_size})"
     )
-
-    ax = frequent.visualize_graph(
-        show=False,
-        title="Environment 3",
-        xlabel="",
-        ylabel="",
-        title_fontsize=35,
-        label_fontsize=16,
-        tick_fontsize=25,
-        edge_color="red",
-        edge_linewidth=1,
-        edge_alpha=1,
-        figsize=(10, 10))
-
-    # Save the figure
-    fig = ax.figure
-    fig.tight_layout()
-    # fig.savefig("outputs_timeline/env3.png", dpi=600)
 
     return frequent.graph
 

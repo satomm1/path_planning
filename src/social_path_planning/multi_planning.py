@@ -30,7 +30,9 @@ MAX_VELOCITY_CHANGE_FACTOR = 1.5
 GEOM_MATCH_TOL = 1e-3  # meters; tolerate grid / DDS float slop when matching vertices or edges
 
 # Set True to save per-pair MILP z-assignment maps when MultiAgentSimultaneousPlanner.plan() runs.
-VIZ_MILP_Z_ASSIGNMENT = True
+# Off by default: the plots are written inside plan(), so leaving this on adds matplotlib
+# time to every benchmarked dense-MILP solve.
+VIZ_MILP_Z_ASSIGNMENT = False
 VIZ_MILP_Z_OUTPUT_DIR = "results/milp_z_viz"
 
 

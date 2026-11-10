@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from queue import PriorityQueue
+from heapq import heappop, heappush
 from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
@@ -11,6 +11,7 @@ import networkx as nx
 import numpy as np
 from scipy.interpolate import CubicSpline
 
+from social_path_planning.mapf_comparison.grid_traversability import fine_cell_center_world
 from social_path_planning.social_cost import rightness_penalty as compute_rightness_penalty
 
 if TYPE_CHECKING:
@@ -81,8 +82,8 @@ class AStar(object):
         self.dist_to_right = {}
         self.dist_to_right[self.x_init] = 0
 
-        self.priority_queue = PriorityQueue()
-        self.priority_queue.put((self.manhattan_distance(self.x_init, self.x_goal), self.x_init))
+        # Binary heap of (priority, state); same ordering as queue.PriorityQueue without its locking.
+        self.priority_queue = [(self.manhattan_distance(self.x_init, self.x_goal), self.x_init)]
 
         self.cost_to_arrive[self.x_init] = 0
 
@@ -263,12 +264,9 @@ class AStar(object):
         Neighbor states stay on the snapped grid (same lattice as start/goal). Passability
         is checked at the fine cell center (aligned with MAPF ``fine_center`` policy).
         """
-        from social_path_planning.mapf_comparison.grid_traversability import (
-            fine_cell_center_world,
-        )
-
         neighbors = []
         occ = self.occupancy
+        segment_check = getattr(occ, "requires_segment_collision_check", False)
         for ii in [1, 0, -1]:
             for jj in [1, 0, -1]:
                 if ii != 0 or jj != 0:
@@ -282,7 +280,7 @@ class AStar(object):
                     center = fine_cell_center_world(occ, col, row)
                     if not self.is_free(center):
                         continue
-                    if getattr(occ, "requires_segment_collision_check", False):
+                    if segment_check:
                         if not occ.is_segment_free(x, center):
                             continue
                     neighbors.append(state)
@@ -324,8 +322,8 @@ class AStar(object):
     def modified_solve(self, return_timing=False, return_telemetry=False, log_telemetry=False):
         self._begin_solve_telemetry("modified")
         t_start = time.time()
-        while self.priority_queue.qsize() > 0:
-            current_cost, x_current = self.priority_queue.get()
+        while self.priority_queue:
+            current_cost, x_current = heappop(self.priority_queue)
 
             if x_current == self.x_goal:
                 t_end = time.time()
@@ -342,6 +340,10 @@ class AStar(object):
                 print("A* took too long.")
                 return self._emit_solve_return(False, elapsed, "modified", return_timing, return_telemetry, log_telemetry)
 
+            if x_current in self.closed_set:
+                # Stale duplicate entry: re-expanding a closed state cannot improve any
+                # neighbor (cost_to_arrive only decreases), so skip it.
+                continue
             self.closed_set.add(x_current)
 
             for x_neigh in self.get_neighbors(x_current):
@@ -359,10 +361,11 @@ class AStar(object):
                     self.dist_to_right[x_neigh] = dist2right
                     self.came_from[x_neigh] = x_current
                     self.cost_to_arrive[x_neigh] = tentative_cost_to_arrive
-                    self.priority_queue.put(
+                    heappush(
+                        self.priority_queue,
                         (current_cost + cost_x_x_neigh + self.h(x_neigh)
                          - self.h(x_current),
-                         x_neigh)
+                         x_neigh),
                     )
         elapsed = time.time() - t_start
         self.last_solve_time = elapsed
@@ -371,8 +374,8 @@ class AStar(object):
     def vanilla_solve(self, return_timing=False, return_telemetry=False, log_telemetry=False):
         self._begin_solve_telemetry("vanilla")
         t_start = time.time()
-        while self.priority_queue.qsize() > 0:
-            current_cost, x_current = self.priority_queue.get()
+        while self.priority_queue:
+            current_cost, x_current = heappop(self.priority_queue)
 
             if x_current == self.x_goal:
                 t_end = time.time()
@@ -389,6 +392,10 @@ class AStar(object):
                 print("A* took too long.")
                 return self._emit_solve_return(False, elapsed, "vanilla", return_timing, return_telemetry, log_telemetry)
 
+            if x_current in self.closed_set:
+                # Stale duplicate entry: re-expanding a closed state cannot improve any
+                # neighbor (cost_to_arrive only decreases), so skip it.
+                continue
             self.closed_set.add(x_current)
 
             for x_neigh in self.get_neighbors(x_current):
@@ -401,10 +408,11 @@ class AStar(object):
                     cost_x_x_neigh = self.distance(x_current, x_neigh)
                     self.came_from[x_neigh] = x_current
                     self.cost_to_arrive[x_neigh] = tentative_cost_to_arrive
-                    self.priority_queue.put(
+                    heappush(
+                        self.priority_queue,
                         (current_cost + cost_x_x_neigh + self.h(x_neigh)
                          - self.h(x_current),
-                         x_neigh)
+                         x_neigh),
                     )
         elapsed = time.time() - t_start
         self.last_solve_time = elapsed
