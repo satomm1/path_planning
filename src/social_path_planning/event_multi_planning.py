@@ -598,6 +598,38 @@ def _encounter_mutex_uses_z(agent_a, agent_b, i_enter, i_exit, j_enter, j_exit):
     return not (goal_fixed or start_fixed)
 
 
+def _encounter_unschedulable_reason(agent_a, agent_b, i_enter, i_exit, j_enter, j_exit):
+    """
+    Why an encounter has no safe ordering under the window model, or None.
+
+    A robot whose goal is the encounter exit parks inside the window after "clearing"
+    it, and a robot whose start is the encounter enter is inside the window from t = 0.
+    When both robots park inside the window, whichever finishes first blocks the
+    other; when both start inside it, whichever waits blocks the other.
+    """
+    if _conflict_exit_is_goal(agent_a, i_exit) and _conflict_exit_is_goal(agent_b, j_exit):
+        return "both goals are inside the encounter window"
+    if _conflict_enter_is_start(agent_a, i_enter) and _conflict_enter_is_start(agent_b, j_enter):
+        return "both starts are inside the encounter window"
+    return None
+
+
+class EventMilpInfeasibleError(RuntimeError):
+    """
+    The event MILP has no safe solution because some encounter cannot be ordered
+    (see :func:`_encounter_unschedulable_reason`). Raised before solving.
+    """
+
+    def __init__(self, context, encounter_rows):
+        self.encounter_rows = list(encounter_rows)
+        details = "; ".join(
+            f"agents ({row['encounter'].agent_a},{row['encounter'].agent_b}) "
+            f"kind={row['encounter'].kind}: {row['unschedulable']}"
+            for row in self.encounter_rows
+        )
+        super().__init__(f"{context}: infeasible, no safe ordering for {details}")
+
+
 def _encounter_fixed_leader_is_a(agent_a, agent_b, i_enter, i_exit, j_enter, j_exit):
     """
     Return True when agent A must lead through a fixed-order encounter.
@@ -666,6 +698,7 @@ def _encounter_row(analysis, encounter):
     return {
         "z_index": None,
         "uses_z": _encounter_mutex_uses_z(agent_a, agent_b, i_enter, i_exit, j_enter, j_exit),
+        "unschedulable": _encounter_unschedulable_reason(agent_a, agent_b, i_enter, i_exit, j_enter, j_exit),
         "encounter": encounter,
         "i_enter": i_enter,
         "i_exit": i_exit,
@@ -1146,6 +1179,8 @@ def _print_event_milp_constraints(
                 f" -> indices enter={j_enter} ({_waypoint_label(agent_b, j_enter)}),"
                 f" exit={j_exit} ({_waypoint_label(agent_b, j_exit)})"
             )
+            if row.get("unschedulable"):
+                print(f"    NO SAFE ORDERING: {row['unschedulable']} (problem is reported infeasible)")
             for text in row.get("lines", []):
                 print(text)
     print("=== End formulation ===\n")
@@ -1209,6 +1244,7 @@ class EventMultiAgentPlanner:
         self.event_times = None
         self.mutex_constraint_count = 0
         self.num_z = 0
+        self.unschedulable_encounters = []
 
     def assign_path(self, paths):
         self.paths = paths
@@ -1284,6 +1320,7 @@ class EventMultiAgentPlanner:
 
         self.num_z = num_z
         self.mutex_constraint_count = mutex_constraint_count
+        self.unschedulable_encounters = [row for row in encounter_rows if row["unschedulable"]]
         _print_event_milp_summary(analysis, num_z, mutex_constraint_count)
         if print_constraints:
             _print_event_milp_constraints(
@@ -1300,6 +1337,12 @@ class EventMultiAgentPlanner:
         return cp.Minimize(cp.norm(final_time_vars, p=self.norm))
 
     def _solve(self, prob, agent_times, verbose):
+        if self.unschedulable_encounters:
+            # No ordering is safe (a robot starts or parks inside a shared window); do not
+            # return a schedule that drives one robot through the other.
+            self.event_times = None
+            self.solver_runtime_s = 0.0
+            raise EventMilpInfeasibleError(self._context, self.unschedulable_encounters)
         self.event_times, self.solver_runtime_s = _solve_event_problem(
             prob,
             agent_times,
